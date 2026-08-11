@@ -668,8 +668,8 @@ mod tests {
         );
     }
 
-    /// 分类优先级钉死：Builder > Timeout > refused > Dns > Connect，
-    /// 标志位优先于链文本特征，防止未来调整顺序时被文本误导。
+    /// 分类优先级钉死：标志位（Builder > Timeout）优先于链文本特征；
+    /// 文本特征内 refused > Dns > Connect。防止未来调整顺序时被文本误导。
     #[test]
     fn classify_priority_builder_timeout_over_text() {
         // is_builder 优先：即使链文本含 connection refused
@@ -686,6 +686,11 @@ mod tests {
         assert_eq!(
             classify_from_chain(true, false, false, "connection refused (os error 111)"),
             ExitErrorKind::Timeout
+        );
+        // 文本特征内 Dns 优先于 Connect（is_connect 不抢 DNS 文本）
+        assert_eq!(
+            classify_from_chain(false, true, false, "failed to lookup address"),
+            ExitErrorKind::Dns
         );
     }
 

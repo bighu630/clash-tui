@@ -406,7 +406,7 @@ rules:
         // 多行 base64（带换行）也应解码成功
         let links = "vless://uuid@1.2.3.4:443#X\ntrojan://pass@1.2.3.4:443#Y\n";
         let b64 = base64_encode(links);
-        let wrapped = format!("\n{}\n", b64);
+        let wrapped = format!("\n{b64}\n");
         let c = parse_subscription(&wrapped).unwrap();
         assert_eq!(c.proxies.len(), 2);
         assert_eq!(c.proxies[0].name, "X");

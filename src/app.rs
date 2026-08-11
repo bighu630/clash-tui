@@ -854,6 +854,22 @@ pub async fn run() -> Result<(), BoxError> {
         quit: false,
         terminal,
     };
+    // M6: 首次启动自动检测提权组件（README 承诺）。缺失时挂起确认框；
+    // 用户确认后由 run_interactive 离开 raw 模式/AltScreen 执行交互式 sudo 安装，
+    // 结束后恢复终端并弹结果（成功列日志行，失败列错误）。
+    if crate::service::installer::needs_install().await {
+        app.pending_confirm = Some((
+            ConfirmPopup::new(
+                "首次安装".to_string(),
+                "检测到首次运行：缺少提权组件。\n\
+                 将安装 /usr/local/sbin/mihomo-apply 提权脚本与\n\
+                 /etc/sudoers.d/99-mihomo 规则（期间需要 sudo 密码）。\n\
+                 是否继续？"
+                    .to_string(),
+            ),
+            InteractiveTask::Install,
+        ));
+    }
     let result = app.run_loop(traffic_rx, memory_rx, ui_rx, sudo_rx).await;
     let _ = app.terminal.show_cursor();
     result

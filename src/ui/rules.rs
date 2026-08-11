@@ -281,6 +281,8 @@ impl RulesPage {
         let target = new as usize;
         st.overrides.rules.swap(idx, target);
         if let Err(e) = save_overrides(&st.overrides) {
+            // 落盘失败回滚内存顺序，避免内存与磁盘不一致
+            st.overrides.rules.swap(idx, target);
             self.popup =
                 Some(RulePopup::Message(MessagePopup::new("保存失败".to_string(), vec![e.to_string()])));
             return None;

@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
@@ -132,6 +132,10 @@ const TABS: [&str; 4] = ["仪表盘", "订阅", "规则组", "规则"];
 
 const TRAFFIC_HISTORY: usize = 120;
 
+/// API 状态通知去抖窗口：同向状态变化在此窗口内不重复入列通知
+/// （traffic 流断连与 5s 轮询成功竞态会造成高频翻转刷屏）。
+const API_NOTICE_DEBOUNCE: Duration = Duration::from_secs(3);
+
 const HELP_LINES: &[&str] = &[
     "全局按键:",
     "  q / Ctrl-C / Esc   退出",
@@ -178,6 +182,8 @@ struct App {
     pending_confirm: Option<(ConfirmPopup, InteractiveTask)>,
     help_popup: Option<MessagePopup>,
     result_popup: Option<MessagePopup>,
+    /// 上次 API 状态通知时间（去抖用）
+    api_notice_at: Option<Instant>,
     tick_count: u64,
     quit: bool,
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
@@ -426,15 +432,33 @@ impl App {
                 }
                 self.state.traffic.push_back(frame);
             }
-            BgMsg::Api(ok) => {
-                let was = self.state.api_ok;
-                self.state.api_ok = ok;
-                if ok && !was {
-                    self.state.notice("[✓] API 已连接".to_string());
-                } else if !ok && was {
-                    self.state.notice("[✗] API 连接中断".to_string());
-                }
-            }
+            BgMsg::Api(ok) => self.set_api_ok(ok, None),
+        }
+    }
+
+    /// 更新 api_ok 并在状态翻转时通知；通知去抖：3s 内同向变化不重复入列。
+    /// （traffic 后台任务 Api(false) 与 5s 轮询 ConfigsRefreshed(Ok) 竞态
+    /// 会反复翻转状态，未去抖时 [✗] 中断 / [✓] 已连接 刷屏。）
+    fn set_api_ok(&mut self, ok: bool, err: Option<&str>) {
+        if self.state.api_ok == ok {
+            return;
+        }
+        self.state.api_ok = ok;
+        let now = Instant::now();
+        let debounced = self
+            .api_notice_at
+            .map(|t| now.duration_since(t) < API_NOTICE_DEBOUNCE)
+            .unwrap_or(false);
+        if debounced {
+            return;
+        }
+        self.api_notice_at = Some(now);
+        if ok {
+            self.state.notice("[✓] API 已连接".to_string());
+        } else if let Some(e) = err {
+            self.state.notice(format!("[✗] API 连接失败: {e}"));
+        } else {
+            self.state.notice("[✗] API 连接中断".to_string());
         }
     }
 
@@ -484,14 +508,19 @@ impl App {
                     if let Err(e) = save_subscriptions(&self.state.subs) {
                         self.state.notice(format!("[✗] 订阅存盘失败: {e}"));
                     }
-                    let name = self.state.subs.get(idx).map(|s| s.name.clone());
-                    self.state.notice(format!(
-                        "[✓] 订阅「{}」已更新: {} 节点 / {} 组 / {} 规则",
-                        name.unwrap_or_default(),
-                        cache.proxies.len(),
-                        cache.proxy_groups.len(),
-                        cache.rules.len()
-                    ));
+                    match self.state.subs.get(idx) {
+                        Some(sub) => self.state.notice(format!(
+                            "[✓] 订阅「{}」已更新: {} 节点 / {} 组 / {} 规则",
+                            sub.name,
+                            cache.proxies.len(),
+                            cache.proxy_groups.len(),
+                            cache.rules.len()
+                        )),
+                        // 拉取期间订阅被删除：不显示空名通知，明确提示
+                        None => self.state.notice(
+                            "[!] 订阅拉取完成，但该订阅已被删除（缓存已丢弃）".to_string(),
+                        ),
+                    }
                 }
                 Err(e) => self.popup_error("订阅拉取失败", e),
             },
@@ -506,20 +535,10 @@ impl App {
             },
             UiEvent::ConfigsRefreshed(res) => match res {
                 Ok(runtime) => {
-                    let was = self.state.api_ok;
                     self.state.runtime = runtime;
-                    self.state.api_ok = true;
-                    if !was {
-                        self.state.notice("[✓] API 已连接".to_string());
-                    }
+                    self.set_api_ok(true, None);
                 }
-                Err(e) => {
-                    let was = self.state.api_ok;
-                    self.state.api_ok = false;
-                    if was {
-                        self.state.notice(format!("[✗] API 连接失败: {e}"));
-                    }
-                }
+                Err(e) => self.set_api_ok(false, Some(&e)),
             },
         }
     }
@@ -850,6 +869,7 @@ pub async fn run() -> Result<(), BoxError> {
         pending_confirm: None,
         help_popup: None,
         result_popup: None,
+        api_notice_at: None,
         tick_count: 0,
         quit: false,
         terminal,

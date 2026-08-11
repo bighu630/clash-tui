@@ -398,6 +398,11 @@ impl RulesPage {
 }
 
 impl Page for RulesPage {
+    /// 页面内部弹窗打开时，全局键（Esc/Tab 等）交给页面处理。
+    fn popup_open(&self) -> bool {
+        self.popup.is_some()
+    }
+
     fn handle_key(&mut self, key: KeyEvent, st: &mut AppState) -> Option<UiCommand> {
         if key.kind == KeyEventKind::Release {
             return None;

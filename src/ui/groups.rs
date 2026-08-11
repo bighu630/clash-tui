@@ -195,7 +195,15 @@ impl GroupsPage {
                         g.proxies = st.overrides.groups[idx].proxies.clone();
                         st.overrides.groups[idx] = g;
                     }
-                    _ => st.overrides.groups.push(g),
+                    _ => {
+                        if g.proxies.is_empty() {
+                            st.notice(format!(
+                                "[!] 规则组「{}」暂无成员，按 m 勾选节点后即可应用",
+                                g.name
+                            ));
+                        }
+                        st.overrides.groups.push(g);
+                    }
                 }
                 if let Err(e) = save_overrides(&st.overrides) {
                     self.popup = Some(GroupPopup::Message(MessagePopup::new(
@@ -247,10 +255,20 @@ impl GroupsPage {
         None
     }
 
-    /// 成员确认：更新组.proxies + 落盘
+    /// 成员确认：更新组.proxies + 落盘。checked 为空 → 阻止保存（不更新、不落盘）并提示
     fn apply_members(&mut self, checked: Vec<String>, st: &mut AppState) -> Option<UiCommand> {
         if let Some(idx) = self.pending {
             if idx < st.overrides.groups.len() {
+                if checked.is_empty() {
+                    self.pending = None;
+                    self.popup = Some(GroupPopup::Message(MessagePopup::new(
+                        "成员不能为空".to_string(),
+                        vec![
+                            "规则组至少需要一个成员，mihomo 校验会拒绝空组。请至少勾选一个节点。".to_string(),
+                        ],
+                    )));
+                    return None;
+                }
                 st.overrides.groups[idx].proxies = checked;
                 if let Err(e) = save_overrides(&st.overrides) {
                     self.popup = Some(GroupPopup::Message(MessagePopup::new(

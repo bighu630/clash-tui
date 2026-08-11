@@ -32,15 +32,18 @@ mv -f "$TMP" "$CONFIG"
 # 5. 重启
 systemctl restart mihomo
 
-# 6. 健康检查：失败则回滚上一份配置并重启
-sleep 1
-if ! systemctl is-active --quiet mihomo; then
-  echo "ERROR: mihomo failed to start after apply, rolling back to previous config" >&2
-  if [ -f "$BACKUP" ]; then
-    mv -f "$BACKUP" "$CONFIG"
-    systemctl restart mihomo
+# 6. 健康检查：轮询最多 10 次（每次 0.5s，共 5s），服务未就绪则回滚上一份配置并重启
+for _ in $(seq 1 10); do
+  if systemctl is-active --quiet mihomo; then
+    echo "OK: config applied, mihomo restarted"
+    exit 0
   fi
-  exit 1
-fi
+  sleep 0.5
+done
 
-echo "OK: config applied, mihomo restarted"
+echo "ERROR: mihomo failed to start after apply, rolling back to previous config" >&2
+if [ -f "$BACKUP" ]; then
+  mv -f "$BACKUP" "$CONFIG"
+  systemctl restart mihomo
+fi
+exit 1

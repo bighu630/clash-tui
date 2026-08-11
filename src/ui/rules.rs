@@ -96,6 +96,12 @@ pub struct RulesPage {
     sig: String,
 }
 
+impl Default for RulesPage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RulesPage {
     pub fn new() -> Self {
         Self {

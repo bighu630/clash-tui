@@ -38,6 +38,12 @@ pub struct SubscriptionsPage {
     sig: String,
 }
 
+impl Default for SubscriptionsPage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SubscriptionsPage {
     pub fn new() -> Self {
         Self {
@@ -69,7 +75,8 @@ impl SubscriptionsPage {
     }
 
     fn sig_of(st: &AppState) -> String {
-        let items: Vec<(String, bool, Option<String>, Option<(usize, usize, usize)>)> = st
+        type Row = (String, bool, Option<String>, Option<(usize, usize, usize)>);
+        let items: Vec<Row> = st
             .subs
             .iter()
             .map(|s| {

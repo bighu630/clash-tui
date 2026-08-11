@@ -40,6 +40,12 @@ pub struct GroupsPage {
     sig: String,
 }
 
+impl Default for GroupsPage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GroupsPage {
     pub fn new() -> Self {
         Self {

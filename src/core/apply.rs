@@ -1,7 +1,6 @@
 //! 配置应用：`mihomo -t` 预校验（临时文件）→ `sudo [-n] /usr/local/sbin/mihomo-apply`（stdin 喂入）。
 //! 失败时把 mihomo/sudo 输出原样反馈给用户。
 
-use std::os::unix::fs::OpenOptionsExt;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 

@@ -273,7 +273,7 @@ enhanced_mode = "fake-ip"
 fake_ip_range = "198.18.0.1/16"
 nameserver = ["https://doh.pub/dns-query"]
 default_nameserver = ["223.5.5.5"]
-fallback = ["tls://8.8.4.4"]
+fallback = ["tls://dns.alidns.com", "tls://dot.pub"]
 fake_ip_filter = ["*.lan", "+.local"]
 ```
 

@@ -231,8 +231,14 @@ impl App {
             page.render(f, middle, st);
 
             // 底栏：通知 + 按键提示
+            // 通知最多占到底栏高度-1 行（最后一行是按键提示）；终端过小时直接截断，
+            // 避免 y 超出 buffer 导致 ratatui Buffer::index_of panic
+            let hint_y = bottom.y.saturating_add(bottom.height.saturating_sub(1));
             let mut y = bottom.y;
             for (text, ok) in notices.iter() {
+                if y >= hint_y {
+                    break;
+                }
                 let style = if *ok {
                     Style::default().fg(Color::Green)
                 } else if text.starts_with("[!]") {
@@ -246,10 +252,7 @@ impl App {
                 );
                 y += 1;
             }
-            KeyHints { hints: hints.clone() }.render(
-                f,
-                Rect::new(bottom.x, bottom.y + bottom.height - 1, bottom.width, 1),
-            );
+            KeyHints { hints: hints.clone() }.render(f, Rect::new(bottom.x, hint_y, bottom.width, 1));
 
             // 全局弹窗置顶
             if let Some(popup) = &mut self.help_popup {

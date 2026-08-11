@@ -688,6 +688,10 @@ impl SelectList {
         }
         let inner = block.inner(area);
         f.render_widget(block, area);
+        // 终端过小（块内无可用行）时跳过列表渲染，避免 y+1 越界 panic
+        if inner.height == 0 {
+            return;
+        }
 
         self.rows = inner.height as usize;
         if self.selected >= self.items.len() {
@@ -958,5 +962,17 @@ mod tests {
         list.handle_key(key(KeyCode::Char('j')));
         list.handle_key(key(KeyCode::Char('j'))); // 越界不动
         assert_eq!(list.selected(), 2);
+    }
+
+    #[test]
+    fn select_list_render_tiny_area_no_panic() {
+        use ratatui::backend::TestBackend;
+        // 高度 0/1/2 时块内无可用行（inner.height == 0），早期返回不 panic
+        for h in [0u16, 1, 2, 3] {
+            let backend = TestBackend::new(20, h);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            let mut list = SelectList::new(vec!["a".into(), "b".into(), "c".into()]);
+            terminal.draw(|f| list.render(f, f.area())).unwrap();
+        }
     }
 }

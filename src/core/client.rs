@@ -141,12 +141,15 @@ impl Client {
 
     /// PATCH /configs（热切换 mode/ipv6/tun.enable 等）。
     pub async fn patch_configs(&self, patch: serde_json::Value) -> Result<(), ApiError> {
-        let resp = self
+        let mut req = self
             .http
             .patch(self.url("/configs"))
             .timeout(REQUEST_TIMEOUT)
-            .header(AUTHORIZATION, self.auth_header())
-            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_TYPE, "application/json");
+        if let Some(auth) = self.auth_header() {
+            req = req.header(AUTHORIZATION, auth);
+        }
+        let resp = req
             .body(patch.to_string())
             .send()
             .await
@@ -180,14 +183,14 @@ impl Client {
         method: reqwest::Method,
         path: &str,
     ) -> Result<String, ApiError> {
-        let resp = self
+        let mut req = self
             .http
             .request(method, self.url(path))
-            .timeout(REQUEST_TIMEOUT)
-            .header(AUTHORIZATION, self.auth_header())
-            .send()
-            .await
-            .map_err(|e| ApiError::Conn(e.to_string()))?;
+            .timeout(REQUEST_TIMEOUT);
+        if let Some(auth) = self.auth_header() {
+            req = req.header(AUTHORIZATION, auth);
+        }
+        let resp = req.send().await.map_err(|e| ApiError::Conn(e.to_string()))?;
         let status = resp.status();
         let text = resp
             .text()
@@ -203,21 +206,24 @@ impl Client {
         &self,
         path: &str,
     ) -> Result<reqwest::Response, ApiError> {
-        let resp = self
-            .http
-            .get(self.url(path))
-            .header(AUTHORIZATION, self.auth_header())
-            .send()
-            .await
-            .map_err(|e| ApiError::Conn(e.to_string()))?;
+        let mut req = self.http.get(self.url(path));
+        if let Some(auth) = self.auth_header() {
+            req = req.header(AUTHORIZATION, auth);
+        }
+        let resp = req.send().await.map_err(|e| ApiError::Conn(e.to_string()))?;
         if !resp.status().is_success() {
             return Err(ApiError::Status(resp.status().as_u16()));
         }
         Ok(resp)
     }
 
-    fn auth_header(&self) -> String {
-        format!("Bearer {}", self.secret)
+    /// Bearer 鉴权头：secret 为空时不发送（避免发出 `Authorization: Bearer `）。
+    fn auth_header(&self) -> Option<String> {
+        if self.secret.is_empty() {
+            None
+        } else {
+            Some(format!("Bearer {}", self.secret))
+        }
     }
 }
 
@@ -478,6 +484,25 @@ mod tests {
             "应带 Bearer 鉴权: {req}"
         );
         assert!(req_lower.contains("content-type: application/json"));
+    }
+
+    #[tokio::test]
+    async fn patch_configs_without_secret_omits_auth_header() {
+        let (port, mut rx) = spawn_api_server().await;
+        let client = Client::new(&NetworkSettings {
+            external_controller: format!("127.0.0.1:{port}"),
+            secret: String::new(),
+            ..NetworkSettings::default()
+        });
+        client
+            .patch_configs(serde_json::json!({"mode": "global"}))
+            .await
+            .unwrap();
+        let req = rx.recv().await.expect("服务器应收到请求");
+        assert!(
+            !req.to_lowercase().contains("authorization"),
+            "空 secret 不应带鉴权头: {req}"
+        );
     }
 
     #[tokio::test]

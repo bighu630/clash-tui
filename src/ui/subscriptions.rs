@@ -146,7 +146,7 @@ impl SubscriptionsPage {
         Some(UiCommand::FetchSubscription(idx))
     }
 
-    /// Enter：激活选中。先校验缓存存在（M3：无缓存不进入 merge/apply），
+    /// Enter：激活选中。先校验缓存存在且非空（M3：坏订阅/无缓存不进入 merge/apply），
     /// 再 merge（M4：失败不动 active 标记），成功后才置 active 并落盘。
     /// Ok: notice(warnings)+ApplyConfig；Err: MessagePopup 全文
     fn activate_selected(&mut self, st: &mut AppState) -> Option<UiCommand> {
@@ -165,6 +165,21 @@ impl SubscriptionsPage {
             )));
             return None;
         }
+        // M3 残留：cache 存在但无节点（坏订阅）同样拒绝激活，避免空配置静默应用
+        if st.subs[idx]
+            .cache
+            .as_ref()
+            .is_some_and(|c| c.proxies.is_empty())
+        {
+            self.popup = Some(SubPopup::Message(MessagePopup::new(
+                "无法激活".to_string(),
+                vec![format!(
+                    "订阅「{}」没有可用节点，请检查订阅内容",
+                    st.subs[idx].name
+                )],
+            )));
+            return None;
+        }
         // M4：先合并。失败时不改动 active 标记与落盘状态
         match merge(MergeContext {
             settings: &st.settings,
@@ -172,10 +187,15 @@ impl SubscriptionsPage {
             subscription: Some(&st.subs[idx]),
         }) {
             Ok(out) => {
+                // 记住原 active 标记，落盘失败时回滚内存（M4 残留：内存已改磁盘未落）
+                let prev_active = st.subs.iter().position(|s| s.active);
                 for (i, s) in st.subs.iter_mut().enumerate() {
                     s.active = i == idx;
                 }
                 if let Err(e) = save_subscriptions(&st.subs) {
+                    for (i, s) in st.subs.iter_mut().enumerate() {
+                        s.active = Some(i) == prev_active;
+                    }
                     self.popup = Some(SubPopup::Message(MessagePopup::new(
                         "保存失败".to_string(),
                         vec![e.to_string()],

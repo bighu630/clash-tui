@@ -119,6 +119,8 @@ impl Page for DashboardPage {
                 KeyCode::Char('s') => {
                     self.popup = Some(DashPopup::Form(settings_form(&st.settings)));
                 }
+                // M6 遗留：首启拒绝安装后的重试入口（提权组件缺失时可用）
+                KeyCode::Char('i') => return Some(UiCommand::InstallSetup),
                 _ => {}
             },
         }

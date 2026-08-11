@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
-use ratatui::backend::CrosstermBackend;
+use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
-use ratatui::Terminal;
+use ratatui::{CompletedFrame, Terminal};
 use tokio::sync::mpsc;
 
 use crate::core::apply::{apply_config, validate_config, ApplyOutcome};
@@ -148,6 +148,7 @@ const HELP_LINES: &[&str] = &[
     "  6                  开关 IPv6",
     "  r                  刷新出口 IP",
     "  s                  网络设置（保存后自动合并并应用）",
+    "  i                  安装提权组件（首次启动拒绝后的重试入口）",
     "",
     "订阅管理:",
     "  a                  添加订阅",
@@ -168,7 +169,7 @@ const HELP_LINES: &[&str] = &[
     "  d                  删除规则",
 ];
 
-struct App {
+struct App<B: Backend> {
     state: AppState,
     pages: Vec<Box<dyn Page>>,
     current: usize,
@@ -186,11 +187,17 @@ struct App {
     api_notice_at: Option<Instant>,
     tick_count: u64,
     quit: bool,
-    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: Terminal<B>,
 }
 
-impl App {
-    fn draw(&mut self) -> Result<(), BoxError> {
+impl<B> App<B>
+where
+    B: Backend,
+    // Terminal 操作的错误需能装箱进 BoxError（Box<dyn Error + Send + Sync>）
+    B::Error: Send + Sync + 'static,
+{
+    /// 渲染一帧。返回 CompletedFrame 供回归测试检查 buffer（通知行/按键提示行不越界）。
+    fn draw(&mut self) -> Result<CompletedFrame<'_>, BoxError> {
         let tabs: Vec<String> = TABS.iter().map(|s| s.to_string()).collect();
         let current = self.current;
         let notices: Vec<(String, bool)> = self
@@ -203,7 +210,7 @@ impl App {
             .collect();
         let hints = page_hints(current);
 
-        self.terminal.draw(|f| {
+        let frame = self.terminal.draw(|f| {
             let area = f.area();
             let [top, middle, bottom] = Layout::vertical([
                 Constraint::Length(3),
@@ -220,7 +227,10 @@ impl App {
                 ))
                 .borders(Borders::ALL);
             f.render_widget(block, top);
-            let tabs_area = Rect::new(top.x + 1, top.y + 1, top.width.saturating_sub(2), 1);
+            // 超小终端下 tabs_area 可能与 buffer 无交集（如 h=1 时 top.y+1 已越界）；
+            // Tabs 不做 intersection 裁剪，必须提前 clamp 成空区域让它直接返回
+            let tabs_area =
+                Rect::new(top.x + 1, top.y + 1, top.width.saturating_sub(2), 1).intersection(area);
             f.render_widget(
                 Tabs::new(tabs.iter().map(|t| Line::raw(t.clone())))
                     .select(current)
@@ -239,12 +249,8 @@ impl App {
             // 底栏：通知 + 按键提示
             // 通知最多占到底栏高度-1 行（最后一行是按键提示）；终端过小时直接截断，
             // 避免 y 超出 buffer 导致 ratatui Buffer::index_of panic
-            let hint_y = bottom.y.saturating_add(bottom.height.saturating_sub(1));
-            let mut y = bottom.y;
-            for (text, ok) in notices.iter() {
-                if y >= hint_y {
-                    break;
-                }
+            let (notice_rows, hint_y) = bottom_bar_rows(bottom, area.height);
+            for (i, (text, ok)) in notices.iter().take(notice_rows as usize).enumerate() {
                 let style = if *ok {
                     Style::default().fg(Color::Green)
                 } else if text.starts_with("[!]") {
@@ -254,11 +260,13 @@ impl App {
                 };
                 f.render_widget(
                     Paragraph::new(Span::styled(text.clone(), style)),
-                    Rect::new(bottom.x, y, bottom.width, 1),
+                    Rect::new(bottom.x, bottom.y + i as u16, bottom.width, 1),
                 );
-                y += 1;
             }
-            KeyHints { hints: hints.clone() }.render(f, Rect::new(bottom.x, hint_y, bottom.width, 1));
+            if let Some(hint_y) = hint_y {
+                KeyHints { hints: hints.clone() }
+                    .render(f, Rect::new(bottom.x, hint_y, bottom.width, 1));
+            }
 
             // 全局弹窗置顶
             if let Some(popup) = &mut self.help_popup {
@@ -271,7 +279,7 @@ impl App {
                 popup.render(f, area);
             }
         })?;
-        Ok(())
+        Ok(frame)
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<KeyAction> {
@@ -679,6 +687,26 @@ impl App {
     }
 }
 
+/// 底栏渲染行计算（纯函数，供小终端回归测试）：
+/// 输入底栏区域与全屏高度，返回 (通知可渲染行数, 按键提示行 hint_y)。
+/// 保证任意输入下：通知行与 hint_y 都不越出 [0, area_height)；
+/// 底栏完全不可见（bottom.y >= area_height）时返回 (0, None)（通知与提示都不渲染）。
+/// 此前 bottom.height=0 时 hint_y = bottom.y.saturating_add(0) 可能等于 area_height，
+/// 越出 buffer 顶导致 KeyHints 渲染 panic（h=1/2 终端）。
+fn bottom_bar_rows(bottom: Rect, area_height: u16) -> (u16, Option<u16>) {
+    if area_height == 0 || bottom.y >= area_height {
+        return (0, None);
+    }
+    // 最后一行放按键提示，且必须落在屏幕内
+    let hint_y = bottom
+        .y
+        .saturating_add(bottom.height.saturating_sub(1))
+        .min(area_height - 1);
+    // 通知从 bottom.y 开始，最多渲染到 hint_y-1（保留最后一行给提示）
+    let notice_rows = hint_y.saturating_sub(bottom.y);
+    (notice_rows, Some(hint_y))
+}
+
 fn page_hints(current: usize) -> Vec<(String, String)> {
     let mut hints: Vec<(String, String)> = match current {
         0 => vec![
@@ -687,6 +715,7 @@ fn page_hints(current: usize) -> Vec<(String, String)> {
             ("6".into(), "IPv6".into()),
             ("r".into(), "出口IP".into()),
             ("s".into(), "设置".into()),
+            ("i".into(), "安装".into()),
         ],
         1 => vec![
             ("a".into(), "添加".into()),
@@ -893,4 +922,107 @@ pub async fn run() -> Result<(), BoxError> {
     let result = app.run_loop(traffic_rx, memory_rx, ui_rx, sudo_rx).await;
     let _ = app.terminal.show_cursor();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    /// 底栏行计算纯函数：任意终端高度下提示行与通知行数都不越界。
+    /// 回归：h=1/2 时 bottom.height=0，此前 hint_y=bottom.y 越出 buffer 顶。
+    #[test]
+    fn bottom_bar_rows_always_in_bounds() {
+        for h in 0..=30u16 {
+            let area = Rect::new(0, 0, 30, h);
+            let [_, _, bottom] = Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Min(1),
+                Constraint::Length(4),
+            ])
+            .areas(area);
+            let (notice_rows, hint_y) = bottom_bar_rows(bottom, h);
+            assert!(notice_rows <= h, "h={h}: notice_rows {notice_rows} > 高度");
+            match hint_y {
+                Some(y) => {
+                    assert!(y < h, "h={h}: hint_y {y} >= 高度");
+                    assert!(y >= bottom.y, "h={h}: hint_y {y} < bottom.y {}", bottom.y);
+                    assert_eq!(
+                        y - bottom.y,
+                        notice_rows,
+                        "h={h}: 通知行数应等于 hint_y - bottom.y"
+                    );
+                }
+                None => assert_eq!(notice_rows, 0, "h={h}: 无提示行时通知也应为 0"),
+            }
+        }
+    }
+
+    /// 小终端回归：h=0/1/2（及常规高度）整帧渲染不 panic 且按键提示行不越界。
+    /// 此前 h=1/2 时 hint_y 越出 buffer，KeyHints 渲染触发 ratatui Buffer::index_of panic。
+    #[test]
+    fn draw_tiny_terminal_no_panic() {
+        for h in [0u16, 1, 2, 3, 4, 5, 6, 7, 24] {
+            let mut app = test_app(h);
+            app.state.notice("[✓] 通知一".to_string());
+            app.state.notice("[✗] 通知二".to_string());
+            app.state.notice("[!] 通知三".to_string());
+            let frame = app.draw().expect("draw 不应失败");
+            // 高度 >= 3 时按键提示应渲染在最后一行（以 [ 起始），且不越界
+            if h >= 3 {
+                let cell = frame
+                    .buffer
+                    .cell((0, h - 1))
+                    .expect("提示行应落在 buffer 内");
+                assert!(
+                    cell.symbol().starts_with('['),
+                    "h={h}: 最后一行应为按键提示，实际 {:?}",
+                    cell.symbol()
+                );
+            }
+        }
+    }
+
+    /// 构造最小 App（TestBackend 终端），不触盘、不建后台任务。
+    fn test_app(h: u16) -> App<TestBackend> {
+        let state = AppState {
+            settings: NetworkSettings::default(),
+            subs: Vec::new(),
+            overrides: Overrides::default(),
+            runtime: RuntimeConfig::default(),
+            api_ok: false,
+            traffic: VecDeque::new(),
+            mem_history: VecDeque::new(),
+            exit_ip: None,
+            notices: VecDeque::new(),
+        };
+        let (ui_tx, _) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (sudo_tx, _) = mpsc::unbounded_channel();
+        let (exit_trigger, _) = mpsc::unbounded_channel();
+        let client = Arc::new(Client::new(&state.settings));
+        App {
+            state,
+            pages: vec![
+                Box::new(DashboardPage::new()),
+                Box::new(SubscriptionsPage::new()),
+                Box::new(GroupsPage::new()),
+                Box::new(RulesPage::new()),
+            ],
+            current: 0,
+            client,
+            ui_tx,
+            cmd_tx,
+            cmd_rx,
+            sudo_tx,
+            exit_trigger,
+            pending_confirm: None,
+            help_popup: None,
+            result_popup: None,
+            api_notice_at: None,
+            tick_count: 0,
+            quit: false,
+            terminal: Terminal::new(TestBackend::new(30, h)).unwrap(),
+        }
+    }
 }

@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::core::models::{NetworkSettings, Overrides, Subscription};
@@ -17,7 +18,7 @@ pub enum SettingsError {
     Yaml(String),
 }
 
-/// 配置目录：$HOME/.config/mihomo-tui（不存在则创建）。
+/// 配置目录：$HOME/.config/mihomo-tui（不存在则创建，权限 0700——配置含代理密码）。
 /// MIHOMO_TUI_SETTINGS_DIR 环境变量可覆盖（测试与 merge_sample 使用）。
 pub fn config_dir() -> PathBuf {
     let dir = std::env::var("MIHOMO_TUI_SETTINGS_DIR")
@@ -27,6 +28,8 @@ pub fn config_dir() -> PathBuf {
             PathBuf::from(home).join(".config").join("mihomo-tui")
         });
     let _ = fs::create_dir_all(&dir);
+    // 隐私：配置文件含代理密码，目录收紧到仅本人可读
+    let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
     dir
 }
 
@@ -113,6 +116,8 @@ fn atomic_write(path: &Path, body: &[u8]) -> Result<(), SettingsError> {
     let tmp = dir.join(format!(".{name}.tmp{}", std::process::id()));
     let result = (|| -> std::io::Result<()> {
         let mut f = fs::File::create(&tmp)?;
+        // 隐私：配置文件含代理密码，0600（rename 保留临时文件权限）
+        f.set_permissions(fs::Permissions::from_mode(0o600))?;
         f.write_all(body)?;
         f.sync_all()?;
         fs::rename(&tmp, path)?;
@@ -261,6 +266,20 @@ mod tests {
     fn missing_overrides_is_default() {
         with_dir(|| {
             assert_eq!(load_overrides().unwrap(), Overrides::default());
+        });
+    }
+
+    #[test]
+    fn settings_dir_and_files_are_private() {
+        with_dir(|| {
+            // 配置目录 0700
+            let dir_mode = fs::metadata(config_dir()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o700, "配置目录应为 0700");
+            // 配置文件 0600（原子写后）
+            let s = NetworkSettings::default();
+            save_settings(&s).unwrap();
+            let file_mode = fs::metadata(settings_path()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(file_mode, 0o600, "配置文件应为 0600");
         });
     }
 }

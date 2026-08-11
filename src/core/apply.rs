@@ -1,9 +1,11 @@
 //! 配置应用：`mihomo -t` 预校验（临时文件）→ `sudo [-n] /usr/local/sbin/mihomo-apply`（stdin 喂入）。
 //! 失败时把 mihomo/sudo 输出原样反馈给用户。
 
+use std::os::unix::fs::OpenOptionsExt;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::core::settings::config_dir;
@@ -13,6 +15,16 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 fn tmp_path(name: &str) -> std::path::PathBuf {
     let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     config_dir().join(format!(".{name}.{}.{n}.tmp", std::process::id()))
+}
+
+/// 写临时文件（0600：内容含代理密码/secret，不能按默认 0644 落盘）。
+async fn write_secret_file(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true).mode(0o600);
+    let mut f = opts.open(path).await?;
+    f.write_all(body.as_bytes()).await?;
+    f.sync_all().await?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -42,7 +54,7 @@ const APPLY_TMP: &str = "apply";
 /// 写临时文件 → `mihomo -t -f` 校验；失败返回 mihomo 原始 stderr。
 pub async fn validate_config(yaml: &str) -> Result<(), ApplyError> {
     let path = tmp_path(VALIDATE_TMP);
-    tokio::fs::write(&path, yaml)
+    write_secret_file(&path, yaml)
         .await
         .map_err(|e| ApplyError::Io(e.to_string()))?;
     let result = run_capture("mihomo", &["-t", "-f", path.to_str().unwrap()], None).await;
@@ -65,7 +77,7 @@ pub async fn validate_config(yaml: &str) -> Result<(), ApplyError> {
 /// non_interactive=true 且 sudo 提示密码 → SudoNeedsPassword。
 pub async fn apply_config(yaml: &str, non_interactive: bool) -> Result<ApplyOutcome, ApplyError> {
     let path = tmp_path(APPLY_TMP);
-    tokio::fs::write(&path, yaml)
+    write_secret_file(&path, yaml)
         .await
         .map_err(|e| ApplyError::Io(e.to_string()))?;
     let mut args = Vec::new();

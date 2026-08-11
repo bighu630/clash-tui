@@ -3,7 +3,7 @@
 //! 契约见 docs/superpowers/plans/2026-08-10-mihomo-tui.md §2/§3。
 //! 列表行：`[★] 名称 | 节点N 组N 规则N | 上次拉取`；无订阅时提示按 a 添加。
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Paragraph};
@@ -146,28 +146,42 @@ impl SubscriptionsPage {
         Some(UiCommand::FetchSubscription(idx))
     }
 
-    /// Enter：激活选中（其余清 false）→ 落盘 → merge → Ok: notice(warnings)+ApplyConfig；Err: MessagePopup 全文
+    /// Enter：激活选中。先校验缓存存在（M3：无缓存不进入 merge/apply），
+    /// 再 merge（M4：失败不动 active 标记），成功后才置 active 并落盘。
+    /// Ok: notice(warnings)+ApplyConfig；Err: MessagePopup 全文
     fn activate_selected(&mut self, st: &mut AppState) -> Option<UiCommand> {
         let idx = self.list.selected();
         if idx >= st.subs.len() {
             return None;
         }
-        for (i, s) in st.subs.iter_mut().enumerate() {
-            s.active = i == idx;
-        }
-        if let Err(e) = save_subscriptions(&st.subs) {
+        // M3：无缓存订阅（未拉取过）直接拒绝激活，避免空配置静默替换旧配置
+        if st.subs[idx].cache.is_none() {
             self.popup = Some(SubPopup::Message(MessagePopup::new(
-                "保存失败".to_string(),
-                vec![e.to_string()],
+                "无法激活".to_string(),
+                vec![format!(
+                    "订阅「{}」尚未拉取，请先按 r 刷新",
+                    st.subs[idx].name
+                )],
             )));
             return None;
         }
+        // M4：先合并。失败时不改动 active 标记与落盘状态
         match merge(MergeContext {
             settings: &st.settings,
             overrides: &st.overrides,
             subscription: Some(&st.subs[idx]),
         }) {
             Ok(out) => {
+                for (i, s) in st.subs.iter_mut().enumerate() {
+                    s.active = i == idx;
+                }
+                if let Err(e) = save_subscriptions(&st.subs) {
+                    self.popup = Some(SubPopup::Message(MessagePopup::new(
+                        "保存失败".to_string(),
+                        vec![e.to_string()],
+                    )));
+                    return None;
+                }
                 let msg = if out.warnings.is_empty() {
                     "[✓] 配置已合并，正在应用".to_string()
                 } else {
@@ -289,8 +303,21 @@ impl Page for SubscriptionsPage {
     fn render(&mut self, f: &mut Frame, area: Rect, st: &AppState) {
         let sig = Self::sig_of(st);
         if sig != self.sig {
+            // 重建列表时按名称恢复选中（缓存更新等导致 sig 变化时避免选中跳回顶部）
+            let prev_name = st
+                .subs
+                .get(self.list.selected())
+                .map(|s| s.name.clone());
             self.sig = sig;
             self.list = Self::rebuild_list(st);
+            if let Some(name) = prev_name {
+                if let Some(target) = st.subs.iter().position(|s| s.name == name) {
+                    for _ in 0..target {
+                        self.list
+                            .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+                    }
+                }
+            }
         }
         if st.subs.is_empty() {
             let hint = Paragraph::new(Line::from("无订阅，按 a 添加"))

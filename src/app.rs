@@ -543,7 +543,18 @@ where
                 }
                 Err(e) => {
                     self.state.exit_ip = None;
-                    self.state.notice(format!("[✗] 出口 IP 获取失败: {e}"));
+                    // 聚合错误可能很长（多端口 × 多端点）：notice 截断至首行
+                    // 约 60 字符，完整错误保留在可滚动的 popup 中。
+                    let head: String = e
+                        .split('\n')
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(60)
+                        .collect();
+                    self.result_popup =
+                        Some(MessagePopup::new("出口 IP 获取失败".into(), vec![e]));
+                    self.state.notice(format!("[✗] 出口 IP 获取失败: {head}"));
                 }
             },
             UiEvent::ConfigsRefreshed(res) => match res {

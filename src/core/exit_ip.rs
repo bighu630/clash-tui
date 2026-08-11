@@ -76,8 +76,8 @@ enum ParseMode {
     Ipip,
 }
 
-/// 逐候选端口探测：每端口构建独立 Client（timeout 8s），依次请求端点，
-/// 成功解析出 IP 立即返回；全部失败返回聚合错误（每端口一行摘要）。
+/// 逐候选端口探测：每端口构建独立 Client（单请求 timeout 8s，单端口总预算 30s），
+/// 依次请求端点，成功解析出 IP 立即返回；全部失败返回聚合错误（每端口一行摘要）。
 pub async fn fetch_exit_ip(ports: &ProxyPorts) -> Result<String, String> {
     let candidates = ports.candidates();
     if candidates.is_empty() {
@@ -87,31 +87,36 @@ pub async fn fetch_exit_ip(ports: &ProxyPorts) -> Result<String, String> {
     for (port, scheme) in candidates {
         let proxy_url = match scheme {
             Scheme::Http => format!("http://127.0.0.1:{port}"),
-            Scheme::Socks5 => format!("socks5://127.0.0.1:{port}"),
+            // socks5h：域名由远端（mihomo）解析，与 HTTP 候选语义一致
+            Scheme::Socks5 => format!("socks5h://127.0.0.1:{port}"),
         };
-        let client = match reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all(&proxy_url).map_err(|e| e.to_string())?)
-            .timeout(Duration::from_secs(8))
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                summaries.push(format!(
-                    "127.0.0.1:{port}({scheme}) 服务全失败（最后错误: {e}）"
-                ));
-                continue;
+        // 单端口总预算 30s（含 client 构建与全部端点尝试）：超时按该端口
+        // "服务全失败（超时）" 计入 summaries，继续下一端口。
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            // client 构建失败（Proxy::all 解析失败 / builder 错误）不短路整个
+            // 函数，作为该端口失败并入 summaries。
+            let client = reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all(&proxy_url).map_err(|e| e.to_string())?)
+                .timeout(Duration::from_secs(8))
+                .build()
+                .map_err(|e| e.to_string())?;
+            let mut last_err = String::new();
+            for (url, mode) in ENDPOINTS {
+                match fetch_one(&client, url, *mode).await {
+                    Ok(ip) => return Ok(ip),
+                    Err(e) => last_err = e,
+                }
             }
-        };
-        let mut last_err = String::new();
-        for (url, mode) in ENDPOINTS {
-            match fetch_one(&client, url, *mode).await {
-                Ok(ip) => return Ok(ip),
-                Err(e) => last_err = e,
-            }
+            Err(last_err)
+        })
+        .await;
+        match result {
+            Ok(Ok(ip)) => return Ok(ip),
+            Ok(Err(last_err)) => summaries.push(format!(
+                "127.0.0.1:{port}({scheme}) 服务全失败（最后错误: {last_err}）"
+            )),
+            Err(_) => summaries.push(format!("127.0.0.1:{port}({scheme}) 服务全失败（超时）")),
         }
-        summaries.push(format!(
-            "127.0.0.1:{port}({scheme}) 服务全失败（最后错误: {last_err}）"
-        ));
     }
     Err(format!("出口 IP 获取失败: {}", summaries.join("; ")))
 }
@@ -213,14 +218,21 @@ fn is_ipv4_strict(s: &str) -> bool {
 }
 
 /// IPv6 松校验：hex 组（1-4 位十六进制），允许单个 "::" 压缩
-/// （空组须相邻，全冒号串仅 "::" 合法），允许 % zone id。
+/// （空组须相邻，全冒号串仅 "::" 合法）。
+/// % zone id 不真正支持：校验前按 '%' 截断仅看主地址部分，且外层字符过滤
+/// 只放行 hex digit 与 ':' '.' '%'，故 % 后仅纯 hex 或空后缀（如 %25）能
+/// 通过，真实 zone id（如 %eth0）会被字符过滤拒绝。
 fn is_ipv6_loose(s: &str) -> bool {
     let addr = s.split('%').next().unwrap_or(s);
     if addr.is_empty() {
         return false;
     }
     let groups: Vec<&str> = addr.split(':').collect();
-    if groups.len() > 8 {
+    // 组数判据：非空组数 + (存在空组 ? 1 : 0) ≤ 8。不能直接用 split(':') 的
+    // 元素数判组数——"1:2:3:4:5:6:7::" 拆出 9 个元素，但实际是 7 段 + "::"
+    // 压缩 1 段 = 8 组，合法；而 "1::2:3:4:5:6:7:8" 为 8 段 + "::" = 9 组，非法。
+    let non_empty = groups.iter().filter(|g| !g.is_empty()).count();
+    if non_empty + usize::from(groups.iter().any(|g| g.is_empty())) > 8 {
         return false;
     }
     // 全冒号串仅 "::" 合法（":"、":::" 等拒绝）
@@ -234,7 +246,8 @@ fn is_ipv6_loose(s: &str) -> bool {
         .map(|(i, _)| i)
         .collect();
     // "::" 压缩产生 1~2 个空组（"::1"→[0,1]、"1::"→[1,2]、"2001:db8::1"→[2]）；
-    // 空组须相邻，否则形如 "1::2::3" 拒绝
+    // 空组须相邻，否则形如 "1::2::3" 拒绝。
+    // 裸 "::" 拆出 3 个空组（[0,1,2]）> 2 在此被拒：未指定地址，不视为合法 IP。
     if empties.len() > 2 {
         return false;
     }
@@ -272,6 +285,26 @@ mod tests {
         assert_eq!(parse_plain("1.2.3.4.5"), None); // 段数过多
         assert_eq!(parse_plain("1.2.3.4 "), Some("1.2.3.4".to_string())); // trim 后合法
         assert_eq!(parse_plain("256.1.1.1"), None); // 越界
+    }
+
+    #[test]
+    fn ipv6_loose_group_count_uses_compression() {
+        // split(':') 元素数 ≠ 组数："1:2:3:4:5:6:7::" 拆出 9 个元素，但为
+        // 7 段 + "::" 压缩 1 段 = 8 组，合法。
+        assert!(is_ipv6_loose("1:2:3:4:5:6:7::"));
+        assert!(is_ipv6_loose("::1:2:3:4:5:6:7"));
+        assert!(is_ipv6_loose("1:2:3:4:5:6:7:8"));
+        assert!(is_ipv6_loose("1::"));
+        assert!(is_ipv6_loose("2001:db8::1"));
+        // 8 段 + "::" 压缩 = 9 组，超出上限，非法
+        assert!(!is_ipv6_loose("1::2:3:4:5:6:7:8"));
+        assert!(!is_ipv6_loose("1:2:3:4:5:6:7:8::"));
+        // 裸 "::"（未指定地址）仍拒绝
+        assert!(!is_ipv6_loose("::"));
+        // 多个 "::" 拒绝
+        assert!(!is_ipv6_loose("1::2::3"));
+        // 非法 hex 组拒绝
+        assert!(!is_ipv6_loose("1:2:3:4:5:6:7:gg"));
     }
 
     #[test]

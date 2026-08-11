@@ -40,6 +40,26 @@ fn str_seq<I: IntoIterator<Item = S>, S: Into<String>>(items: I) -> Value {
     Value::Sequence(items.into_iter().map(|s| Value::String(s.into())).collect())
 }
 
+/// 注入自动组「🚀 节点选择」（组员=全部节点名）。组名已存在时跳过（保留自定义同名组）。
+fn inject_auto_group(
+    groups: &mut Vec<Value>,
+    group_names: &mut Vec<String>,
+    node_names: &[String],
+    warnings: &mut Vec<String>,
+    reason: &str,
+) {
+    if group_names.iter().any(|n| n == AUTO_GROUP_NAME) {
+        return;
+    }
+    warnings.push(format!("{reason}，已注入自动组「{AUTO_GROUP_NAME}」"));
+    let mut m = Mapping::new();
+    kv(&mut m, "name", AUTO_GROUP_NAME);
+    kv(&mut m, "type", "select");
+    kv(&mut m, "proxies", str_seq(node_names.iter().cloned()));
+    groups.push(Value::Mapping(m));
+    group_names.push(AUTO_GROUP_NAME.to_string());
+}
+
 /// Value 的展示串（非字符串元素用 Debug）。
 fn val_str(v: &Value) -> String {
     match v.as_str() {
@@ -70,6 +90,11 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
     let mut groups: Vec<Value> = Vec::new();
     let mut group_names: Vec<String> = Vec::new();
     for g in &ctx.overrides.groups {
+        if group_names.contains(&g.name) {
+            return Err(MergeError {
+                message: format!("自定义组「{}」与已有自定义组重名，请修改组名", g.name),
+            });
+        }
         if node_names.contains(&g.name) {
             return Err(MergeError {
                 message: format!("自定义组「{}」与订阅节点重名，请修改组名", g.name),
@@ -154,13 +179,13 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
 
     // ---------- 4. 兜底自动组：有节点但无任何组 ----------
     if !nodes.is_empty() && groups.is_empty() {
-        warnings.push("订阅有节点但无任何组，已注入自动组「🚀 节点选择」".into());
-        let mut m = Mapping::new();
-        kv(&mut m, "name", AUTO_GROUP_NAME);
-        kv(&mut m, "type", "select");
-        kv(&mut m, "proxies", str_seq(node_names.iter().cloned()));
-        groups.push(Value::Mapping(m));
-        group_names.push(AUTO_GROUP_NAME.to_string());
+        inject_auto_group(
+            &mut groups,
+            &mut group_names,
+            &node_names,
+            &mut warnings,
+            "订阅有节点但无任何组",
+        );
     }
 
     // ---------- 5. 引用校验目标集 ----------
@@ -208,7 +233,16 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
     }
 
     // ---------- 8. 兜底默认规则：有节点但无任何规则 ----------
+    // 注意：自定义组存在时步骤 4 不会注入自动组，但 DEFAULT_RULES 引用「🚀 节点选择」，
+    // 必须确保该组存在于最终组集（先注入自动组），否则 mihomo -t 报悬空引用。
     if !nodes.is_empty() && rules.is_empty() {
+        inject_auto_group(
+            &mut groups,
+            &mut group_names,
+            &node_names,
+            &mut warnings,
+            "订阅无规则，默认规则模板引用自动组",
+        );
         warnings.push("订阅无规则，已注入默认规则模板".into());
         rules.extend(DEFAULT_RULES.iter().map(|s| s.to_string()));
     }
@@ -429,8 +463,10 @@ mod tests {
         let out = do_merge(o, Some(s));
         let v = parse_out(&out);
         let gs = v["proxy-groups"].as_sequence().unwrap();
-        assert_eq!(gs.len(), 1);
+        // 自定义组 + 订阅无规则 → 兜底注入自动组（默认规则模板引用它）
+        assert_eq!(gs.len(), 2);
         assert_eq!(gs[0]["name"], Value::String("重名组".into()));
+        assert_eq!(gs[1]["name"], Value::String(AUTO_GROUP_NAME.into()));
         assert!(
             out.warnings.iter().any(|w| w.contains("重名组")),
             "警告应提及重名组: {:?}",
@@ -472,8 +508,10 @@ mod tests {
         let out = do_merge(Overrides::default(), Some(s));
         let v = parse_out(&out);
         let gs = v["proxy-groups"].as_sequence().unwrap();
-        assert_eq!(gs.len(), 1);
+        // 正常组 + 兜底自动组（订阅无规则）
+        assert_eq!(gs.len(), 2);
         assert_eq!(gs[0]["name"], Value::String("正常组".into()));
+        assert_eq!(gs[1]["name"], Value::String(AUTO_GROUP_NAME.into()));
         assert!(
             out.warnings.iter().any(|w| w.contains("冲突节点")),
             "警告应提及冲突: {:?}",
@@ -595,8 +633,10 @@ mod tests {
         let out = do_merge(Overrides::default(), Some(s));
         let v = parse_out(&out);
         let gs = v["proxy-groups"].as_sequence().unwrap();
-        assert_eq!(gs.len(), 1);
+        // 好组 + 兜底自动组（订阅无规则）
+        assert_eq!(gs.len(), 2);
         assert_eq!(gs[0]["name"], Value::String("好组".into()));
+        assert_eq!(gs[1]["name"], Value::String(AUTO_GROUP_NAME.into()));
         let members = gs[0]["proxies"].as_sequence().unwrap();
         assert_eq!(members.len(), 1);
         assert_eq!(members[0], Value::String("节点1".into()));
@@ -669,6 +709,54 @@ mod tests {
         );
     }
 
+    // ---- 补充：自定义组存在 + 订阅无规则 → 兜底默认规则需先注入自动组（无悬空引用） ----
+
+    #[test]
+    fn default_rules_with_custom_groups_injects_auto_group() {
+        let mut o = Overrides::default();
+        o.groups.push(group("自定义组", &["节点1"]));
+        let s = sub(vec![node("节点1"), node("节点2")], vec![], vec![]);
+        let out = do_merge(o, Some(s));
+        let v = parse_out(&out);
+        // 默认规则注入且自动组存在 → 无悬空引用
+        let rs = v["rules"].as_sequence().unwrap();
+        assert_eq!(
+            rs.iter().map(|r| r.as_str().unwrap().to_string()).collect::<Vec<_>>(),
+            DEFAULT_RULES.to_vec()
+        );
+        let gs = v["proxy-groups"].as_sequence().unwrap();
+        let names: Vec<&str> = gs.iter().map(|g| g["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"自定义组"), "组列表: {names:?}");
+        assert!(names.contains(&AUTO_GROUP_NAME), "应注入自动组: {names:?}");
+        // 自动组成员 = 全部节点
+        let auto = gs
+            .iter()
+            .find(|g| g["name"].as_str() == Some(AUTO_GROUP_NAME))
+            .unwrap();
+        assert_eq!(auto["proxies"].as_sequence().unwrap().len(), 2);
+        assert!(
+            out.warnings.iter().any(|w| w.contains("已注入自动组")),
+            "应警告注入自动组: {:?}",
+            out.warnings
+        );
+    }
+
+    // ---- 补充：自定义组之间重名 → MergeError ----
+
+    #[test]
+    fn duplicate_custom_group_names_are_error() {
+        let mut o = Overrides::default();
+        o.groups.push(group("重名组", &["节点1"]));
+        o.groups.push(group("重名组", &["节点1"]));
+        let s = sub(vec![node("节点1")], vec![], vec![]);
+        let e = do_merge_err(o, Some(s));
+        assert!(
+            e.message.contains("重名组") && e.message.contains("重名"),
+            "错误信息应含组名与重名提示: {}",
+            e.message
+        );
+    }
+
     // ---- 补充：url-test/fallback 组字段 ----
 
     #[test]
@@ -694,13 +782,15 @@ mod tests {
         let out = do_merge(o, Some(s));
         let v = parse_out(&out);
         let gs = v["proxy-groups"].as_sequence().unwrap();
-        assert_eq!(gs.len(), 2);
+        // 两个自定义组 + 兜底自动组（订阅无规则）
+        assert_eq!(gs.len(), 3);
         assert_eq!(gs[0]["url"], Value::String("http://example.com/204".into()));
         assert_eq!(gs[0]["interval"], Value::Number(120.into()));
         assert!(gs[0].get("tolerance").is_none(), "select/url-test 不应有 tolerance");
         assert_eq!(gs[1]["url"], Value::String("http://www.gstatic.com/generate_204".into()));
         assert_eq!(gs[1]["interval"], Value::Number(300.into()));
         assert_eq!(gs[1]["tolerance"], Value::Number(50.into()));
+        assert_eq!(gs[2]["name"], Value::String(AUTO_GROUP_NAME.into()));
     }
 
     // ---- 补充：订阅规则去重（与自定义规则重复） ----

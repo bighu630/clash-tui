@@ -106,10 +106,18 @@ pub async fn install() -> Result<Vec<String>, InstallError> {
     // g. 询问式 enable：不自动执行，仅给出提示（UI 侧可在安装成功后询问用户）
     logs.push("安装完成！启用服务（也可在 TUI 内确认后执行）：".to_string());
     logs.push("  sudo systemctl enable --now mihomo".to_string());
-    logs.push(
-        "提示：重新登录终端后，sudo -n 免密调用 /usr/local/sbin/mihomo-apply 即生效"
-            .to_string(),
-    );
+    // 组成员资格在新会话才生效：未生效时醒目提示重新登录，
+    // 避免用户困惑"为什么每次应用配置都要 sudo 密码"。
+    if session_has_admin_group() {
+        logs.push("✓ 当前会话已在 mihomo-admin 组内，sudo -n 免密调用已生效".to_string());
+    } else {
+        logs.push(String::new());
+        logs.push(
+            "⚠ 重要：请重新登录终端（或执行 newgrp mihomo-admin）使 mihomo-admin 组权限生效，\
+             否则应用配置时仍会要求输入 sudo 密码"
+                .to_string(),
+        );
+    }
     Ok(logs)
 }
 
@@ -260,8 +268,25 @@ fn add_user_to_group(logs: &mut Vec<String>) -> Result<(), InstallError> {
     let out = run_sudo("usermod", &["-aG", ADMIN_GROUP, &user])?;
     check_output(out, &format!("sudo usermod -aG {ADMIN_GROUP} {user}"))?;
     logs.push(format!("[6/6] 已将当前用户 {user} 加入 mihomo-admin 组"));
-    logs.push("注意：组成员资格在重新登录后生效".to_string());
     Ok(())
+}
+
+/// 当前会话是否已在 `mihomo-admin` 组内（`id -nG` 解析组名列表）。
+/// 组成员资格在重新登录后才在会话中生效，安装后调用以决定是否提示重登。
+pub fn session_has_admin_group() -> bool {
+    Command::new("id")
+        .args(["-nG"])
+        .output()
+        .map(|o| {
+            o.status.success()
+                && groups_contain(&String::from_utf8_lossy(&o.stdout), ADMIN_GROUP)
+        })
+        .unwrap_or(false)
+}
+
+/// `id -nG` 输出中是否包含指定组名（按空白切分，精确匹配）。
+fn groups_contain(output: &str, name: &str) -> bool {
+    output.split_whitespace().any(|g| g == name)
 }
 
 /// 当前用户名：优先 `$USER`，回退 `id -un`。
@@ -304,5 +329,34 @@ mod tests {
         assert!(line.starts_with(&format!("%{ADMIN_GROUP} ")));
         assert!(line.contains(APPLY_SCRIPT));
         assert!(line.ends_with('\n'));
+    }
+
+    /// groups_contain：按空白切分精确匹配组名（子串不算匹配）。
+    #[test]
+    fn groups_contain_matches_whitespace_separated_names() {
+        assert!(groups_contain("root wheel mihomo-admin", "mihomo-admin"));
+        assert!(groups_contain("mihomo-admin", "mihomo-admin"));
+        assert!(!groups_contain("root wheel users", "mihomo-admin"));
+        // 子串不匹配（mihomo-adminx 不是 mihomo-admin）
+        assert!(!groups_contain("mihomo-adminx wheel", "mihomo-admin"));
+        // 多空格/制表符分隔
+        assert!(groups_contain("root   wheel\tmihomo-admin", "mihomo-admin"));
+        // 空串
+        assert!(!groups_contain("", "mihomo-admin"));
+    }
+
+    /// 环境自适应：session_has_admin_group 应与手动解析 `id -nG` 输出一致。
+    #[test]
+    fn session_has_admin_group_matches_id() {
+        let manual = Command::new("id")
+            .args(["-nG"])
+            .output()
+            .ok()
+            .map(|o| {
+                o.status.success()
+                    && groups_contain(&String::from_utf8_lossy(&o.stdout), ADMIN_GROUP)
+            })
+            .unwrap_or(false);
+        assert_eq!(session_has_admin_group(), manual);
     }
 }

@@ -103,7 +103,11 @@ impl Default for DnsSettings {
             fake_ip_range: "198.18.0.1/16".into(),
             nameserver: vec!["https://doh.pub/dns-query".into()],
             default_nameserver: vec!["223.5.5.5".into()],
-            fallback: vec!["tls://8.8.4.4".into()],
+            // fallback 默认用国内可达 DoT（阿里云 + DNSPod 双冗余）。
+            // 历史故障：8.8.4.4:853 在中国大陆网络不可达，导致 mihomo 国外域名解析全失败
+            // （"all DNS requests failed"），走代理的国外端点全部不可用。
+            // default_nameserver 223.5.5.5 负责 bootstrap 解析这两个 DoT 域名，端口用默认 853。
+            fallback: vec!["tls://dns.alidns.com".into(), "tls://dot.pub".into()],
             fake_ip_filter: vec!["*.lan".into(), "+.local".into()],
         }
     }
@@ -227,7 +231,7 @@ mod tests {
         assert_eq!(d.fake_ip_range, "198.18.0.1/16");
         assert_eq!(d.nameserver, vec!["https://doh.pub/dns-query"]);
         assert_eq!(d.default_nameserver, vec!["223.5.5.5"]);
-        assert_eq!(d.fallback, vec!["tls://8.8.4.4"]);
+        assert_eq!(d.fallback, vec!["tls://dns.alidns.com", "tls://dot.pub"]);
         assert_eq!(d.fake_ip_filter, vec!["*.lan", "+.local"]);
     }
 

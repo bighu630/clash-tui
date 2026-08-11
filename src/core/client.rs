@@ -329,9 +329,11 @@ mod tests {
 
     #[test]
     fn client_base_url() {
-        let mut s = NetworkSettings::default();
-        s.external_controller = "127.0.0.1:9090".into();
-        s.secret = "abc123".into();
+        let s = NetworkSettings {
+            external_controller: "127.0.0.1:9090".into(),
+            secret: "abc123".into(),
+            ..NetworkSettings::default()
+        };
         let c = Client::new(&s);
         assert_eq!(c.base, "http://127.0.0.1:9090");
         assert_eq!(c.secret, "abc123");
@@ -429,9 +431,11 @@ mod tests {
     }
 
     fn client_on(port: u16) -> Client {
-        let mut s = NetworkSettings::default();
-        s.external_controller = format!("127.0.0.1:{port}");
-        s.secret = "testsecret".into();
+        let s = NetworkSettings {
+            external_controller: format!("127.0.0.1:{port}"),
+            secret: "testsecret".into(),
+            ..NetworkSettings::default()
+        };
         Client::new(&s)
     }
 

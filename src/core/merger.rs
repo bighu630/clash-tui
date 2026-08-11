@@ -113,7 +113,7 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
     if let Some(cache) = ctx.subscription.and_then(|s| s.cache.as_ref()) {
         for g in &cache.proxy_groups {
             let Some(m) = g.as_mapping() else { continue };
-            let Some(name) = m.get(&Value::String("name".into())).and_then(|v| v.as_str()) else {
+            let Some(name) = m.get(Value::String("name".into())).and_then(|v| v.as_str()) else {
                 continue;
             };
             let name = name.to_string();
@@ -127,7 +127,7 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
             }
             let mut m2 = m.clone();
             if let Some(Value::Sequence(members)) =
-                m2.get_mut(&Value::String("proxies".into()))
+                m2.get_mut(Value::String("proxies".into()))
             {
                 let mut kept: Vec<Value> = Vec::new();
                 for mv in members.iter() {
@@ -621,7 +621,7 @@ mod tests {
         let rs = v["rules"].as_sequence().unwrap();
         assert_eq!(rs.len(), BUILTIN_TARGETS.len());
         // 兜底默认规则不应注入（已有自定义规则）
-        assert_eq!(rs[0], Value::String(format!("MATCH,{}", BUILTIN_TARGETS[0]).into()));
+        assert_eq!(rs[0], Value::String(format!("MATCH,{}", BUILTIN_TARGETS[0])));
     }
 
     // ---- 12. MATCH 规则序列化无 payload ----

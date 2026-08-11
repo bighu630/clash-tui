@@ -119,8 +119,8 @@ fn parse_yaml(content: &str) -> Result<SubscriptionCache, ParseError> {
         .as_mapping()
         .ok_or_else(|| ParseError::Message("订阅不是 YAML 映射".into()))?;
 
-    let proxies = map.get(&Value::String("proxies".into()));
-    let has_provider = map.get(&Value::String("proxy-providers".into())).is_some();
+    let proxies = map.get(Value::String("proxies".into()));
+    let has_provider = map.get(Value::String("proxy-providers".into())).is_some();
     let proxies = match proxies {
         Some(Value::Sequence(seq)) => seq,
         _ if has_provider => {
@@ -132,11 +132,11 @@ fn parse_yaml(content: &str) -> Result<SubscriptionCache, ParseError> {
     let mut nodes = Vec::new();
     for item in proxies {
         let Some(m) = item.as_mapping() else { continue };
-        let Some(name) = m.get(&Value::String("name".into())).and_then(|v| v.as_str()) else {
+        let Some(name) = m.get(Value::String("name".into())).and_then(|v| v.as_str()) else {
             continue; // 无 name → 跳过计数，不报错
         };
         let kind = m
-            .get(&Value::String("type".into()))
+            .get(Value::String("type".into()))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -148,13 +148,13 @@ fn parse_yaml(content: &str) -> Result<SubscriptionCache, ParseError> {
     }
 
     let groups: Vec<Value> = map
-        .get(&Value::String("proxy-groups".into()))
+        .get(Value::String("proxy-groups".into()))
         .and_then(|v| v.as_sequence())
-        .map(|seq| seq.iter().cloned().collect())
+        .map(|seq| seq.to_vec())
         .unwrap_or_default();
 
     let rules: Vec<String> = map
-        .get(&Value::String("rules".into()))
+        .get(Value::String("rules".into()))
         .and_then(|v| v.as_sequence())
         .map(|seq| {
             seq.iter()
@@ -337,10 +337,9 @@ rules:
 
     #[test]
     fn parse_share_links_lines() {
-        let content = format!(
-            "vless://uuid@1.2.3.4:443#A\n\n# 注释行\ntrojan://pass@1.2.3.4:443#B\n"
-        );
-        let c = parse_subscription(&content).unwrap();
+        let content =
+            "vless://uuid@1.2.3.4:443#A\n\n# 注释行\ntrojan://pass@1.2.3.4:443#B\n";
+        let c = parse_subscription(content).unwrap();
         assert_eq!(c.proxies.len(), 2);
         assert_eq!(c.proxies[0].name, "A");
         assert_eq!(c.proxies[0].kind, "vless");

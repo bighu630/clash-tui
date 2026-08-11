@@ -39,6 +39,11 @@ pub enum ApplyError {
     SudoNotAvailable,
     #[error("sudo 需要密码（交互模式）")]
     SudoNeedsPassword,
+    #[error(
+        "当前用户未被 sudoers 授权调用 mihomo-apply。请按 i 重新安装提权组件，\
+         或检查 /etc/sudoers.d/99-mihomo 与 /etc/sudoers 的 @includedir /etc/sudoers.d 配置"
+    )]
+    NotInSudoers,
     #[error("mihomo -t 校验失败:\n{stderr}")]
     ValidateFailed { stderr: String },
     #[error("执行失败:\n{stdout}\n{stderr}")]
@@ -94,10 +99,16 @@ pub async fn apply_config(yaml: &str, non_interactive: bool) -> Result<ApplyOutc
                     stdout,
                     stderr,
                 })
-            } else if non_interactive && needs_password(&stderr) {
-                Err(ApplyError::SudoNeedsPassword)
             } else {
-                Err(ApplyError::CommandFailed { stdout, stderr })
+                match classify_sudo_failure(&stderr) {
+                    // 非交互模式且 sudo 要求密码 → 提示转交互重试
+                    SudoFailureKind::NeedsPassword if non_interactive => {
+                        Err(ApplyError::SudoNeedsPassword)
+                    }
+                    // 用户不在 sudoers：交互重试必败，直接给修复指引
+                    SudoFailureKind::NotInSudoers => Err(ApplyError::NotInSudoers),
+                    _ => Err(ApplyError::CommandFailed { stdout, stderr }),
+                }
             }
         }
         Err(e) => Err(e),
@@ -179,10 +190,27 @@ async fn read_all<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> String {
     }
 }
 
-/// sudo 提示需要密码（兼容中英文 locale）。
-fn needs_password(stderr: &str) -> bool {
+/// sudo 失败原因分类（兼容中英文 locale）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SudoFailureKind {
+    /// sudo 要求输入密码（非交互模式会失败）
+    NeedsPassword,
+    /// 当前用户不在 sudoers 授权列表（交互重试也必败）
+    NotInSudoers,
+    /// 其他失败（命令不存在、脚本校验失败等）
+    Other,
+}
+
+/// 解析 sudo stderr 判定失败原因。
+fn classify_sudo_failure(stderr: &str) -> SudoFailureKind {
     let s = stderr.to_lowercase();
-    s.contains("password") || s.contains("passwd") || s.contains("密码")
+    if s.contains("password") || s.contains("passwd") || s.contains("密码") {
+        SudoFailureKind::NeedsPassword
+    } else if s.contains("sudoers") {
+        SudoFailureKind::NotInSudoers
+    } else {
+        SudoFailureKind::Other
+    }
 }
 
 #[cfg(test)]
@@ -207,15 +235,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_non_interactive_password_or_failure() {
-        // 环境自适应：mihomo-apply 未安装时 sudo 非交互应报密码/命令失败
-        let e = apply_config("port: 7890\n", true).await.unwrap_err();
-        match e {
+    async fn apply_non_interactive_password_or_validation_failure() {
+        // 环境自适应且无副作用：无效 YAML 在脚本内 mihomo -t 预校验阶段即失败，
+        // 不会替换 /etc/mihomo/config.yaml；未装脚本/sudo 需密码/免密三种环境均覆盖。
+        let e = apply_config("bad: [\n", true).await.unwrap_err();
+        match &e {
             ApplyError::SudoNeedsPassword
             | ApplyError::SudoNotAvailable
             | ApplyError::CommandFailed { .. } => {}
             other => panic!("意外错误: {other:?}"),
         }
+        // 脚本已安装时，CommandFailed 必为脚本内 mihomo -t 校验失败（stderr 透出），
+        // 证明失败发生在替换配置之前，无配置替换副作用。
+        if let ApplyError::CommandFailed { stderr, .. } = &e {
+            if is_apply_script_installed().await {
+                let s = stderr.to_lowercase();
+                assert!(
+                    s.contains("test failed") || s.contains("validation"),
+                    "期望脚本校验失败输出，实际 stderr: {stderr}"
+                );
+            }
+        }
+    }
+
+    /// 失败分类规则：需密码 / 不在 sudoers / 其他（中英文 locale）。
+    #[test]
+    fn classify_sudo_failure_rules() {
+        use SudoFailureKind::*;
+        assert!(matches!(
+            classify_sudo_failure("sudo: a password is required"),
+            NeedsPassword
+        ));
+        assert!(matches!(
+            classify_sudo_failure("sudo: 需要密码"),
+            NeedsPassword
+        ));
+        assert!(matches!(
+            classify_sudo_failure("ivhu is not in the sudoers file. This incident will be reported."),
+            NotInSudoers
+        ));
+        assert!(matches!(
+            classify_sudo_failure("用户不在 sudoers 文件"),
+            NotInSudoers
+        ));
+        assert!(matches!(
+            classify_sudo_failure("sudo: mihomo-apply: command not found"),
+            Other
+        ));
+        assert!(matches!(classify_sudo_failure("test failed"), Other));
     }
 
     #[tokio::test]

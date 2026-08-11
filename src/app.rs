@@ -425,10 +425,13 @@ where
                 Act::Ui(ev) => self.on_ui_event(ev),
                 Act::Cmd(cmd) => self.spawn_command(cmd),
                 Act::Sudo(yaml) => {
+                    // 弹确认框前附诊断提示：区分"未重新登录（组未生效）"与
+                    // "sudoers 规则未生效"两种根因，引导用户对症处理。
+                    let has_group = crate::service::installer::session_has_admin_group();
                     self.pending_confirm = Some((
                         ConfirmPopup::new(
                             "需要 sudo 密码".into(),
-                            "sudo 需要密码，将以交互模式重试应用配置。是否继续？".into(),
+                            sudo_password_popup_lines(has_group).join("\n"),
                         ),
                         InteractiveTask::Apply(yaml),
                     ));
@@ -625,6 +628,10 @@ where
                             Ok(outcome) => {
                                 let _ = ui_tx.send(UiEvent::ApplyDone(Ok(outcome)));
                             }
+                            Err(e @ crate::core::apply::ApplyError::NotInSudoers) => {
+                                // 用户不在 sudoers：交互重试必败，直接报错并给修复指引
+                                let _ = ui_tx.send(UiEvent::ApplyDone(Err(e.to_string())));
+                            }
                             Err(crate::core::apply::ApplyError::SudoNeedsPassword) => {
                                 // 主循环弹确认框，交互模式重试
                                 let _ = sudo_tx.send(yaml);
@@ -750,6 +757,23 @@ fn bottom_bar_rows(bottom: Rect, area_height: u16) -> (u16, Option<u16>) {
     // 通知从 bottom.y 开始，最多渲染到 hint_y-1（保留最后一行给提示）
     let notice_rows = hint_y.saturating_sub(bottom.y);
     (notice_rows, Some(hint_y))
+}
+
+/// sudo 需密码确认弹窗内容（纯函数，供回归测试）：
+/// 首行保持原文，空行后附诊断提示（区分"未重新登录组未生效"与"sudoers 规则未生效"）。
+fn sudo_password_popup_lines(has_group: bool) -> Vec<String> {
+    let hint = if has_group {
+        "诊断提示：已在 mihomo-admin 组但仍需密码：sudoers 规则未生效。\
+         请按 i 重新安装提权组件，或检查 /etc/sudoers 是否包含 @includedir /etc/sudoers.d"
+    } else {
+        "诊断提示：未检测到免密配置：当前会话不在 mihomo-admin 组。\
+         请退出并重新登录终端（或执行 newgrp mihomo-admin）后重试，也可按 i 重新安装"
+    };
+    vec![
+        "sudo 需要密码，将以交互模式重试应用配置。是否继续？".to_string(),
+        String::new(),
+        hint.to_string(),
+    ]
 }
 
 fn page_hints(current: usize) -> Vec<(String, String)> {
@@ -998,6 +1022,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// sudo 密码确认弹窗：首行保持原文；两条诊断提示非空、互不相同，
+    /// 且分别含"重新登录"/"重新安装"关键词；原文与提示间有分隔空行。
+    #[test]
+    fn sudo_password_popup_lines_hints() {
+        let original = "sudo 需要密码，将以交互模式重试应用配置。是否继续？";
+        let no_group = sudo_password_popup_lines(false);
+        let has_group = sudo_password_popup_lines(true);
+
+        assert_eq!(no_group.first().map(String::as_str), Some(original));
+        assert_eq!(has_group.first().map(String::as_str), Some(original));
+        assert_eq!(no_group.get(1).map(String::as_str), Some(""));
+        assert_eq!(has_group.get(1).map(String::as_str), Some(""));
+
+        let hint_no = no_group
+            .iter()
+            .find(|l| l.starts_with("诊断提示："))
+            .expect("无组时应附诊断提示");
+        let hint_yes = has_group
+            .iter()
+            .find(|l| l.starts_with("诊断提示："))
+            .expect("有组时应附诊断提示");
+        assert!(!hint_no.is_empty());
+        assert!(!hint_yes.is_empty());
+        assert_ne!(hint_no, hint_yes);
+        assert!(hint_no.contains("重新登录"));
+        assert!(hint_yes.contains("重新安装"));
     }
 
     /// 构造最小 App（TestBackend 终端），不触盘、不建后台任务。

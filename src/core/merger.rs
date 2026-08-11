@@ -100,6 +100,14 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
                 message: format!("自定义组「{}」与订阅节点重名，请修改组名", g.name),
             });
         }
+        if g.proxies.is_empty() {
+            return Err(MergeError {
+                message: format!(
+                    "自定义组「{}」没有成员：mihomo 要求每个规则组至少有一个成员，请在规则组页按 m 勾选节点",
+                    g.name
+                ),
+            });
+        }
         for member in &g.proxies {
             if !node_names.contains(member) {
                 return Err(MergeError {
@@ -569,30 +577,19 @@ mod tests {
         assert!(out.warnings.len() >= 2, "应有自动组+默认规则两条警告: {:?}", out.warnings);
     }
 
-    // ---- 8. 无激活订阅 → 仅网络 + 自定义段 ----
+    // ---- 8. 无激活订阅 → 仅网络 + 自定义规则（无组） ----
 
     #[test]
     fn no_subscription_no_proxies_no_template() {
         let mut o = Overrides::default();
-        o.groups.push(UserGroup {
-            name: "空组".into(),
-            group_type: "select".into(),
-            url: String::new(),
-            interval: 0,
-            tolerance: 0,
-            proxies: vec![],
-        });
         o.rules.push(rule("MATCH", "", "DIRECT"));
         let out = do_merge(o, None);
         assert!(out.warnings.is_empty(), "警告: {:?}", out.warnings);
         let v = parse_out(&out);
         let keys = top_keys(&v);
-        assert!(keys.contains(&"proxy-groups".to_string()));
-        assert!(keys.contains(&"rules".to_string()));
+        assert!(!keys.contains(&"proxy-groups".to_string()), "不应有 proxy-groups 键: {keys:?}");
         assert!(!keys.contains(&"proxies".to_string()), "不应有 proxies 键: {keys:?}");
-        assert!(keys.len() <= 13, "不应注入模板: {keys:?}");
-        let gs = v["proxy-groups"].as_sequence().unwrap();
-        assert_eq!(gs[0]["name"], Value::String("空组".into()));
+        assert!(keys.len() <= 12, "不应注入模板: {keys:?}");
         let rs = v["rules"].as_sequence().unwrap();
         assert_eq!(rs[0], Value::String("MATCH,DIRECT".into()));
     }
@@ -738,6 +735,35 @@ mod tests {
             out.warnings.iter().any(|w| w.contains("已注入自动组")),
             "应警告注入自动组: {:?}",
             out.warnings
+        );
+    }
+
+    // ---- 补充：空自定义组（无成员）→ MergeError ----
+
+    #[test]
+    fn empty_custom_group_is_error() {
+        let mut o = Overrides::default();
+        o.groups.push(group("空组", &[]));
+        let s = sub(vec![node("节点1")], vec![], vec![]);
+        let e = do_merge_err(o, Some(s));
+        assert!(
+            e.message.contains("空组") && e.message.contains("成员"),
+            "错误信息应含组名与成员提示: {}",
+            e.message
+        );
+    }
+
+    // ---- 补充：无订阅 + 空自定义组 → 同样 MergeError（行为变化：无订阅时自定义组一律报错） ----
+
+    #[test]
+    fn empty_custom_group_is_error_without_nodes() {
+        let mut o = Overrides::default();
+        o.groups.push(group("空组", &[]));
+        let e = do_merge_err(o, None);
+        assert!(
+            e.message.contains("空组") && e.message.contains("成员"),
+            "错误信息应含组名与成员提示: {}",
+            e.message
         );
     }
 

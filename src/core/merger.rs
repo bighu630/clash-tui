@@ -40,6 +40,11 @@ fn str_seq<I: IntoIterator<Item = S>, S: Into<String>>(items: I) -> Value {
     Value::Sequence(items.into_iter().map(|s| Value::String(s.into())).collect())
 }
 
+/// 组成员有效性：订阅节点名或 mihomo 内置保留名（DIRECT/REJECT 等始终有效）。
+fn is_valid_member(name: &str, node_names: &[String]) -> bool {
+    node_names.iter().any(|n| n == name) || BUILTIN_TARGETS.contains(&name)
+}
+
 /// 注入自动组「🚀 节点选择」（组员=全部节点名）。组名已存在时跳过（保留自定义同名组）。
 fn inject_auto_group(
     groups: &mut Vec<Value>,
@@ -109,11 +114,13 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
             });
         }
         for member in &g.proxies {
-            if !node_names.contains(member) {
+            if !is_valid_member(member, &node_names) {
                 return Err(MergeError {
                     message: format!(
-                        "自定义组「{}」的成员「{}」不在激活订阅节点中",
-                        g.name, member
+                        "自定义组「{}」的成员「{}」不存在（可用：订阅节点/内置 {}）",
+                        g.name,
+                        member,
+                        BUILTIN_TARGETS.join("/")
                     ),
                 });
             }
@@ -165,7 +172,7 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
                 let mut kept: Vec<Value> = Vec::new();
                 for mv in members.iter() {
                     match mv.as_str() {
-                        Some(s) if node_names.contains(&s.to_string()) => kept.push(mv.clone()),
+                        Some(s) if is_valid_member(s, &node_names) => kept.push(mv.clone()),
                         _ => {
                             warnings.push(format!(
                                 "订阅组「{name}」的成员「{}」不存在，已丢弃该成员",
@@ -853,5 +860,67 @@ mod tests {
         let v = parse_out(&out);
         let keys = top_keys(&v);
         assert!(!keys.contains(&"proxies".to_string()));
+    }
+
+    // ---- 补充：订阅组含内置保留名成员（DIRECT/REJECT）→ 保留且不警告 ----
+
+    #[test]
+    fn sub_group_builtin_members_kept() {
+        let s = sub(
+            vec![node("节点1")],
+            vec![sub_group("🔰 选择节点", &["DIRECT", "REJECT", "节点1"])],
+            vec!["MATCH,🔰 选择节点".into()],
+        );
+        let out = do_merge(Overrides::default(), Some(s));
+        assert!(out.warnings.is_empty(), "警告: {:?}", out.warnings);
+        let v = parse_out(&out);
+        let gs = v["proxy-groups"].as_sequence().unwrap();
+        assert_eq!(gs.len(), 1);
+        assert_eq!(gs[0]["name"], Value::String("🔰 选择节点".into()));
+        let members: Vec<String> = gs[0]["proxies"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(members, vec!["DIRECT", "REJECT", "节点1"], "成员顺序不变");
+    }
+
+    // ---- 补充：订阅组仅含内置名成员 → 组保留（回归保护 kept.is_empty→丢组 路径） ----
+
+    #[test]
+    fn sub_group_only_builtin_members_survives() {
+        let s = sub(
+            vec![node("节点1")], // 有节点但组不引用它（组只含 DIRECT 是合法配置）
+            vec![sub_group("仅内置组", &["DIRECT"])],
+            vec!["MATCH,仅内置组".into()],
+        );
+        let out = do_merge(Overrides::default(), Some(s));
+        let v = parse_out(&out);
+        let gs = v["proxy-groups"].as_sequence().unwrap();
+        assert_eq!(gs.len(), 1, "组不应被丢弃: {gs:?}");
+        assert_eq!(gs[0]["name"], Value::String("仅内置组".into()));
+        let members = gs[0]["proxies"].as_sequence().unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0], Value::String("DIRECT".into()));
+    }
+
+    // ---- 补充：自定义组含内置名成员 → 合并成功 ----
+
+    #[test]
+    fn custom_group_with_builtin_member_ok() {
+        let mut o = Overrides::default();
+        o.groups.push(group("自定义组", &["DIRECT", "节点1"]));
+        o.rules.push(rule("MATCH", "", "自定义组"));
+        let s = sub(vec![node("节点1")], vec![], vec![]);
+        let out = do_merge(o, Some(s));
+        let v = parse_out(&out);
+        let gs = v["proxy-groups"].as_sequence().unwrap();
+        assert_eq!(gs.len(), 1, "自定义组含 DIRECT 应合法，无需兜底自动组: {gs:?}");
+        assert_eq!(gs[0]["name"], Value::String("自定义组".into()));
+        let members = gs[0]["proxies"].as_sequence().unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0], Value::String("DIRECT".into()));
+        assert_eq!(members[1], Value::String("节点1".into()));
     }
 }

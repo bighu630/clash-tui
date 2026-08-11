@@ -40,7 +40,7 @@ pub enum ApplyError {
     #[error("sudo 需要密码（交互模式）")]
     SudoNeedsPassword,
     #[error(
-        "当前用户未被 sudoers 授权调用 mihomo-apply。请按 i 重新安装提权组件，\
+        "当前用户未被 sudoers 授权调用 mihomo-apply。请在仪表盘页按 i 重新安装提权组件，\
          或检查 /etc/sudoers.d/99-mihomo 与 /etc/sudoers 的 @includedir /etc/sudoers.d 配置"
     )]
     NotInSudoers,
@@ -78,7 +78,8 @@ pub async fn validate_config(yaml: &str) -> Result<(), ApplyError> {
 }
 
 /// `sudo [-n] /usr/local/sbin/mihomo-apply`，stdin 喂入 yaml。
-/// non_interactive=true 且 sudo 提示密码 → SudoNeedsPassword。
+/// non_interactive=true 且 sudo 提示密码 → SudoNeedsPassword（交互模式重试）；
+/// 非交互且当前用户未被 sudoers 授权 → NotInSudoers（该情形交互重试也必败）。
 pub async fn apply_config(yaml: &str, non_interactive: bool) -> Result<ApplyOutcome, ApplyError> {
     let path = tmp_path(APPLY_TMP);
     write_secret_file(&path, yaml)
@@ -202,9 +203,14 @@ enum SudoFailureKind {
 }
 
 /// 解析 sudo stderr 判定失败原因。
+/// 设计意图：只匹配 sudo 自身的诊断消息特征，避免把 mihomo -t 校验输出误判为
+/// "需要 sudo 密码"——脚本内校验失败时 mihomo 会输出如
+/// `proxy 0: '' has unset fields: cipher, password`，若裸词 "password" 也作判定依据
+/// 就会命中，导致对必然失败的交互重试再弹一次确认框。因此裸词 "password" 不再作为
+/// 判定依据；"passwd" 与 "password" 是不同子串（互不包含），保留 "passwd" 判定无碍。
 fn classify_sudo_failure(stderr: &str) -> SudoFailureKind {
     let s = stderr.to_lowercase();
-    if s.contains("password") || s.contains("passwd") || s.contains("密码") {
+    if s.contains("a password is required") || s.contains("需要密码") || s.contains("passwd") {
         SudoFailureKind::NeedsPassword
     } else if s.contains("sudoers") {
         SudoFailureKind::NotInSudoers
@@ -237,11 +243,13 @@ mod tests {
     #[tokio::test]
     async fn apply_non_interactive_password_or_validation_failure() {
         // 环境自适应且无副作用：无效 YAML 在脚本内 mihomo -t 预校验阶段即失败，
-        // 不会替换 /etc/mihomo/config.yaml；未装脚本/sudo 需密码/免密三种环境均覆盖。
+        // 不会替换 /etc/mihomo/config.yaml；未装脚本/sudo 需密码/免密/
+        // 用户无 sudo 权限（CI/容器）等环境均覆盖。
         let e = apply_config("bad: [\n", true).await.unwrap_err();
         match &e {
             ApplyError::SudoNeedsPassword
             | ApplyError::SudoNotAvailable
+            | ApplyError::NotInSudoers
             | ApplyError::CommandFailed { .. } => {}
             other => panic!("意外错误: {other:?}"),
         }
@@ -283,6 +291,12 @@ mod tests {
             Other
         ));
         assert!(matches!(classify_sudo_failure("test failed"), Other));
+        // 回归：mihomo -t 校验失败输出可含 "password"（unset fields 提示），
+        // 不得误判为"需要 sudo 密码"（否则脚本校验失败会触发必然失败的交互重试）。
+        assert!(matches!(
+            classify_sudo_failure("proxy 0: '' has unset fields: cipher, password"),
+            Other
+        ));
     }
 
     #[tokio::test]

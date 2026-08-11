@@ -764,7 +764,7 @@ fn bottom_bar_rows(bottom: Rect, area_height: u16) -> (u16, Option<u16>) {
 fn sudo_password_popup_lines(has_group: bool) -> Vec<String> {
     let hint = if has_group {
         "诊断提示：已在 mihomo-admin 组但仍需密码：sudoers 规则未生效。\
-         请按 i 重新安装提权组件，或检查 /etc/sudoers 是否包含 @includedir /etc/sudoers.d"
+         请在仪表盘页按 i 重新安装提权组件，或检查 /etc/sudoers 是否包含 @includedir /etc/sudoers.d"
     } else {
         "诊断提示：未检测到免密配置：当前会话不在 mihomo-admin 组。\
          请退出并重新登录终端（或执行 newgrp mihomo-admin）后重试，也可按 i 重新安装"

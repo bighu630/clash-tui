@@ -123,10 +123,16 @@ fn parse_yaml(content: &str) -> Result<SubscriptionCache, ParseError> {
     let has_provider = map.get(Value::String("proxy-providers".into())).is_some();
     let proxies = match proxies {
         Some(Value::Sequence(seq)) => seq,
-        _ if has_provider => {
+        Some(_) if has_provider => {
             return Err(ParseError::Message("暂不支持 proxy-providers 订阅".into()));
         }
-        _ => return Err(ParseError::Message("订阅中没有 proxies 节点".into())),
+        Some(_) => {
+            return Err(ParseError::Message("订阅中 proxies 格式无效（应为节点列表）".into()));
+        }
+        None if has_provider => {
+            return Err(ParseError::Message("暂不支持 proxy-providers 订阅".into()));
+        }
+        None => return Err(ParseError::Message("订阅中没有 proxies 节点".into())),
     };
 
     let mut nodes = Vec::new();
@@ -172,8 +178,9 @@ fn parse_yaml(content: &str) -> Result<SubscriptionCache, ParseError> {
 }
 
 fn parse_links(content: &str) -> Result<SubscriptionCache, ParseError> {
+    let effective = decode_link_content(content);
     let mut nodes = Vec::new();
-    for line in content.lines() {
+    for line in effective.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -188,6 +195,24 @@ fn parse_links(content: &str) -> Result<SubscriptionCache, ParseError> {
         rules: Vec::new(),
         fetched_at: chrono::Utc::now().to_rfc3339(),
     })
+}
+
+/// 整体 base64 包裹的链接列表：解码成功且解码后含已知 scheme 行 → 用解码内容，
+/// 否则按原文逐行。先剔除空白再解码（多行 base64 常见）；明文链接因含 `:`/`/`
+/// 无法通过 base64 解码，自然回落到原文路径。
+fn decode_link_content<'a>(content: &'a str) -> std::borrow::Cow<'a, str> {
+    let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+    if let Some(decoded) = parsers::b64_decode(&compact) {
+        let text = String::from_utf8_lossy(&decoded).into_owned();
+        let has_scheme = text.lines().any(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('#') && dispatch(t).is_some()
+        });
+        if has_scheme {
+            return std::borrow::Cow::Owned(text);
+        }
+    }
+    std::borrow::Cow::Borrowed(content)
 }
 
 static UNNAMED_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -329,6 +354,12 @@ rules:
     }
 
     #[test]
+    fn parse_yaml_proxies_not_sequence_error() {
+        let e = parse_subscription("proxies: 123\n").unwrap_err();
+        assert!(e.to_string().contains("格式无效"), "错误信息: {e}");
+    }
+
+    #[test]
     fn parse_empty_yaml_error() {
         assert!(parse_subscription("").is_err());
     }
@@ -355,6 +386,41 @@ rules:
         let c = parse_subscription(content).unwrap();
         assert_eq!(c.proxies.len(), 1);
         assert_eq!(c.proxies[0].name, "C");
+    }
+
+    #[test]
+    fn parse_base64_wrapped_share_links() {
+        let links =
+            "ss://YWVzLTEyOC1nY206cGFzc0AxLjIuMy40OjgzODg=#节点A\nss://YWVzLTEyOC1nY206cGFzc0AxLjIuMy40OjgzODg=#节点B\n";
+        let b64 = base64_encode(links);
+        let c = parse_subscription(&b64).unwrap();
+        assert_eq!(c.proxies.len(), 2, "base64 包裹的分享链接应解析出节点");
+        assert_eq!(c.proxies[0].name, "节点A");
+        assert_eq!(c.proxies[0].kind, "ss");
+        assert_eq!(c.proxies[1].name, "节点B");
+        assert_eq!(c.proxies[1].kind, "ss");
+    }
+
+    #[test]
+    fn parse_base64_wrapped_links_with_newlines() {
+        // 多行 base64（带换行）也应解码成功
+        let links = "vless://uuid@1.2.3.4:443#X\ntrojan://pass@1.2.3.4:443#Y\n";
+        let b64 = base64_encode(links);
+        let wrapped = format!("\n{}\n", b64);
+        let c = parse_subscription(&wrapped).unwrap();
+        assert_eq!(c.proxies.len(), 2);
+        assert_eq!(c.proxies[0].name, "X");
+        assert_eq!(c.proxies[1].name, "Y");
+    }
+
+    #[test]
+    fn plain_links_still_parse_after_decode_attempt() {
+        // 明文行不会被误判为 base64（含 : 无法解码），回落到原文解析
+        let content = "ss://YWVzLTEyOC1nY206cGFzc0AxLjIuMy40OjgzODg=#P\ntrojan://pass@1.2.3.4:443#Q\n";
+        let c = parse_subscription(content).unwrap();
+        assert_eq!(c.proxies.len(), 2);
+        assert_eq!(c.proxies[0].name, "P");
+        assert_eq!(c.proxies[1].name, "Q");
     }
 
     // ---------- parse_share_link ----------

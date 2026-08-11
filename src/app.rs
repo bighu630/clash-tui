@@ -552,8 +552,16 @@ where
                         .chars()
                         .take(60)
                         .collect();
-                    self.result_popup =
-                        Some(MessagePopup::new("出口 IP 获取失败".into(), vec![e]));
+                    // 与 REST API 可达性交叉提示：区分"代理端口不通"与"mihomo 未运行"
+                    let hint = if self.state.api_ok {
+                        "提示：REST API 可达但代理端口不通：检查 mihomo 运行配置的代理端口是否与设置一致（或防火墙拦截）"
+                    } else {
+                        "提示：REST API 也不可达：mihomo 可能未运行（systemctl status mihomo）"
+                    };
+                    self.result_popup = Some(MessagePopup::new(
+                        "出口 IP 获取失败".into(),
+                        vec![e, hint.to_string()],
+                    ));
                     self.state.notice(format!("[✗] 出口 IP 获取失败: {head}"));
                 }
             },

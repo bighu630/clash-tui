@@ -3,8 +3,7 @@
 
 use std::collections::VecDeque;
 use std::io;
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -19,6 +18,7 @@ use tokio::sync::mpsc;
 
 use crate::core::apply::{apply_config, validate_config, ApplyOutcome};
 use crate::core::client::{Client, MemoryFrame, RuntimeConfig, TrafficFrame};
+use crate::core::exit_ip::{self, ProxyPorts};
 use crate::core::models::{NetworkSettings, Overrides, Subscription, SubscriptionCache};
 use crate::core::settings::{load_overrides, load_settings, load_subscriptions, save_subscriptions};
 use crate::ui::dashboard::DashboardPage;
@@ -179,6 +179,8 @@ struct App<B: Backend> {
     cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     sudo_tx: mpsc::UnboundedSender<String>,
     exit_trigger: mpsc::UnboundedSender<()>,
+    /// 代理端口快照（ApplyDone 成功后更新并触发重测）
+    exit_ports: Arc<Mutex<ProxyPorts>>,
     /// 需要用户确认后执行的交互任务（sudo 密码/首次安装）
     pending_confirm: Option<(ConfirmPopup, InteractiveTask)>,
     help_popup: Option<MessagePopup>,
@@ -489,6 +491,9 @@ where
             },
             UiEvent::ApplyDone(res) => match res {
                 Ok(outcome) => {
+                    // 网络配置已变：刷新代理端口快照并立即重测一次出口 IP
+                    *self.exit_ports.lock().unwrap() = ProxyPorts::from_settings(&self.state.settings);
+                    let _ = self.exit_trigger.send(());
                     let stdout = outcome.stdout.trim().to_string();
                     let stderr = outcome.stderr.trim().to_string();
                     if stdout.is_empty() && stderr.is_empty() {
@@ -615,7 +620,14 @@ where
                 });
             }
             UiCommand::FetchExitIp => {
-                let _ = self.exit_trigger.send(());
+                let ports = self.exit_ports.clone();
+                let ui_tx = ui_tx.clone();
+                tokio::spawn(async move {
+                    // 先 clone 快照再释放锁：MutexGuard 非 Send，不能跨 await 持锁
+                    let snapshot = ports.lock().unwrap().clone();
+                    let r = exit_ip::fetch_exit_ip(&snapshot).await;
+                    let _ = ui_tx.send(UiEvent::ExitIp(r));
+                });
             }
             UiCommand::ReloadConfigs => {
                 tokio::spawn(async move {
@@ -746,38 +758,6 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// 出口 IP 获取：经 mixed_port 代理，多 URL 降级。
-async fn fetch_exit_ip(port: u16) -> Result<String, String> {
-    let proxy_url = format!("http://127.0.0.1:{port}");
-    let client = reqwest::Client::builder()
-        .proxy(reqwest::Proxy::all(&proxy_url).map_err(|e| e.to_string())?)
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let urls = [
-        "https://api.ipify.org",
-        "http://api.ipify.org",
-        "https://ifconfig.me/ip",
-    ];
-    let mut last_err = String::new();
-    for url in urls {
-        match client.get(url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(text) = resp.text().await {
-                    let ip = text.trim().to_string();
-                    if !ip.is_empty() && !ip.chars().any(char::is_whitespace) {
-                        return Ok(ip);
-                    }
-                }
-                last_err = format!("{url} 返回非文本内容");
-            }
-            Ok(resp) => last_err = format!("{url} HTTP {}", resp.status()),
-            Err(e) => last_err = format!("{url}: {e}"),
-        }
-    }
-    Err(format!("全部尝试失败（{last_err}）"))
-}
-
 /// traffic 后台任务：流式拉取 /traffic，失败 sleep 2s 重连；API 状态联动。
 fn spawn_traffic_task(client: Arc<Client>, tx: mpsc::UnboundedSender<BgMsg>) {
     tokio::spawn(async move {
@@ -830,7 +810,7 @@ fn spawn_memory_task(client: Arc<Client>, tx: mpsc::UnboundedSender<MemoryFrame>
 
 /// exit_ip 后台任务：每 60s 定时 + FetchExitIp 命令触发。
 fn spawn_exit_ip_task(
-    port: Arc<AtomicU16>,
+    ports: Arc<Mutex<ProxyPorts>>,
     mut trigger: mpsc::UnboundedReceiver<()>,
     tx: mpsc::UnboundedSender<UiEvent>,
 ) {
@@ -841,7 +821,10 @@ fn spawn_exit_ip_task(
                 _ = interval.tick() => {}
                 _ = trigger.recv() => {}
             }
-            let result = fetch_exit_ip(port.load(Ordering::Relaxed)).await;
+            // 先 clone 快照再释放锁：MutexGuard 非 Send，不能跨 await 持锁
+            // （60s 周期任务，快照期间锁被占用至多到 clone 完成，约瞬间）
+            let snapshot = ports.lock().unwrap().clone();
+            let result = exit_ip::fetch_exit_ip(&snapshot).await;
             if tx.send(UiEvent::ExitIp(result)).is_err() {
                 return;
             }
@@ -868,11 +851,11 @@ pub async fn run() -> Result<(), BoxError> {
     let (memory_tx, memory_rx) = mpsc::unbounded_channel();
     let (sudo_tx, sudo_rx) = mpsc::unbounded_channel();
     let (exit_trigger, trigger_rx) = mpsc::unbounded_channel();
-    let exit_port = Arc::new(AtomicU16::new(state.settings.mixed_port));
+    let exit_ports = Arc::new(Mutex::new(ProxyPorts::from_settings(&state.settings)));
 
     spawn_traffic_task(client.clone(), traffic_tx);
     spawn_memory_task(client.clone(), memory_tx);
-    spawn_exit_ip_task(exit_port.clone(), trigger_rx, ui_tx.clone());
+    spawn_exit_ip_task(exit_ports.clone(), trigger_rx, ui_tx.clone());
 
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -895,6 +878,7 @@ pub async fn run() -> Result<(), BoxError> {
         cmd_rx,
         sudo_tx,
         exit_trigger,
+        exit_ports,
         pending_confirm: None,
         help_popup: None,
         result_popup: None,
@@ -1001,6 +985,7 @@ mod tests {
         let (sudo_tx, _) = mpsc::unbounded_channel();
         let (exit_trigger, _) = mpsc::unbounded_channel();
         let client = Arc::new(Client::new(&state.settings));
+        let exit_ports = Arc::new(Mutex::new(ProxyPorts::from_settings(&state.settings)));
         App {
             state,
             pages: vec![
@@ -1016,6 +1001,7 @@ mod tests {
             cmd_rx,
             sudo_tx,
             exit_trigger,
+            exit_ports,
             pending_confirm: None,
             help_popup: None,
             result_popup: None,

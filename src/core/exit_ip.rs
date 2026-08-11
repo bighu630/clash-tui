@@ -127,6 +127,11 @@ pub fn classify_from_chain(
             || lower.contains("failed to lookup")
             || lower.contains("name or service not known")
             || lower.contains("no address associated with hostname")
+            // glibc EAI_AGAIN 文本（getaddrinfo 临时失败），当前会落入 ConnectFailed 误导
+            || lower.contains("temporary failure in name resolution")
+            // hickory-dns 风格（若未来启用 hickory-dns feature）
+            || lower.contains("dns error")
+            || lower.contains("resolver error")
         {
             ExitErrorKind::Dns
         } else if is_connect
@@ -577,6 +582,16 @@ mod tests {
         assert_eq!(chain_string(&err), "just one");
     }
 
+    /// 非相邻重复不去重：a → b → a 保持 "a: b: a" 原样
+    /// （实现仅跳过与上一条相同的节点，防止未来误改成全局去重）。
+    #[test]
+    fn chain_string_keeps_non_adjacent_duplicates() {
+        let leaf = TestErr::new("a", None);
+        let mid = TestErr::new("b", Some(Box::new(leaf)));
+        let top = TestErr::new("a", Some(Box::new(mid)));
+        assert_eq!(chain_string(&top), "a: b: a");
+    }
+
     #[test]
     fn classify_connection_refused() {
         assert_eq!(
@@ -650,6 +665,27 @@ mod tests {
         assert_eq!(
             classify_from_chain(false, false, false, "totally random text"),
             ExitErrorKind::Other
+        );
+    }
+
+    /// 分类优先级钉死：Builder > Timeout > refused > Dns > Connect，
+    /// 标志位优先于链文本特征，防止未来调整顺序时被文本误导。
+    #[test]
+    fn classify_priority_builder_timeout_over_text() {
+        // is_builder 优先：即使链文本含 connection refused
+        assert_eq!(
+            classify_from_chain(false, false, true, "connection refused (os error 111)"),
+            ExitErrorKind::Builder
+        );
+        // is_builder 优先：即使链文本含 timed out
+        assert_eq!(
+            classify_from_chain(false, false, true, "operation timed out"),
+            ExitErrorKind::Builder
+        );
+        // is_timeout 优先于 refused 文本特征
+        assert_eq!(
+            classify_from_chain(true, false, false, "connection refused (os error 111)"),
+            ExitErrorKind::Timeout
         );
     }
 

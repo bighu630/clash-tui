@@ -39,6 +39,9 @@ pub struct AppState {
     pub overrides: Overrides,
     pub runtime: RuntimeConfig,
     pub api_ok: bool,
+    /// 首次 /configs 检查（ConfigsRefreshed）是否已完成：完成前 REST API
+    /// 可达性未知，exit_ip 失败不得据此交叉判断（启动竞态）。
+    pub api_confirmed: bool,
     pub traffic: VecDeque<TrafficFrame>,
     pub mem_history: VecDeque<u64>,
     pub exit_ip: Option<String>,
@@ -75,6 +78,7 @@ impl AppState {
             overrides,
             runtime: RuntimeConfig::default(),
             api_ok: false,
+            api_confirmed: false,
             traffic: VecDeque::new(),
             mem_history: VecDeque::new(),
             exit_ip: None,
@@ -552,8 +556,12 @@ where
                         .chars()
                         .take(60)
                         .collect();
-                    // 与 REST API 可达性交叉提示：区分"代理端口不通"与"mihomo 未运行"
-                    let hint = if self.state.api_ok {
+                    // 与 REST API 可达性交叉提示：区分"代理端口不通"与"mihomo 未运行"。
+                    // api_confirmed 为 false 说明首次 /configs 检查未完成（启动竞态），
+                    // REST 可达性未知，不做交叉判断。
+                    let hint = if !self.state.api_confirmed {
+                        "提示：REST API 状态未知（首次检查未完成），无法交叉判断"
+                    } else if self.state.api_ok {
                         "提示：REST API 可达但代理端口不通：检查 mihomo 运行配置的代理端口是否与设置一致（或防火墙拦截）"
                     } else {
                         "提示：REST API 也不可达：mihomo 可能未运行（systemctl status mihomo）"
@@ -566,11 +574,17 @@ where
                 }
             },
             UiEvent::ConfigsRefreshed(res) => match res {
+                // 无论 Ok/Err，首次 /configs 检查均已完成：REST 可达性已知，
+                // 之后 exit_ip 失败可据此交叉判断。
                 Ok(runtime) => {
                     self.state.runtime = runtime;
+                    self.state.api_confirmed = true;
                     self.set_api_ok(true, None);
                 }
-                Err(e) => self.set_api_ok(false, Some(&e)),
+                Err(e) => {
+                    self.state.api_confirmed = true;
+                    self.set_api_ok(false, Some(&e));
+                }
             },
         }
     }
@@ -994,6 +1008,7 @@ mod tests {
             overrides: Overrides::default(),
             runtime: RuntimeConfig::default(),
             api_ok: false,
+            api_confirmed: false,
             traffic: VecDeque::new(),
             mem_history: VecDeque::new(),
             exit_ip: None,

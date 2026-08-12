@@ -403,15 +403,28 @@ impl SelectorPopup {
 
     /// 从 AppState.group_delays 同步本组延迟；延迟数据到达后清除「请先测速」提示，
     /// 且若处于 Delay 模式则重排（数据变化后保持有序）。
+    /// 测速结果为空（全部超时）时清除过期缓存并恢复原始顺序，
+    /// 避免弹窗展示陈旧的延迟数值与排序。
     fn sync_delays(&mut self, st: &AppState) {
         if let Some(list) = st.group_delays.get(&self.group_name) {
             let m: HashMap<String, u16> = list.iter().cloned().collect();
-            if !m.is_empty() {
+            if m.is_empty() {
+                // 测速全部超时/无结果：清除过期缓存，回到无数据状态；
+                // 延迟数据消失后按延迟排序无意义，重置为原始顺序。
+                self.delays.clear();
+                if self.mode == SortMode::Delay {
+                    self.mode = SortMode::Original;
+                    self.reorder();
+                }
+            } else {
                 self.delays = m;
                 self.hint = None;
+                if self.mode == SortMode::Delay {
+                    self.reorder();
+                }
             }
-        }
-        if self.mode == SortMode::Delay && !self.delays.is_empty() {
+        } else if self.mode == SortMode::Delay && !self.delays.is_empty() {
+            // 无新数据但处于延迟模式：数据未变，重排仅重定位选中项
             self.reorder();
         }
     }
@@ -434,7 +447,11 @@ impl SelectorPopup {
                 Some(SelectAction::Confirm(self.items[self.order[self.selected]].clone()))
             }
             KeyCode::Esc => Some(SelectAction::Cancel),
-            KeyCode::Char('s') => Some(SelectAction::TestDelay),
+            KeyCode::Char('s') => {
+                // 已发起测速：清除「请先按 s 测速」提示，避免残留到数据到达
+                self.hint = None;
+                Some(SelectAction::TestDelay)
+            }
             KeyCode::Char('n') => {
                 self.mode = SortMode::Name;
                 self.reorder();
@@ -487,9 +504,14 @@ impl SelectorPopup {
         let mut state = ListState::default();
         state.select(Some(self.selected));
         f.render_stateful_widget(list, chunks[0], &mut state);
+        let mode_mark = match self.mode {
+            SortMode::Original => "",
+            SortMode::Name => "  [名称序]",
+            SortMode::Delay => "  [延迟序]",
+        };
         let footer_text = match &self.hint {
             Some(h) => h.clone(),
-            None => "j/k 移动  Enter 切换  s 测速  n 按名  d 按延迟  Esc 取消".to_string(),
+            None => format!("j/k 移动  Enter 切换  s 测速  n 按名  d 按延迟{mode_mark}  Esc 取消"),
         };
         let footer = Paragraph::new(Line::from(footer_text));
         f.render_widget(footer, chunks[1]);
@@ -731,6 +753,43 @@ mod tests {
         let _ = p.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         let names: Vec<&str> = p.order.iter().map(|&i| p.items[i].as_str()).collect();
         assert_eq!(names, vec!["b", "a"]);
+    }
+
+    /// 测速结果为空（全部超时）：清除过期延迟缓存、重置为原始顺序，
+    /// d 键恢复「请先按 s 测速」提示。
+    #[test]
+    fn selector_popup_sync_delays_empty_clears_cache() {
+        let mut st = state_with_groups(Vec::new());
+        st.group_delays.insert("g".into(), vec![("a".into(), 100u16)]);
+        let mut p = SelectorPopup::new("t".into(), "g".into(), vec!["a".into(), "b".into()], None);
+        // 首次测速结果到达：延迟入缓存，按 d 进入延迟排序
+        p.sync_delays(&st);
+        assert_eq!(p.delays.get("a"), Some(&100), "延迟应同步");
+        let _ = p.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(matches!(p.mode, SortMode::Delay));
+        // 再次测速全部超时：group_delays 为空 Vec → 清除过期缓存、回到原始顺序
+        st.group_delays.insert("g".into(), Vec::new());
+        p.sync_delays(&st);
+        assert!(p.delays.is_empty(), "过期延迟缓存应被清除");
+        assert!(matches!(p.mode, SortMode::Original), "无数据时延迟排序无意义，应重置为原始序");
+        let names: Vec<&str> = p.order.iter().map(|&i| p.items[i].as_str()).collect();
+        assert_eq!(names, vec!["a", "b"], "应恢复原始顺序: {names:?}");
+        // d 键恢复提示
+        let _ = p.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(p.hint.as_deref(), Some("请先按 s 测速"));
+    }
+
+    /// s 测速清除「请先按 s 测速」提示，避免残留到测速结果到达。
+    #[test]
+    fn selector_popup_test_delay_clears_hint() {
+        let mut p = SelectorPopup::new("t".into(), "g".into(), vec!["a".into()], None);
+        let _ = p.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(p.hint.as_deref(), Some("请先按 s 测速"));
+        assert!(matches!(
+            p.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+            Some(SelectAction::TestDelay)
+        ));
+        assert!(p.hint.is_none(), "按 s 后提示应清除");
     }
 
     /// Enter：URLTest 自动组弹「不可手动切换」提示，不发切换命令。

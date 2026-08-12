@@ -53,12 +53,14 @@
 | 其他 | external-controller | 文本 |
 | 其他 | secret | 只读；选中按 Enter 重新生成 |
 
-交互：
-- ↑/↓ 或 Tab/BackTab 移动选中行（跳过区块标题）；Home/End 跳首/末字段。
-- ←/→ 循环切换下拉；Text/Number 字段按 Enter 进入编辑模式（输入/退格/Delete/Home/End/←→），
-  Esc 退出编辑模式；Dropdown 字段 Enter 无操作。
+交互（2026-08-12 用户反馈修订：导航态恢复全局切页）：
+- 导航态（默认）：Tab/BackTab/←→/数字 1-6 与其他页一致——全局切页；↑↓/Home/End 移动选中行
+  （跳过区块标题）；Enter 为主操作键：Text/Number 字段进入编辑模式、Dropdown 字段循环选项、
+  secret 字段重新生成。
+- 编辑态（Enter 进入，状态行显示「[编辑中]」标记）：除 Ctrl-C 外全部按键归页面——字符/数字输入
+  （Number 字段过滤非数字）、←→/Home/End 移动光标、Backspace/Delete 删除，Esc/Enter 退出编辑态。
 - **Ctrl+S** 仅保存；**Ctrl+A** 保存并应用。
-- 页面底部状态行：显示「未保存」标记（当前值 ≠ 最近保存快照）、焦点字段提示。
+- 页面底部状态行：显示「未保存」标记（当前值 ≠ 最近保存快照）、「[编辑中]」标记与焦点字段提示。
 - 校验失败：错误弹窗（MessagePopup），**表单内容保留、焦点不动**，不落盘。
 
 ## 3. 数据流与一致性

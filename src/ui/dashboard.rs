@@ -250,7 +250,16 @@ fn next_mode(current: &str) -> &'static str {
     }
 }
 
-/// 顶栏状态行：`模式: rule [m] | TUN: on [t] | IPv6: on [6] | 出口IP: x [r] | API: 已连接`
+/// 顶栏状态行：`模式: rule [m] | TUN: on [t] | IPv6: on [6] | 出口IP: x「国家」 [r] | API: 已连接`
+/// 国家段文本：有国家 → 「国家名」；无国家信息但有 IP → 「未知」；IP 也未获取 → 空串。
+fn country_segment(country: Option<&str>, has_ip: bool) -> String {
+    match (country, has_ip) {
+        (Some(c), _) => format!("「{c}」"),
+        (None, true) => "「未知」".to_string(),
+        (None, false) => String::new(),
+    }
+}
+
 fn render_status(f: &mut Frame, area: Rect, st: &AppState) {
     let mode = if st.runtime.mode.is_empty() {
         st.settings.mode.as_str()
@@ -259,7 +268,8 @@ fn render_status(f: &mut Frame, area: Rect, st: &AppState) {
     };
     let tun = if st.runtime.tun_enable { "开" } else { "关" };
     let ipv6 = if st.runtime.ipv6 { "开" } else { "关" };
-    let ip = st.exit_ip.as_deref().unwrap_or("未知");
+    let ip = st.exit_ip.as_ref().map(|e| e.ip.as_str()).unwrap_or("未知");
+    let country = st.exit_ip.as_ref().and_then(|e| e.country.as_deref());
     let (api_text, api_color) = if st.api_ok {
         ("已连接", Color::Green)
     } else {
@@ -277,6 +287,8 @@ fn render_status(f: &mut Frame, area: Rect, st: &AppState) {
         Span::raw(" [6]  "),
         Span::raw("出口IP: "),
         Span::styled(ip, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        // 国家段：有国家 → 「中国香港」；无国家信息（IP 正常）→ 「未知」；IP 也未获取 → 不显示
+        Span::raw(country_segment(country, st.exit_ip.is_some())),
         Span::raw(" [r]  "),
         Span::raw("API: "),
         Span::styled(api_text, Style::default().fg(api_color).add_modifier(Modifier::BOLD)),
@@ -674,5 +686,17 @@ mod tests {
             // 关键不变量：保存失败时 st.settings 不应更新——内存与磁盘一致，仍为旧值
             assert!(!st.settings.tun.enable, "保存失败时 st.settings 不应更新");
         });
+    }
+
+    // ---- 出口 IP 国家展示 ----------------
+
+    /// country_segment 三态：有国家 → 「国家名」（忽略 has_ip）；
+    /// 无国家但有 IP → 「未知」；IP 也未获取 → 空串。
+    #[test]
+    fn country_segment_three_states() {
+        assert_eq!(country_segment(Some("中国香港"), true), "「中国香港」");
+        assert_eq!(country_segment(Some("美国"), false), "「美国」"); // 有国家时忽略 has_ip
+        assert_eq!(country_segment(None, true), "「未知」");
+        assert_eq!(country_segment(None, false), "");
     }
 }

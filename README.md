@@ -10,13 +10,13 @@ Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订�
 四个页面，顶部 Tabs 切换（`Tab`/`←`/`→`/`1`-`4`），底部为按键提示栏与最近通知
 （`[✓]` 绿色成功 / `[✗]` 红色失败 / `[!]` 黄色警告，**显示**最近 3 条、内部保留 5 条）。
 
-**仪表盘（首页）**——模式/TUN/IPv6/出口 IP 热切换、连接列表、网络速率/累计流量、内存：
+**仪表盘（首页）**——模式/TUN/IPv6/出口 IP（含国家）热切换、连接列表、网络速率/累计流量、内存：
 
 ```
 ┌ mihomo-tui ──────────────────────────────────────────────────────────────────────────────────────┐
 │ 仪表盘  │  订阅  │  规则组  │  规则                                                              │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-模式: rule [m]  TUN: 关 [t]  IPv6: 关 [6]  出口IP: 9.9.9.9 [r]  API: 已连接
+模式: rule [m]  TUN: 关 [t]  IPv6: 关 [6]  出口IP: 9.9.9.9「美国」 [r]  API: 已连接
 ┌ 连接 ────────────────────────────────────────────────────┐┌ 网络 ────────────────────────────────┐
 │example.com TCP ↑1.2 MB ↓300 KB                           ││↑ 上行 37.4 KB/s           累计 6.1 MB│
 │1.2.3.4:443 UDP ↑0 B ↓88 B                                ││ ▆▃   ▃      ▁▇▃ ▃   █▃▆   ▇ ▁    ▁   │
@@ -45,12 +45,13 @@ Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订�
 [m] 模式   [t] TUN   [6] IPv6   [r] 出口IP   [s] 设置   [i] 安装   [Tab] 切页   [?] 帮助   [q] 退出
 ```
 
-> 上图来自演示环境（假 API 数据）；真实环境中「出口IP」显示经代理探测到的公网出口地址。
+> 上图来自演示环境（假 API 数据）；真实环境中「出口IP」显示经代理探测到的公网出口地址及所在
+> 国家/地区（中文名，如「美国」；无国家信息时显示「未知」）。
 > 窗口过窄（body 宽度 < 60 列）时「连接」框自动隐藏，「网络 + 内存」占满全宽。
 
 - 左 60%：连接列表（GET /connections 每 3 秒轮询，按建立时间倒序；目标 host + TCP/UDP 色标 + ↑↓ 流量；窗口宽度 < 60 列时自动隐藏，网络/内存占满全宽）
 - 右 40%：网络（上行/下行速率左对齐 + 累计流量右对齐，双 Sparkline；累计来自 /traffic 流 upTotal/downTotal）+ 内存占用（inuse + Sparkline）
-- `m`/`t`/`6`：模式 / TUN / IPv6 运行时热切换（PATCH，不重启）；`r` 手动刷新出口 IP；
+- `m`/`t`/`6`：模式 / TUN / IPv6 运行时热切换（PATCH，不重启）；`r` 手动刷新出口 IP（含国家/地区）；
   `i` 安装提权组件（首次启动拒绝后的重试入口）；`s` 网络设置表单（结构性变更流程）
 
 **订阅管理**
@@ -126,14 +127,15 @@ cargo build --release
 
 - `m`：循环切换 `rule → global → direct`，`t` 开关 TUN，`6` 开关 IPv6——三者均为
   `PATCH /configs` 热切换，立即生效、不重启（TUN 需进程持有 `CAP_NET_ADMIN`，见「前提」）
-- `r`：手动刷新出口 IP（每 60s 自动刷新；应用配置成功后自动立即重测一次）
+- `r`：手动刷新出口 IP（每 60s 自动刷新；应用配置成功后自动立即重测一次）；出口 IP 经代理探测，
+  同时返回国家/地区（ip-api.com / cloudflare / ipwho.is 优先，纯 IP 端点兜底）
 - `s`：网络设置表单（port / socks-port / mixed-port / allow-lan / log-level /
   tun.stack · auto-route · mtu · dns-hijack / dns.enable · nameserver）→ 保存
   `settings.toml` → 合并 → 校验 → 应用（结构性变更流程，见「混合生效策略」）。
   注意：DNS 仅 `enable` 与 `nameserver` 两项可在表单中修改；其余 DNS 字段
   （`listen` / `enhanced-mode` / `fake-ip-range` / `default-nameserver` / `fallback` /
   `fake-ip-filter`）需手改 `settings.toml` 后重启本程序与 mihomo
-- 出口 IP 获取失败时弹出诊断弹窗（见 FAQ），恢复成功自动关闭陈旧弹窗并通知
+- 出口 IP 获取失败时弹出诊断弹窗（见 FAQ），恢复成功自动关闭陈旧弹窗并通知（恢复通知含国家名）
 
 ### 订阅管理
 
@@ -271,7 +273,7 @@ WantedBy=multi-user.target
 | `m` | 循环切换模式 rule / global / direct（PATCH 热切） |
 | `t` | 开关 TUN（PATCH 热切，需进程持有 CAP_NET_ADMIN） |
 | `6` | 开关 IPv6（PATCH 热切） |
-| `r` | 手动刷新出口 IP |
+| `r` | 手动刷新出口 IP（含国家） |
 | `s` | 网络设置表单（结构性变更：保存 → 合并 → 校验 → 应用重启） |
 | `i` | 安装提权组件（首次启动拒绝后的重试入口） |
 
@@ -301,7 +303,8 @@ src/
                   7 种协议解析（vless/vmess/trojan/ss/ssr/hysteria2/tuic；hy2:// 并入 hysteria2）
     merger.rs     合并器：网络段 + 自定义规则 + 订阅内容（节点/组/规则透传）→ config.yaml
     client.rs     REST 客户端（/version /configs /proxies /group/{name}/delay /traffic /memory）
-    exit_ip.rs    出口 IP 探测（多代理端口 × 多回显端点降级，失败分类 + 中文提示）
+    exit_ip.rs    出口 IP+国家探测（多代理端口 × 多端点降级，失败分类 + 中文提示）
+    country.rs    国家/地区代码→中文名映射（ISO 3166-1 alpha-2）
     apply.rs      mihomo -t 预校验 + sudo 提权应用（非交互失败分类）
   service/
     installer.rs 首装检测与提权组件安装（脚本 + sudoers + 组）
@@ -436,12 +439,14 @@ rules:
 
 **Q：出口 IP 显示未知 / 获取失败？**
 出口 IP 每 60s 自动刷新一次（应用配置成功后立即重测），探测顺序 mixed → http → socks5，
-每个端口依次尝试 10 个回显端点（cloudflare trace / ipify / icanhazip / ipinfo / 3322 / ifconfig 等），
-失败最多重试 3 次（间隔 5s）。失败弹窗带分类诊断：
+每个端口依次尝试 12 个端点：ip-api.com / cloudflare trace / ipwho.is 优先（一次请求同时返回
+IP 与国家/地区），失败后回退 ipify / icanhazip / ipinfo / 3322 / ifconfig 等纯 IP 端点。
+IP 正常但国家信息缺失时（如纯 IP 端点兜底成功）显示「未知」。失败最多重试 3 次（间隔 5s）。
+失败弹窗带分类诊断：
 - 全部端口连接被拒 → mihomo 未运行或端口配置不一致（`systemctl status mihomo`）
 - REST API 可达但代理端口不通 → 检查 mihomo 运行配置的代理端口与设置是否一致（或防火墙拦截）
 - REST API 也不可达 → mihomo 可能未运行
-恢复成功后自动关闭陈旧错误弹窗并通知「出口 IP 恢复」。
+恢复成功后自动关闭陈旧错误弹窗并通知「出口 IP 恢复」（含国家名）。
 
 **Q：为什么安装/应用时还要输 sudo 密码？**
 安装器与提权应用都使用交互式 sudo（安全考虑，不缓存凭据）。安装完成后**重新登录终端**，

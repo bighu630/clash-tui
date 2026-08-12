@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use crate::core::apply::{apply_config, validate_config, ApplyOutcome};
 use crate::core::client::{Client, ConnInfo, ConnSnapshot, GroupInfo, MemoryFrame, RuntimeConfig, TrafficFrame};
 use crate::core::client::GROUP_DELAY_TIMEOUT_MS;
-use crate::core::exit_ip::{self, ProxyPorts};
+use crate::core::exit_ip::{self, ExitInfo, ProxyPorts};
 use crate::core::models::{NetworkSettings, Overrides, Subscription, SubscriptionCache};
 use crate::core::settings::{
     load_overrides, load_settings, load_subscriptions, save_overrides, save_subscriptions,
@@ -48,7 +48,7 @@ pub struct AppState {
     pub traffic: VecDeque<TrafficFrame>,
     pub mem_history: VecDeque<u64>,
     pub connections: Vec<ConnInfo>,
-    pub exit_ip: Option<String>,
+    pub exit_ip: Option<ExitInfo>,
     /// 运行时策略组快照（GET /proxies；规则组页数据源）
     pub proxy_groups: Vec<GroupInfo>,
     /// 整组延迟测试结果缓存（组名 → 节点延迟；弹窗内测速静默模式也写入，
@@ -147,7 +147,7 @@ pub enum UiEvent {
     },
     ApplyDone(Result<ApplyOutcome, String>),
     SubscriptionFetched(usize, Result<SubscriptionCache, String>),
-    ExitIp(Result<String, String>),
+    ExitIp(Result<ExitInfo, String>),
     ConfigsRefreshed(Result<RuntimeConfig, String>),
     GroupsRefreshed(Result<Vec<GroupInfo>, String>),
     GroupSwitched {
@@ -642,7 +642,7 @@ where
                 Err(e) => self.popup_error("订阅拉取失败", e),
             },
             UiEvent::ExitIp(res) => match res {
-                Ok(ip) => {
+                Ok(info) => {
                     // 恢复成功：关闭先前失败留下的陈旧错误弹窗（内容已过时）
                     if self
                         .result_popup
@@ -654,9 +654,13 @@ where
                     // 此前有失败：通知恢复；无失败历史时静默更新
                     if self.exit_ip_was_error {
                         self.exit_ip_was_error = false;
-                        self.state.notice(format!("[✓] 出口 IP 恢复: {ip}"));
+                        let label = match (&info.country, info.ip.as_str()) {
+                            (Some(c), ip) => format!("{ip}「{c}」"),
+                            (None, ip) => ip.to_string(),
+                        };
+                        self.state.notice(format!("[✓] 出口 IP 恢复: {label}"));
                     }
-                    self.state.exit_ip = Some(ip);
+                    self.state.exit_ip = Some(info);
                 }
                 Err(e) => {
                     self.exit_ip_was_error = true;
@@ -1488,17 +1492,27 @@ mod tests {
         );
         assert!(app.state.exit_ip.is_none());
         // 恢复：陈旧弹窗关闭 + 通知恢复
-        app.on_ui_event(UiEvent::ExitIp(Ok("1.2.3.4".into())));
+        app.on_ui_event(UiEvent::ExitIp(Ok(ExitInfo { ip: "1.2.3.4".into(), country: None })));
         assert!(app.result_popup.is_none(), "恢复成功后应关闭陈旧错误弹窗");
-        assert_eq!(app.state.exit_ip.as_deref(), Some("1.2.3.4"));
+        assert_eq!(
+            app.state.exit_ip.as_ref().map(|e| e.ip.as_str()),
+            Some("1.2.3.4")
+        );
+        assert_eq!(
+            app.state.exit_ip.as_ref().and_then(|e| e.country.as_deref()),
+            None
+        );
         assert!(
             app.state.notices.iter().any(|n| n.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
             "应通知恢复: {:?}",
             app.state.notices
         );
         // 再次成功：无失败历史，静默更新不重复通知
-        app.on_ui_event(UiEvent::ExitIp(Ok("5.6.7.8".into())));
-        assert_eq!(app.state.exit_ip.as_deref(), Some("5.6.7.8"));
+        app.on_ui_event(UiEvent::ExitIp(Ok(ExitInfo { ip: "5.6.7.8".into(), country: None })));
+        assert_eq!(
+            app.state.exit_ip.as_ref().map(|e| e.ip.as_str()),
+            Some("5.6.7.8")
+        );
         assert!(
             !app.state.notices.iter().any(|n| n.contains("5.6.7.8")),
             "无失败历史时不应再通知恢复: {:?}",
@@ -1514,7 +1528,7 @@ mod tests {
         assert!(app.exit_ip_was_error, "失败应置位 exit_ip_was_error");
         // 用户随后打开了另一个弹窗
         app.result_popup = Some(MessagePopup::new("应用结果".into(), vec!["x".into()]));
-        app.on_ui_event(UiEvent::ExitIp(Ok("1.2.3.4".into())));
+        app.on_ui_event(UiEvent::ExitIp(Ok(ExitInfo { ip: "1.2.3.4".into(), country: None })));
         assert!(
             app.result_popup.is_some(),
             "非出口 IP 弹窗不应被关闭"
@@ -1528,6 +1542,25 @@ mod tests {
         assert!(
             app.state.notices.iter().any(|n| n.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
             "应通知恢复: {:?}",
+            app.state.notices
+        );
+    }
+
+    /// 恢复通知带国家名：country 存在时通知为 `IP「国家」` 格式。
+    #[test]
+    fn exit_ip_recovery_notice_includes_country() {
+        let (mut app, _rx) = test_app(24);
+        app.on_ui_event(UiEvent::ExitIp(Err("出口 IP 获取失败: 连接被拒".into())));
+        app.on_ui_event(UiEvent::ExitIp(Ok(ExitInfo {
+            ip: "43.243.192.97".into(),
+            country: Some("中国香港".into()),
+        })));
+        assert!(
+            app.state
+                .notices
+                .iter()
+                .any(|n| n.contains("[✓] 出口 IP 恢复: 43.243.192.97「中国香港」")),
+            "应通知恢复且带国家: {:?}",
             app.state.notices
         );
     }

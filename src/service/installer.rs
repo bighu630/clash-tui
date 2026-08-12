@@ -13,8 +13,10 @@
 //! 与 sudo 密码提示互相干扰。sudoers 写入一律走 `sudo tee`，避免 shell 注入。
 
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+
+use crate::core::settings::config_dir;
 
 /// 提权脚本安装路径（sudoers 授权即针对此路径）
 pub const APPLY_SCRIPT: &str = "/usr/local/sbin/mihomo-apply";
@@ -22,23 +24,52 @@ pub const APPLY_SCRIPT: &str = "/usr/local/sbin/mihomo-apply";
 pub const SUDOERS_FILE: &str = "/etc/sudoers.d/99-mihomo";
 /// 提权授权组名
 pub const ADMIN_GROUP: &str = "mihomo-admin";
+/// 本地安装标记文件名（位于 TUI 配置目录；安装成功后写入，供无特权启动检测使用）。
+pub const INSTALL_MARKER: &str = "installed.marker";
+
+/// 安装标记路径：TUI 配置目录下（MIHOMO_TUI_SETTINGS_DIR 可覆盖）。
+pub fn installed_marker_path() -> PathBuf {
+    config_dir().join(INSTALL_MARKER)
+}
 
 /// 生成 sudoers 规则行：组内成员免密以 root 执行提权脚本（内容与安装路径强绑定）。
 pub fn sudoers_line() -> String {
     format!("%{ADMIN_GROUP} ALL=(root) NOPASSWD: {APPLY_SCRIPT}\n")
 }
 
-/// 首次安装检测：提权脚本存在且可执行、sudoers 文件存在 → 已安装，返回 false。
+/// 首次安装检测：提权脚本存在（系统侧）或本地安装标记存在（本机侧）→ 已安装，返回 false。
+///
+/// 注意：刻意不 stat /etc/sudoers.d/99-mihomo——该目录为 root:root 0750，
+/// 普通用户（TUI 的运行者）stat 必然 EACCES，会导致已安装环境每次启动误报
+/// "首次安装"（历史 bug）。启动检测也不触发任何 sudo 命令。
 pub async fn needs_install() -> bool {
-    !(apply_script_ok() && Path::new(SUDOERS_FILE).is_file())
+    !is_installed()
+}
+
+/// 已安装判定：提权脚本可执行 或 本地安装标记存在，任一满足即视为已安装。
+pub fn is_installed() -> bool {
+    is_installed_with(Path::new(APPLY_SCRIPT), &installed_marker_path())
+}
+
+/// 判定核心（可测）：注入脚本路径与标记路径。
+fn is_installed_with(apply_script: &Path, marker: &Path) -> bool {
+    apply_script_ok_at(apply_script) || marker.is_file()
 }
 
 /// 提权脚本是否存在且可执行（等价 `test -x`）。
-fn apply_script_ok() -> bool {
-    Path::new(APPLY_SCRIPT)
-        .metadata()
+fn apply_script_ok_at(path: &Path) -> bool {
+    path.metadata()
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
+}
+
+/// 写入本地安装标记（内容：版本号；检测仅看存在性）。配置目录由 config_dir() 创建（0700）。
+fn write_install_marker() -> Result<(), InstallError> {
+    let path = installed_marker_path();
+    let content = format!("installed-by mihomo-tui {}\n", env!("CARGO_PKG_VERSION"));
+    std::fs::write(&path, content)
+        .and_then(|_| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)))
+        .map_err(|e| InstallError::Other(format!("写入安装标记 {} 失败: {e}", path.display())))
 }
 
 /// 安装错误。所有变体均携带可直接展示给用户的完整信息。
@@ -102,6 +133,12 @@ pub async fn install() -> Result<Vec<String>, InstallError> {
 
     // f. 将当前用户加入 mihomo-admin 组
     add_user_to_group(&mut logs)?;
+
+    // h. 本地安装标记：安装成功后写入，供无特权启动检测识别（不因标记失败而中断安装）。
+    match write_install_marker() {
+        Ok(()) => logs.push("✓ 已写入本地安装标记（启动检测将识别为已安装）".to_string()),
+        Err(e) => logs.push(format!("⚠ 无法写入本地安装标记（系统侧组件已装好，不影响使用）：{e}")),
+    }
 
     // g. 询问式 enable：不自动执行，仅给出提示（UI 侧可在安装成功后询问用户）
     logs.push("安装完成！启用服务（也可在 TUI 内确认后执行）：".to_string());
@@ -358,5 +395,105 @@ mod tests {
             })
             .unwrap_or(false);
         assert_eq!(session_has_admin_group(), manual);
+    }
+
+    /// 临时目录辅助：每个测试独立子目录（并行测试互不干扰），测完删除。
+    fn test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "mihomo-tui-installer-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn cleanup_dir(dir: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 创建可执行脚本（0755）。
+    fn make_executable_script(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// 提权脚本存在且可执行、无本地标记 → 已安装（系统侧组件齐备）。
+    #[test]
+    fn is_installed_with_apply_script_only() {
+        let dir = test_dir("apply-script-only");
+        let script = make_executable_script(&dir, "mihomo-apply");
+        assert!(is_installed_with(&script, &dir.join("installed.marker")));
+        cleanup_dir(&dir);
+    }
+
+    /// 回归核心：本地安装标记存在（无需系统侧任何组件）→ 已安装。
+    /// 模拟本机场景：脚本在、sudoers 目录对普通用户不可 stat（EACCES），
+    /// 检测不得依赖 sudoers 文件可见性。
+    #[test]
+    fn is_installed_with_marker_only() {
+        let dir = test_dir("marker-only");
+        let script = dir.join("mihomo-apply");
+        let marker = dir.join("installed.marker");
+        std::fs::write(&marker, "installed-by mihomo-tui test\n").unwrap();
+        assert!(is_installed_with(&script, &marker));
+        cleanup_dir(&dir);
+    }
+
+    /// 两者皆无 → 未安装。
+    #[test]
+    fn is_installed_false_when_nothing_present() {
+        let dir = test_dir("nothing");
+        assert!(!is_installed_with(&dir.join("mihomo-apply"), &dir.join("installed.marker")));
+        cleanup_dir(&dir);
+    }
+
+    /// 脚本存在但无执行位（0644）→ 不算已安装。
+    #[test]
+    fn is_installed_false_when_script_not_executable() {
+        let dir = test_dir("not-executable");
+        let script = dir.join("mihomo-apply");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!is_installed_with(&script, &dir.join("installed.marker")));
+        cleanup_dir(&dir);
+    }
+
+    /// 写标记：内容含版本号、权限 0600，写后 is_installed_with 立即识别。
+    /// 与 settings 测试共用 SETTINGS_DIR_LOCK（with_settings_dir），勿自行改 env。
+    #[test]
+    fn write_install_marker_persists_and_detected() {
+        crate::core::settings::with_settings_dir(|| {
+            write_install_marker().unwrap();
+            let marker = installed_marker_path();
+            assert!(marker.is_file(), "标记文件应已写入: {}", marker.display());
+            let mode = std::fs::metadata(&marker).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "标记文件权限应为 0600");
+            let content = std::fs::read_to_string(&marker).unwrap();
+            assert!(
+                content.starts_with(&format!(
+                    "installed-by mihomo-tui {}",
+                    env!("CARGO_PKG_VERSION")
+                )),
+                "标记内容应含版本号: {content}"
+            );
+            // 无提权脚本时，仅凭标记即判定已安装
+            assert!(is_installed_with(Path::new("/nonexistent/mihomo-apply"), &marker));
+        });
+    }
+
+    /// 真实机器回归（环境自适应，无条件跳过逻辑）：本机若已安装提权脚本，
+    /// 检测必须识别为已安装；标记路径用固定不存在的路径，不触碰 env 变量。
+    #[test]
+    fn real_machine_apply_script_detected() {
+        if Path::new(APPLY_SCRIPT).exists() {
+            assert!(apply_script_ok_at(Path::new(APPLY_SCRIPT)));
+            assert!(is_installed_with(
+                Path::new(APPLY_SCRIPT),
+                Path::new("/nonexistent/installed.marker")
+            ));
+        }
     }
 }

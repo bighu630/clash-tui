@@ -35,13 +35,21 @@ impl LogsPage {
     }
 
     /// 向上回溯 n 行（暂停跟随，不能越过缓冲开头）。
-    fn scroll_up(&mut self, n: usize) {
+    /// 跟随状态下首次滚动先锚定当前跟随窗口首行（total - view_rows），逐行上移。
+    fn scroll_up(&mut self, n: usize, total: usize) {
+        if self.follow {
+            self.top = total.saturating_sub(self.view_rows);
+        }
         self.follow = false;
         self.top = self.top.saturating_sub(n);
     }
 
     /// 向下滚动 n 行；窗口底部到达最新日志（top >= total - view_rows）时恢复跟随。
+    /// 跟随状态下按 ↓ 钳制回底部，保持跟随（no-op）。
     fn scroll_down(&mut self, n: usize, total: usize) {
+        if self.follow {
+            self.top = total.saturating_sub(self.view_rows);
+        }
         self.follow = false;
         let max_top = total.saturating_sub(self.view_rows);
         self.top = self.top.saturating_add(n).min(max_top);
@@ -120,7 +128,7 @@ impl Page for LogsPage {
                 None
             }
             KeyCode::Up => {
-                self.scroll_up(1);
+                self.scroll_up(1, st.logs.len());
                 None
             }
             KeyCode::Down => {
@@ -128,7 +136,7 @@ impl Page for LogsPage {
                 None
             }
             KeyCode::PageUp => {
-                self.scroll_up(10);
+                self.scroll_up(10, st.logs.len());
                 None
             }
             KeyCode::PageDown => {
@@ -236,20 +244,39 @@ mod tests {
         assert_eq!(text, "hi");
     }
 
+    /// 跟随状态下首次滚动必须锚定当前跟随窗口（尾部），不能跳到缓冲开头。
+    #[test]
+    fn scroll_from_follow_anchors_near_tail_not_head() {
+        let mut page = LogsPage::new(); // follow=true, top=0
+        page.view_rows = 20;
+        page.scroll_up(1, 100);
+        assert!(!page.follow);
+        assert_eq!(page.top, 79);
+        assert_eq!(LogsPage::visible_range(100, 20, false, page.top), (79, 99));
+        // 跟随中按 ↓ 保持跟随、窗口不变
+        let mut page = LogsPage::new();
+        page.view_rows = 20;
+        page.scroll_down(1, 100);
+        assert!(page.follow);
+        assert_eq!(LogsPage::visible_range(100, 20, true, page.top), (80, 100));
+    }
+
     #[test]
     fn scroll_up_pauses_follow() {
         let mut page = LogsPage::new();
+        page.follow = false; // 暂停态：top 已锚定，直接回溯
         page.top = 10;
-        page.scroll_up(3);
+        page.scroll_up(3, 100);
         assert!(!page.follow);
         assert_eq!(page.top, 7);
-        page.scroll_up(100);
+        page.scroll_up(100, 100);
         assert_eq!(page.top, 0, "不能越过缓冲开头");
     }
 
     #[test]
     fn scroll_down_back_to_bottom_resumes_follow() {
         let mut page = LogsPage::new();
+        page.follow = false; // 暂停态
         page.view_rows = 20;
         page.top = 50;
         page.scroll_down(3, 100);
@@ -260,6 +287,7 @@ mod tests {
         assert!(page.follow, "到达底部应恢复跟随");
         // 越过底部钳制
         let mut page2 = LogsPage::new();
+        page2.follow = false; // 暂停态
         page2.view_rows = 20;
         page2.top = 90;
         page2.scroll_down(10, 100);

@@ -1050,7 +1050,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_group_delay_parses_proxies_map() {
+    async fn test_group_delay_parses_flat_format() {
+        // 扁平格式（实测 mihomo v1.19.x 返回 {节点: ms}）：直接解析节点→延迟映射
         let (port, _rx) = spawn_api_server().await;
         let list = client_on(port).test_group_delay("自动选择").await.unwrap();
         assert_eq!(list, vec![("节点A".to_string(), 123), ("节点B".to_string(), 8000)]);
@@ -1069,6 +1070,14 @@ mod tests {
         // 空对象 {} → 空列表，不报错
         let port = spawn_single_response_server(r#"{}"#.to_string()).await;
         let list = client_on(port).test_group_delay("自动选择").await.unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_group_delay_non_object_body_returns_empty() {
+        // 非对象响应（JSON 字符串）→ 空列表，不 panic、不报错
+        let port = spawn_single_response_server(r#""oops""#.to_string()).await;
+        let list = client_on(port).test_group_delay("任意组").await.unwrap();
         assert!(list.is_empty());
     }
 

@@ -403,6 +403,7 @@ mod tests {
             traffic: VecDeque::new(),
             mem_history: VecDeque::new(),
             exit_ip: None,
+            proxy_groups: Vec::new(),
             notices: VecDeque::new(),
         }
     }

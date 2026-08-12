@@ -149,16 +149,17 @@ pub struct ProxyNode {
     pub yaml: serde_yaml::Value,
 }
 
-/// 用户覆盖配置（自定义组 + 自定义规则）。
+/// 用户覆盖配置（自定义规则；groups 已废弃，仅保留反序列化以迁移旧数据）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Overrides {
+    /// 已废弃：仅用于读取旧 overrides.toml 迁移（启动时清空），合并器/UI 不再使用。
     #[serde(default)]
     pub groups: Vec<UserGroup>,
     #[serde(default)]
     pub rules: Vec<UserRule>,
 }
 
-/// 自定义规则组。
+/// 自定义规则组（已废弃：仅用于反序列化旧 overrides.toml 以启动迁移，不再创建）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserGroup {
     pub name: String,

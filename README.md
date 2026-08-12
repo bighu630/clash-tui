@@ -64,20 +64,19 @@ Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订�
 
 - `a` 添加订阅（名称 + URL）→ 拉取并解析（失败自动经本地 mixed-port 代理重试一次）；
   `Enter` 激活（合并 → 校验 → 应用）；`r` 刷新；`d` 删除（确认弹窗）
-- 激活订阅的节点、其他自定义组、订阅组与内置目标（DIRECT 等）自动成为「规则组」页的组员候选
 
 **规则组**
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ 🚀 节点选择 | select | 成员4 | http://www.gstatic.com/generate_204 | 300s                        │
-│ 流媒体 | url-test | 成员1 | http://www.gstatic.com/generate_204 | 300s                           │
+│ 🚀 节点选择 | select | 当前: 🇯🇵 JP                                                                      │
+│ 自动选择 | url-test | 当前: 🇭🇰 HK                                                                      │
 │                                                                                                  │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- `n` 新建表单（名称 / 类型下拉 select·url-test·fallback / 测速 URL / interval / tolerance）
-- `Enter` 编辑；`m` 成员勾选弹窗（支持输入过滤）；`d` 删除（确认弹窗，被引用时提示引用方）
+- 规则组页只读展示订阅/运行时策略组：select 组可切换节点（PUT /proxies，重启后保持），
+  url-test/fallback 等自动组展示但禁选并提示；支持整组延迟测试
 
 **规则**
 
@@ -117,7 +116,7 @@ cargo build --release
 
 # 5. 日常使用：
 #    仪表盘  m/t/6 热切换模式/TUN/IPv6，r 刷新出口 IP，s 网络设置
-#    规则组/规则页  自定义分流策略（见「使用指南」）
+#    规则组/规则页  分流策略：规则组只读展示与切换、规则页自定义规则（见「使用指南」）
 #    也可手动生成配置：cargo run --example merge_sample > /tmp/config.yaml
 ```
 
@@ -143,29 +142,26 @@ cargo build --release
 3. `Enter` 激活：**未拉取过（无缓存）或缓存无节点**的订阅会拒绝激活并提示
 4. `r` 刷新选中订阅；`d` 删除（确认后移除并落盘）
 
-### 规则组（支持嵌套：组引用组）
+### 规则组（只读展示 + 运行时切换）
 
-创建「🚀 节点选择」select 组：
+规则组不再支持自定义编辑（增删改已移除），页面展示 mihomo 运行时实际生效的策略组：
 
-1. 规则组页按 `n` → 名称 `🚀 节点选择`、类型 `select` → 回车（此时暂无成员）
-2. 按 `m` 打开成员勾选弹窗，`Space` 勾选节点（如 `🇯🇵 JP`、`🇭🇰 HK`）与 `DIRECT`，回车保存
-3. 成员候选 = 激活订阅节点 ∪ 其他自定义组 ∪ 订阅组 ∪ 内置目标（DIRECT 等）；
-   `/` 或直接输入字母过滤；勾选状态在过滤时保留；组不能为空（合并器/校验都会拒绝）
-
-创建引用订阅组的嵌套组（组引用组）：
-
-1. 再按 `n` → 名称 `流媒体`、类型 `url-test`、URL/interval 用默认值 → 回车
-2. 按 `m` 勾选 `自动选择`（来自订阅的 url-test 组）→ 回车
-3. 合并器允许自定义组 ↔ 订阅组互相引用、链式引用（如 A 组引用 B 组），
-   写前检测直接/间接/混合循环引用并报 MergeError（见「合并器组装顺序与去重规则」）
-
-删除组时若被规则或其他组引用，确认弹窗会列出引用方（仍可删除，应用时校验会报错）。
+1. 列表行 = `组名 | 类型 | 当前选择`。数据来自 `GET /proxies`（API 不可用时降级展示
+   激活订阅缓存中的组，当前选择显示 `-`）
+2. `Enter` 切换节点：**select（手动选择）组**弹出成员单选列表（`▶` 标记当前项），
+   `j/k` 移动、`Enter` 确认——通过 `PUT /proxies/{组名}` 切换，成功即时生效并刷新
+3. **自动选择组**（url-test / fallback / load-balance 等）按 `Enter` 会提示
+   "自动选择，不可手动切换"——节点由 mihomo 自动测速/健康检查决定
+4. `r` 整组延迟测试（`GET /group/{组名}/delay`）：结果弹窗按延迟升序显示各节点
+   延迟，超时显示"超时"；`R` 手动刷新组列表（进入页面/切换节点/测速后自动刷新）
+5. 选择持久化：合并器输出 `profile: store-selected: true`，select 组的运行时选择
+   写入 mihomo 缓存，重启后保持
 
 ### 规则（顺序即优先级）
 
-1. 规则页按 `n` → 类型 `DOMAIN-SUFFIX` → payload `netflix.com` → 目标下拉选 `流媒体` → 回车
+1. 规则页按 `n` → 类型 `DOMAIN-SUFFIX` → payload `netflix.com` → 目标下拉选 `自动选择`（订阅组）→ 回车
 2. `K`/`J` 上移/下移调整优先级；合并输出时自定义规则恒排在订阅规则之前
-3. 目标下拉 = 内置目标 ∪ 自定义组 ∪ 激活订阅组；MATCH 类型无 payload 字段
+3. 目标下拉 = 内置目标 ∪ 激活订阅组；MATCH 类型无 payload 字段
 
 ## 前提
 
@@ -281,14 +277,14 @@ WantedBy=multi-user.target
 
 **订阅页**：`a` 添加 · `Enter` 激活 · `r` 刷新 · `d` 删除
 
-**规则组页**：`n` 新建 · `Enter` 编辑 · `m` 编辑成员 · `d` 删除
+**规则组页**：`Enter` 切换节点（select 组）· `r` 整组延迟测试 · `R` 刷新
 
 **规则页**：`n` 新建 · `Enter` 编辑 · `d` 删除 · `K` 上移 · `J` 下移
 
 弹窗通用：
 
 - 表单：`Tab`/`↑↓` 切换字段 · `←`/`→` 编辑（下拉选项循环切换）· `Enter` 确认 · `Esc` 取消
-- 勾选列表（成员选择）：`j`/`k`/`↑↓` 移动 · `Space` 勾选 · `/` 或字母过滤 · `Enter` 确定 · `Esc` 取消
+- 单选列表（节点切换）：`j`/`k`/`↑↓` 移动 · `Enter` 确认 · `Esc` 取消（`▶` 标记当前项）
 - 确认/消息弹窗：`y`/`Enter` 确认 · `n`/`Esc` 取消（消息弹窗 `Esc`/`Enter`/`q` 关闭，`↑↓` 滚动）
 
 ## 架构
@@ -303,8 +299,8 @@ src/
     settings.rs   配置文件读写（~/.config/mihomo-tui/，原子替换，目录 0700 / 文件 0600）
     subscription.rs / parsers/   订阅拉取（直连失败经本地代理重试）、识别（YAML vs ShareLinks）、
                   7 种协议解析（vless/vmess/trojan/ss/ssr/hysteria2/tuic；hy2:// 并入 hysteria2）
-    merger.rs     合并器：网络段 + 自定义组/规则 + 订阅内容 → config.yaml
-    client.rs     REST 客户端（/version /configs /traffic /memory，PATCH /configs）
+    merger.rs     合并器：网络段 + 自定义规则 + 订阅内容（节点/组/规则透传）→ config.yaml
+    client.rs     REST 客户端（/version /configs /proxies /group/{name}/delay /traffic /memory）
     exit_ip.rs    出口 IP 探测（多代理端口 × 多回显端点降级，失败分类 + 中文提示）
     apply.rs      mihomo -t 预校验 + sudo 提权应用（非交互失败分类）
   service/
@@ -317,46 +313,38 @@ examples/
 
 ### 合并器组装顺序与去重规则
 
-输出 `config.yaml` 顶层键顺序：网络段 → `proxy-groups` → `rules` → `proxies`。
+输出 `config.yaml` 顶层键顺序：网络段 → `profile` → `proxy-groups` → `rules` → `proxies`。
 
 组装顺序：
 
 1. **网络段**：port / socks-port / mixed-port / allow-lan / mode / ipv6 / log-level / external-controller / secret / tun / dns（全部字段）
-2. **proxy-groups** = 自定义组 + 订阅组 + 自动组（兜底，需要时）
-3. **rules** = 自定义规则 + 订阅规则 + 默认模板（兜底，需要时）
-4. **proxies** = 订阅节点
+2. **profile**：`store-selected: true`（select 组运行时选择持久化，重启后保持）
+3. **proxy-groups** = 订阅组原样透传（保序、保字段，不做过滤/校验）+ 自动组（兜底，需要时）
+4. **rules** = 自定义规则 + 订阅规则 + 默认模板（兜底，需要时）
+5. **proxies** = 订阅节点
 
 去重与冲突规则（丢弃/剔除记 warning 展示）：
 
 | 冲突 | 处理 |
 |---|---|
 | 订阅 proxies 内重名节点 | 保留第一个 |
-| 自定义组名 = 订阅组名 | 保留自定义，丢弃订阅同名组 |
-| 订阅组名 = 节点名 | 丢弃该订阅组（节点名优先） |
-| 订阅组名 = 内置目标（DIRECT 等） | 丢弃该订阅组（内置目标优先）；其他组成员引用该名仍保留，解析为内置目标 |
-| 订阅组之间重名 | 保留第一个，丢弃其余；对该名的引用解析到首个组 |
-| 订阅组成员引用「与自定义组重名被丢弃的订阅组」 | 剔除该成员 + warning「引用了已丢弃的订阅组」 |
-| 订阅组成员引用「与节点重名被丢弃的订阅组」 | 保留，解析为该节点 |
+| 订阅组之间重名 / 订阅组名 = 节点名 / 内置目标 | 原样保留（透传，由 `mihomo -t` 预校验兜底） |
+| 订阅组成员引用缺失（幽灵成员）/ 组间循环引用 | 原样保留（透传，由 `mihomo -t` 预校验兜底） |
 | 订阅规则与已有规则重复 | 丢弃 + warning |
 | 订阅规则格式异常（段数不足） | 丢弃 + warning |
-| 自定义组名 = 节点名 | **MergeError**（用户必须改名） |
-| 自定义组之间重名 | **MergeError**（提示改名） |
-| 自定义组名 = 内置目标 | **MergeError**（提示改名） |
-| 自定义组无成员（空组） | **MergeError**（mihomo 拒绝空组；UI 也阻止零勾选保存） |
-| 自定义规则 target / 组成员不存在 | **MergeError**（消息指明规则/组与缺失项） |
-| 组成员引用其他组 / 内置目标 | 允许（组嵌套：订阅组↔自定义组均可作成员，链式引用保留）；组间循环引用写前 **MergeError** |
-| 订阅规则 / 组成员引用缺失 | 丢弃该项 + warning（成员剔除后空组 → 该组也丢弃 + warning） |
+| 订阅规则 target 不存在 | 丢弃 + warning |
+| 自定义规则 target 不存在 | **MergeError**（消息指明规则与缺失项） |
 
-兜底模板：订阅有节点但组列表为空 → 注入 select 组「🚀 节点选择」；
-订阅无规则 → 先注入自动组（默认规则模板引用它），再注入 `GEOIP,CN,DIRECT` + `MATCH,🚀 节点选择`；
-无激活订阅 → 只输出网络段 + 自定义内容（mihomo 以直连运行）。
+兜底模板：订阅有节点但组列表为空 → 注入 select 组「🚀 节点选择」（组员=全部节点）；
+订阅有节点但无任何规则 → 先注入自动组（默认规则模板引用它），再注入 `GEOIP,CN,DIRECT` + `MATCH,🚀 节点选择`；
+无激活订阅 → 只输出网络段 + profile + 自定义规则（mihomo 以直连运行）。
 
 ### 混合生效策略
 
 | 变更类型 | 生效方式 |
 |---|---|
 | mode / tun.enable / ipv6（仪表盘 `m`/`t`/`6`） | **PATCH 热切**：`PATCH /configs` 即时生效，不重载、不重启 |
-| 订阅切换 / 组 / 规则 / `s` 表单保存的网络设置（端口、allow-lan、log-level、TUN/DNS 等） | **结构性重启**：合并 → `mihomo -t` 预校验 → 提权脚本原子替换 → `systemctl restart` → 失败自动回滚 |
+| 订阅切换 / 规则 / `s` 表单保存的网络设置（端口、allow-lan、log-level、TUN/DNS 等） | **结构性重启**：合并 → `mihomo -t` 预校验 → 提权脚本原子替换 → `systemctl restart` → 失败自动回滚 |
 | external-controller / secret 修改 | 进程重启（需改 `settings.toml` 后重启 mihomo 与本程序） |
 
 ## 配置文件
@@ -369,7 +357,7 @@ examples/
 |---|---|---|
 | `settings.toml` | TOML | 网络设置（NetworkSettings，含 tun/dns 嵌套） |
 | `subscriptions.toml` | YAML | 订阅列表（含解析缓存） |
-| `overrides.toml` | YAML | 自定义规则组与规则 |
+| `overrides.toml` | YAML | 自定义规则（旧版自定义规则组字段已废弃，启动时自动清空） |
 
 **settings.toml**（示例）：
 
@@ -435,17 +423,11 @@ fake_ip_filter = ["*.lan", "+.local"]
 **overrides.toml**（示例，YAML 序列化）：
 
 ```yaml
-groups:
-  - name: 🚀 节点选择
-    group_type: select        # select | url-test | fallback
-    url: http://www.gstatic.com/generate_204
-    interval: 300             # 秒
-    tolerance: 0              # 仅 fallback 输出到 config.yaml
-    proxies: ["🇯🇵 JP", "🇭🇰 HK"]   # 节点名 / 其他组名 / 内置目标
+# 旧版自定义规则组字段（groups）已废弃：启动时自动清空，请勿再写
 rules:
   - rule_type: DOMAIN-SUFFIX  # DOMAIN | DOMAIN-SUFFIX | DOMAIN-KEYWORD | GEOIP | PROCESS-NAME | MATCH
     payload: example.com      # MATCH 无 payload
-    target: 🚀 节点选择        # 节点 / 自定义组 / 订阅组 / 内置目标
+    target: 🚀 节点选择        # 节点 / 订阅组 / 内置目标
 ```
 
 内置目标（保留名，不可用作组名/节点名）：`DIRECT` `REJECT` `REJECT-DROP` `COMPATIBLE` `PASS` `PASS-RULE` `GLOBAL`。
@@ -485,18 +467,24 @@ TUN 需要 `CAP_NET_ADMIN`（+`CAP_NET_RAW`）能力与 `/dev/net/tun`。用官�
 含 `proxy-providers` 而无 `proxies` 的订阅暂不支持（会明确报错）。
 
 **Q：合并报错是什么意思？**
-合并器报错（MergeError）都会指明具体规则/组与缺失项，常见几类：
-- 自定义规则的目标不是任何节点/组/内置目标（DIRECT、REJECT、REJECT-DROP、COMPATIBLE、PASS、PASS-RULE、GLOBAL）→ 改目标或建组
-- 自定义组成员不是任何节点/其他组/内置目标（如订阅切换后订阅组消失）→ 改成员
-- 自定义组名与节点名/其他自定义组/内置目标（DIRECT 等）冲突 → 改组名
-- 自定义组没有成员（空组）→ 在规则组页按 m 勾选至少一个成员
-- 组间循环引用（直接/间接/订阅组间/混合）→ 报错带路径，如「检测到循环引用：组「A」→「B」→「A」」，按路径断开一环
-订阅侧的引用问题（订阅组/规则引用不存在的节点）不会中断，丢弃并给 warning。
+合并器报错（MergeError）现在只有一类：自定义规则的目标不是任何节点/策略组/内置目标
+（DIRECT、REJECT、REJECT-DROP、COMPATIBLE、PASS、PASS-RULE、GLOBAL）→ 改目标。
+订阅侧的内容（节点/组/规则）原样透传进 config.yaml，不做过滤校验；订阅本身有问题
+（重名组、空组、循环引用等）由 `mihomo -t` 预校验拦截，报错会直接弹给你。
+
+**Q：为什么 url-test/fallback 组不能切换节点？**
+自动选择组的出口由 mihomo 的延迟测速/健康检查自动决定，手动固定没有意义（测速后会被
+覆盖）。只有 select（手动选择）组支持运行时切换；选择结果通过 `profile: store-selected`
+写入缓存，重启后保持。
+
+**Q：规则组页显示"API 不可用"或只有缓存数据？**
+规则组列表以 mihomo 运行时状态（GET /proxies）为准；mihomo 未运行或连接失败时降级
+展示激活订阅缓存中的组（无当前选择）。启动 mihomo 后按 `R` 刷新即可恢复。
 
 **Q：mihomo -t 校验失败提示是什么意思？**
 激活订阅/保存网络设置时，TUI 先把合并产物写入临时文件执行 `mihomo -t -f` 预校验，
 失败**不进入 sudo**，直接把 mihomo 的原始报错弹给你。常见原因：
-YAML 语法错误、规则组空成员、引用不存在的代理/组、端口冲突等。修正后重试即可。
+YAML 语法错误、空组/重名组/循环引用等订阅侧问题、引用不存在的代理/组、端口冲突等。修正后重试即可。
 预校验通过后，提权脚本内还会再校验一次（防止配置在传输中被篡改）。
 
 **Q：应用失败会自动回滚吗？**
@@ -509,11 +497,9 @@ YAML 语法错误、规则组空成员、引用不存在的代理/组、端口�
 服务进程对配置目录有写权限——官方 unit 的 `CAP_DAC_OVERRIDE` 正是为此）。
 
 **Q：订阅组之间互相引用会怎样？**
-支持组嵌套：订阅组可引用其他订阅组与自定义组（组链式引用，如 A 组把 B 组列为成员），合并器保留。
-被引用方不存在时按侧处理：订阅组成员引用不存在的名字 → 剔除该成员 + warning（剔除后空组 →
-该组丢弃 + warning）；自定义组成员引用不存在的名字（含订阅切换后消失的订阅组）→ MergeError
-「成员不存在（可用：订阅节点/自定义组/订阅组/内置 …）」。
-组间循环引用（直接/间接/订阅组间/混合）在写前检测并报 MergeError，示例格式「检测到循环引用：组「A」→「B」→「A」」。
+订阅组及其成员关系**原样透传**进 config.yaml（保序、保字段，不做过滤/校验），组间互相引用、
+链式引用、循环引用都保留。订阅侧的问题（重名组、空组、循环引用、引用不存在的节点）由
+`mihomo -t` 预校验拦截，报错直接弹给你（见「合并报错」），修正订阅源后按 `r` 刷新即可。
 
 **Q：配置文件在哪，怎么备份？**
 `~/.config/mihomo-tui/` 三个文件即全部状态（含订阅缓存），`cp -r` 即可备份/迁移。
@@ -521,7 +507,7 @@ YAML 语法错误、规则组空成员、引用不存在的代理/组、端口�
 ## 开发
 
 ```bash
-cargo test                  # 单元测试：合并器（去重/嵌套/循环）、7 协议解析器、
+cargo test                  # 单元测试：合并器（去重/订阅组透传/store-selected）、7 协议解析器、
                             # exit_ip 失败分类、client 与假 API 联测、安装器、设置存取、
                             # 小终端渲染回归
 cargo clippy -- -D warnings

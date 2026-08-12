@@ -561,6 +561,7 @@ mod tests {
             mem_history: VecDeque::new(),
             connections: Vec::new(),
             exit_ip: None,
+            proxy_groups: Vec::new(),
             notices: VecDeque::new(),
         }
     }

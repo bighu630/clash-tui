@@ -3,6 +3,9 @@ name = "mihomo-tui"
 version = "0.1.0"
 edition = "2021"
 description = "Linux mihomo (Clash Meta) TUI controller"
+license = "MIT"
+repository = "https://github.com/bighu630/clash-tui"
+readme = "README.md"
 
 [dependencies]
 ratatui = "0.30"

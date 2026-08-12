@@ -446,6 +446,30 @@ mod tests {
         assert_eq!(conn_host(&c), "未知目标");
     }
 
+    /// 速率行极窄宽度：inner_width=0/5 时 pad 用 saturating_sub 截断为 0，
+    /// 不 panic；行宽应恰为左右内容宽度之和（超出部分由 Paragraph 裁剪）。
+    #[test]
+    fn rate_row_narrow_inner_width() {
+        for inner_width in [0u16, 5] {
+            let line = rate_row("↑ 上行", 1024, 1024 * 1024, Color::Green, inner_width);
+            let content_width =
+                Span::raw("↑ 上行 1.0 KB/s").width() + Span::raw("累计 1.0 MB").width();
+            assert_eq!(
+                line.width(),
+                content_width,
+                "inner_width={inner_width}: 极窄宽度下不应补 padding"
+            );
+            assert!(
+                line.to_string().contains("↑ 上行"),
+                "inner_width={inner_width}: 应含上行标签"
+            );
+            assert!(
+                line.to_string().contains("累计"),
+                "inner_width={inner_width}: 应含累计标签"
+            );
+        }
+    }
+
     /// UDP 连接行含 UDP 标；TCP 行含 TCP 标。
     #[test]
     fn conn_line_kind_marker() {

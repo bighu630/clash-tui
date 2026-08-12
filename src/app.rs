@@ -1087,6 +1087,45 @@ mod tests {
         }
     }
 
+    /// 连接框可见路径回归：终端宽 60（>= 阈值 60），连接框应实际渲染；
+    /// h=0/1/2 极小高度整帧渲染不 panic。
+    #[test]
+    fn draw_wide_terminal_connections_visible_no_panic() {
+        for h in [0u16, 1, 2, 3, 4, 5, 6, 7, 24] {
+            let mut app = test_app_with_width(60, h);
+            app.state.connections = vec![
+                conn("example.com", Some("2026-08-12T10:00:00Z"), 1024, 2048),
+                conn("1.2.3.4:443", None, 0, 0),
+            ];
+            let frame = app.draw().expect("draw 不应失败");
+            // 常规高度（h=24：top 3 + middle 1 + bottom 4 全部足额）：
+            // 连接框标题应渲染在 body 首行（y=4, x=2 起为「连接」）
+            if h == 24 {
+                assert_eq!(
+                    frame
+                        .buffer
+                        .cell((2, 4))
+                        .expect("连接框标题应落在 buffer 内")
+                        .symbol(),
+                    "连",
+                    "宽 60 终端应渲染连接框标题"
+                );
+            }
+            // 高度 >= 3 时按键提示应渲染在最后一行（以 [ 起始），且不越界
+            if h >= 3 {
+                let cell = frame
+                    .buffer
+                    .cell((0, h - 1))
+                    .expect("提示行应落在 buffer 内");
+                assert!(
+                    cell.symbol().starts_with('['),
+                    "h={h}: 最后一行应为按键提示，实际 {:?}",
+                    cell.symbol()
+                );
+            }
+        }
+    }
+
     /// sudo 密码确认弹窗：首行保持原文；两条诊断提示非空、互不相同，
     /// 且分别含"重新登录"/"重新安装"关键词；原文与提示间有分隔空行。
     #[test]
@@ -1117,6 +1156,11 @@ mod tests {
 
     /// 构造最小 App（TestBackend 终端），不触盘、不建后台任务。
     fn test_app(h: u16) -> App<TestBackend> {
+        test_app_with_width(30, h)
+    }
+
+    /// 同 `test_app`，但可指定终端宽度（用于连接框可见/隐藏两条布局路径）。
+    fn test_app_with_width(w: u16, h: u16) -> App<TestBackend> {
         let state = AppState {
             settings: NetworkSettings::default(),
             subs: Vec::new(),
@@ -1159,7 +1203,7 @@ mod tests {
             api_notice_at: None,
             tick_count: 0,
             quit: false,
-            terminal: Terminal::new(TestBackend::new(30, h)).unwrap(),
+            terminal: Terminal::new(TestBackend::new(w, h)).unwrap(),
         }
     }
 
@@ -1248,14 +1292,30 @@ mod tests {
         assert_eq!(ids, vec!["new", "same-b", "same-a", "old", "missing"]);
     }
 
+    /// 排序稳定性：start 与 upload+download 完全相同的连接，
+    /// 排序后保持原始相对顺序（sort_by 为稳定排序）。
+    #[test]
+    fn sort_connections_stable_for_identical_keys() {
+        let mut conns = vec![
+            conn("dup-1", Some("2026-08-12T10:00:00Z"), 10, 10),
+            conn("dup-2", Some("2026-08-12T10:00:00Z"), 10, 10),
+            conn("dup-3", Some("2026-08-12T10:00:00Z"), 10, 10),
+        ];
+        sort_connections(&mut conns);
+        let ids: Vec<&str> = conns.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["dup-1", "dup-2", "dup-3"]);
+    }
+
     /// on_conns：快照替换 + 上限截断 200。
     #[test]
     fn on_conns_truncates_and_sorts() {
         let mut app = test_app(24);
-        let mut snap = ConnSnapshot::default();
-        snap.connections = (0..250)
-            .map(|i| conn(&format!("c{i}"), Some("2026-08-12T10:00:00Z"), i, 0))
-            .collect();
+        let snap = ConnSnapshot {
+            connections: (0..250)
+                .map(|i| conn(&format!("c{i}"), Some("2026-08-12T10:00:00Z"), i, 0))
+                .collect(),
+            ..ConnSnapshot::default()
+        };
         app.on_conns(snap);
         assert_eq!(app.state.connections.len(), CONNECTIONS_KEEP);
         // 排序后最新在上：所有连接 start 相同 → 流量降序 → c249 在最前

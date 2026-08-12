@@ -41,6 +41,7 @@ pub struct ConnSnapshot {
     pub download_total: u64,
     pub upload_total: u64,
     pub connections: Vec<ConnInfo>,
+    /// 预留：当前内存框仍走 /memory 流，此字段解析后暂未使用。
     pub memory: u64,
 }
 

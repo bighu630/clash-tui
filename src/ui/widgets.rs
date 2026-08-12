@@ -512,6 +512,11 @@ impl MessagePopup {
         }
     }
 
+    /// 弹窗标题（供主循环按类型判断弹窗，如关闭陈旧的出口 IP 失败弹窗）。
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
     /// 返回 `true` 表示弹窗应关闭。
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         let max_scroll = self.max_scroll();

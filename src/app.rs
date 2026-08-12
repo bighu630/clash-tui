@@ -189,6 +189,8 @@ struct App<B: Backend> {
     pending_confirm: Option<(ConfirmPopup, InteractiveTask)>,
     help_popup: Option<MessagePopup>,
     result_popup: Option<MessagePopup>,
+    /// 出口 IP 探测最近一次是否失败：恢复成功时用于关闭陈旧错误弹窗并通知恢复。
+    exit_ip_was_error: bool,
     /// 上次 API 状态通知时间（去抖用）
     api_notice_at: Option<Instant>,
     tick_count: u64,
@@ -546,9 +548,23 @@ where
             },
             UiEvent::ExitIp(res) => match res {
                 Ok(ip) => {
+                    // 恢复成功：关闭先前失败留下的陈旧错误弹窗（内容已过时）
+                    if self
+                        .result_popup
+                        .as_ref()
+                        .is_some_and(|p| p.title() == "出口 IP 获取失败")
+                    {
+                        self.result_popup = None;
+                    }
+                    // 此前有失败：通知恢复；无失败历史时静默更新
+                    if self.exit_ip_was_error {
+                        self.exit_ip_was_error = false;
+                        self.state.notice(format!("[✓] 出口 IP 恢复: {ip}"));
+                    }
                     self.state.exit_ip = Some(ip);
                 }
                 Err(e) => {
+                    self.exit_ip_was_error = true;
                     self.state.exit_ip = None;
                     // 聚合错误可能很长（多端口 × 多端点）：notice 截断至首行
                     // 约 60 字符，完整错误保留在可滚动的 popup 中。
@@ -663,9 +679,9 @@ where
                 let ports = self.exit_ports.clone();
                 let ui_tx = ui_tx.clone();
                 tokio::spawn(async move {
-                    // 先 clone 快照再释放锁：MutexGuard 非 Send，不能跨 await 持锁
-                    let snapshot = ports.lock().unwrap().clone();
-                    let r = exit_ip::fetch_exit_ip(&snapshot).await;
+                    // 锁内 clone 快照再 await（MutexGuard 非 Send，不能跨 await 持锁）；
+                    // 重试覆盖 mihomo 重启窗口内的瞬时失败。
+                    let r = exit_ip::fetch_exit_ip_retry(ports).await;
                     let _ = ui_tx.send(UiEvent::ExitIp(r));
                 });
             }
@@ -878,10 +894,9 @@ fn spawn_exit_ip_task(
                 _ = interval.tick() => {}
                 _ = trigger.recv() => {}
             }
-            // 先 clone 快照再释放锁：MutexGuard 非 Send，不能跨 await 持锁
-            // （60s 周期任务，快照期间锁被占用至多到 clone 完成，约瞬间）
-            let snapshot = ports.lock().unwrap().clone();
-            let result = exit_ip::fetch_exit_ip(&snapshot).await;
+            // fetch_exit_ip_retry 内部锁内 clone 快照（MutexGuard 非 Send，
+            // 不能跨 await 持锁），并重试覆盖 mihomo 重启窗口内的瞬时失败。
+            let result = exit_ip::fetch_exit_ip_retry(ports.clone()).await;
             if tx.send(UiEvent::ExitIp(result)).is_err() {
                 return;
             }
@@ -939,6 +954,7 @@ pub async fn run() -> Result<(), BoxError> {
         pending_confirm: None,
         help_popup: None,
         result_popup: None,
+        exit_ip_was_error: false,
         api_notice_at: None,
         tick_count: 0,
         quit: false,
@@ -1091,10 +1107,69 @@ mod tests {
             pending_confirm: None,
             help_popup: None,
             result_popup: None,
+            exit_ip_was_error: false,
             api_notice_at: None,
             tick_count: 0,
             quit: false,
             terminal: Terminal::new(TestBackend::new(30, h)).unwrap(),
         }
+    }
+
+    /// 出口 IP 失败后恢复：关闭陈旧错误弹窗 + 通知恢复；再次成功（无失败历史）
+    /// 不重复通知。
+    #[test]
+    fn exit_ip_recovery_closes_stale_popup_and_notices() {
+        let mut app = test_app(24);
+        // 失败：弹出「出口 IP 获取失败」弹窗
+        app.on_ui_event(UiEvent::ExitIp(Err("出口 IP 获取失败: 连接被拒".into())));
+        assert!(app.result_popup.is_some(), "失败应弹出错误弹窗");
+        assert_eq!(
+            app.result_popup.as_ref().unwrap().title(),
+            "出口 IP 获取失败"
+        );
+        assert!(app.state.exit_ip.is_none());
+        // 恢复：陈旧弹窗关闭 + 通知恢复
+        app.on_ui_event(UiEvent::ExitIp(Ok("1.2.3.4".into())));
+        assert!(app.result_popup.is_none(), "恢复成功后应关闭陈旧错误弹窗");
+        assert_eq!(app.state.exit_ip.as_deref(), Some("1.2.3.4"));
+        assert!(
+            app.state.notices.iter().any(|n| n.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
+            "应通知恢复: {:?}",
+            app.state.notices
+        );
+        // 再次成功：无失败历史，静默更新不重复通知
+        app.on_ui_event(UiEvent::ExitIp(Ok("5.6.7.8".into())));
+        assert_eq!(app.state.exit_ip.as_deref(), Some("5.6.7.8"));
+        assert!(
+            !app.state.notices.iter().any(|n| n.contains("5.6.7.8")),
+            "无失败历史时不应再通知恢复: {:?}",
+            app.state.notices
+        );
+    }
+
+    /// 恢复成功只关闭「出口 IP 获取失败」弹窗：其他弹窗（如应用结果）不受影响。
+    #[test]
+    fn exit_ip_recovery_keeps_unrelated_popup() {
+        let mut app = test_app(24);
+        app.on_ui_event(UiEvent::ExitIp(Err("出口 IP 获取失败: 连接被拒".into())));
+        assert!(app.exit_ip_was_error, "失败应置位 exit_ip_was_error");
+        // 用户随后打开了另一个弹窗
+        app.result_popup = Some(MessagePopup::new("应用结果".into(), vec!["x".into()]));
+        app.on_ui_event(UiEvent::ExitIp(Ok("1.2.3.4".into())));
+        assert!(
+            app.result_popup.is_some(),
+            "非出口 IP 弹窗不应被关闭"
+        );
+        assert_eq!(
+            app.result_popup.as_ref().unwrap().title(),
+            "应用结果",
+            "应用结果弹窗应原样保留"
+        );
+        assert!(!app.exit_ip_was_error, "恢复后应清除失败标记");
+        assert!(
+            app.state.notices.iter().any(|n| n.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
+            "应通知恢复: {:?}",
+            app.state.notices
+        );
     }
 }

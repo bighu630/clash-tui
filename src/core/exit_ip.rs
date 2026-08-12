@@ -1,6 +1,7 @@
 //! 出口 IP 探测：经 mihomo 代理端口请求外部回显服务。
 //! 多代理端口（mixed/http/socks5）× 多回显端点降级；解析器纯函数可单测。
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::core::models::NetworkSettings;
@@ -233,6 +234,28 @@ pub async fn fetch_exit_ip(ports: &ProxyPorts) -> Result<String, String> {
     } else {
         Err(format!("出口 IP 获取失败: {}", summaries.join("; ")))
     }
+}
+
+/// 出口 IP 探测（带重试）：最多 3 次尝试，失败间隔 5s，返回最后一次错误。
+/// mihomo 重启窗口（apply 后 ~10-30s）内代理端口短暂不可用，单次探测必失败；
+/// 重试可覆盖该窗口，避免对瞬时失败误弹「出口 IP 获取失败」。
+pub async fn fetch_exit_ip_retry(ports: Arc<Mutex<ProxyPorts>>) -> Result<String, String> {
+    let mut last_err = String::new();
+    for attempt in 0..3 {
+        // 先 clone 快照再释放锁：MutexGuard 非 Send，不能跨 await 持锁
+        // （60s 周期任务，快照期间锁被占用至多到 clone 完成，约瞬间）
+        let snapshot = ports.lock().unwrap().clone();
+        match fetch_exit_ip(&snapshot).await {
+            Ok(ip) => return Ok(ip),
+            Err(e) => {
+                last_err = e;
+                if attempt < 2 {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
+    }
+    Err(last_err)
 }
 
 /// 单端点请求 + 按模式解析。错误为 (分类, 含 source 链的详细文本)。

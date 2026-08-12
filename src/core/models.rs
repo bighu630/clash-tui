@@ -170,7 +170,7 @@ pub struct UserGroup {
     pub interval: u64,
     #[serde(default)]
     pub tolerance: u64,
-    /// 组员 = 订阅节点名
+    /// 组员 = 节点名 / 其他策略组名 / 内置目标名（如 DIRECT）
     #[serde(default)]
     pub proxies: Vec<String>,
 }

@@ -1,7 +1,7 @@
 //! 规则组管理页：自定义规则组（select/url-test/fallback）的新建、编辑、成员勾选、删除。
 //!
-//! 契约见 docs/superpowers/plans/2026-08-10-mihomo-tui.md §2/§3。
-//! 列表行：`名称 | 类型 | 成员N | url | interval`；无激活订阅时成员编辑不可用。
+//! 合并/去重/冲突语义见 README「合并器组装顺序与去重规则」；列表行：`名称 | 类型 | 成员N | url | interval`。
+//! 成员候选 = 订阅节点 ∪ 其他自定义组 ∪ 订阅组 ∪ 内置目标（DIRECT 等），无激活订阅仍可选其他组/内置目标。
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -11,7 +11,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{AppState, UiCommand};
-use crate::core::models::{default_group_interval, default_test_url, UserGroup};
+use crate::core::models::{default_group_interval, default_test_url, BUILTIN_TARGETS, UserGroup};
 use crate::core::settings::save_overrides;
 use crate::ui::widgets::{
     centered_rect, CheckAction, ConfirmPopup, FormAction, FormField, FieldKind, FormPopup,
@@ -198,7 +198,7 @@ impl GroupsPage {
                     _ => {
                         if g.proxies.is_empty() {
                             st.notice(format!(
-                                "[!] 规则组「{}」暂无成员，按 m 勾选节点后即可应用",
+                                "[!] 规则组「{}」暂无成员，按 m 勾选成员（节点/其他组/内置目标）后即可应用",
                                 g.name
                             ));
                         }
@@ -217,31 +217,55 @@ impl GroupsPage {
         None
     }
 
-    /// m：成员多选（items=激活订阅缓存节点名，预勾选当前组成员；无激活订阅 → 提示）
+    /// m：成员多选（items=订阅节点 ∪ 其他自定义组 ∪ 订阅组 ∪ 内置目标，保序去重；
+    /// 预勾选当前组成员；无激活订阅仍可选其他组/内置目标）
     fn start_members(&mut self, st: &mut AppState) -> Option<UiCommand> {
         let idx = self.list.selected();
         if idx >= st.overrides.groups.len() {
             return None;
         }
-        let Some(act) = st.subs.iter().find(|s| s.active) else {
-            self.popup = Some(GroupPopup::Message(MessagePopup::new(
-                "编辑成员".to_string(),
-                vec!["没有激活的订阅，无法编辑组成员".to_string()],
-            )));
-            return None;
-        };
-        let Some(cache) = &act.cache else {
-            self.popup = Some(GroupPopup::Message(MessagePopup::new(
-                "编辑成员".to_string(),
-                vec!["激活订阅尚未拉取成功，无法编辑组成员".to_string()],
-            )));
-            return None;
-        };
-        let items: Vec<String> = cache.proxies.iter().map(|p| p.name.clone()).collect();
+        // 去重模式与遍历 cache.proxy_groups 的 name 的写法对齐 src/ui/rules.rs::target_options
+        let mut seen = std::collections::HashSet::new();
+        let mut items = Vec::new();
+        // 1. 激活订阅节点名
+        if let Some(act) = st.subs.iter().find(|s| s.active) {
+            if let Some(cache) = &act.cache {
+                for p in &cache.proxies {
+                    if seen.insert(p.name.clone()) {
+                        items.push(p.name.clone());
+                    }
+                }
+            }
+        }
+        // 2. 其他自定义组名（排除当前组自身：自引用=直接循环恒非法，合并器兜底报错）
+        let self_name = st.overrides.groups[idx].name.clone();
+        for g in &st.overrides.groups {
+            if g.name != self_name && seen.insert(g.name.clone()) {
+                items.push(g.name.clone());
+            }
+        }
+        // 3. 激活订阅组名
+        if let Some(act) = st.subs.iter().find(|s| s.active) {
+            if let Some(cache) = &act.cache {
+                for g in &cache.proxy_groups {
+                    if let Some(name) = g.get("name").and_then(|v| v.as_str()) {
+                        if seen.insert(name.to_string()) {
+                            items.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        // 4. 内置目标（恒非空，兜底）
+        for t in BUILTIN_TARGETS {
+            if seen.insert(t.to_string()) {
+                items.push(t.to_string());
+            }
+        }
         if items.is_empty() {
             self.popup = Some(GroupPopup::Message(MessagePopup::new(
                 "编辑成员".to_string(),
-                vec!["激活订阅中没有节点".to_string()],
+                vec!["没有可选的成员（节点/其他组/内置目标）".to_string()],
             )));
             return None;
         }
@@ -264,7 +288,7 @@ impl GroupsPage {
                     self.popup = Some(GroupPopup::Message(MessagePopup::new(
                         "成员不能为空".to_string(),
                         vec![
-                            "规则组至少需要一个成员，mihomo 校验会拒绝空组。请至少勾选一个节点。".to_string(),
+                            "规则组至少需要一个成员，mihomo 校验会拒绝空组。请至少勾选一个成员（节点/其他组/内置目标）。".to_string(),
                         ],
                     )));
                     return None;
@@ -282,20 +306,30 @@ impl GroupsPage {
         None
     }
 
-    /// d：删除确认。组被规则引用时在确认里提示（仍可删除，合并校验会兜底报错）
+    /// d：删除确认。组被规则/其他组成员引用时在确认里提示（仍可删除，合并校验会兜底报错）
     fn start_delete(&mut self, st: &mut AppState) -> Option<UiCommand> {
         let idx = self.list.selected();
         if idx >= st.overrides.groups.len() {
             return None;
         }
         let name = st.overrides.groups[idx].name.clone();
-        let refs = st.overrides.rules.iter().filter(|r| r.target == name).count();
-        let msg = if refs > 0 {
-            format!(
-                "规则组「{name}」被 {refs} 条规则引用。\n删除后这些规则的 target 将不存在，合并校验会报错（需同步修改规则）。仍要删除吗？"
-            )
-        } else {
+        // 引用统计：规则 target + 其他自定义组成员（某类为 0 则不提及）
+        let rule_refs = st.overrides.rules.iter().filter(|r| r.target == name).count();
+        let group_refs = st.overrides.groups.iter().filter(|g| g.proxies.contains(&name)).count();
+        let mut cited: Vec<String> = Vec::new();
+        if rule_refs > 0 {
+            cited.push(format!("{rule_refs} 条规则"));
+        }
+        if group_refs > 0 {
+            cited.push(format!("{group_refs} 个组"));
+        }
+        let msg = if cited.is_empty() {
             format!("确定删除规则组「{name}」？")
+        } else {
+            format!(
+                "规则组「{name}」被 {} 引用。\n删除后这些引用将失效，合并校验会报错（需同步修改）。仍要删除吗？",
+                cited.join("、")
+            )
         };
         self.pending = Some(idx);
         self.popup = Some(GroupPopup::Confirm(ConfirmPopup::new("删除规则组".to_string(), msg)));

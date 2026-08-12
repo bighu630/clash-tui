@@ -1,6 +1,8 @@
 //! 合并器：网络设置 + 用户覆盖 + 激活订阅 → mihomo config.yaml。
 //! 语义严格遵循 plans §2 core/merger.rs；测试覆盖 plans §5 全部 14 条。
 
+use std::collections::HashMap;
+
 use serde_yaml::{Mapping, Value};
 
 use crate::core::models::{
@@ -40,9 +42,60 @@ fn str_seq<I: IntoIterator<Item = S>, S: Into<String>>(items: I) -> Value {
     Value::Sequence(items.into_iter().map(|s| Value::String(s.into())).collect())
 }
 
-/// 组成员有效性：订阅节点名或 mihomo 内置保留名（DIRECT/REJECT 等始终有效）。
-fn is_valid_member(name: &str, node_names: &[String]) -> bool {
-    node_names.iter().any(|n| n == name) || BUILTIN_TARGETS.contains(&name)
+/// 组成员有效性：名字在 universe（订阅节点 ∪ 自定义组名 ∪ 订阅组名）中，
+/// 或为 mihomo 内置保留名（DIRECT/REJECT 等始终有效）。
+fn is_valid_member(name: &str, universe: &[String]) -> bool {
+    universe.iter().any(|n| n == name) || BUILTIN_TARGETS.contains(&name)
+}
+
+/// 三色 DFS：从 name 出发沿组引用边（组→成员中属于组集的边）搜索，
+/// 遇灰色节点（回边）即从当前 DFS 栈还原环路径（首尾相同，如 A→B→A）。
+fn dfs_cycle(
+    name: &str,
+    graph: &HashMap<String, Vec<String>>,
+    state: &mut HashMap<String, u8>,
+    stack: &mut Vec<String>,
+) -> Option<Vec<String>> {
+    // 0=未访问 1=在栈上（灰色） 2=已结束（黑色）
+    if state.get(name).copied() == Some(2) {
+        return None; // 黑节点：子树已探明无环，不再重入
+    }
+    state.insert(name.to_string(), 1);
+    stack.push(name.to_string());
+    if let Some(edges) = graph.get(name) {
+        for e in edges {
+            match state.get(e).copied() {
+                Some(1) => {
+                    // 回边：name → e 成环，环 = 栈上从 e 到 name 的段 + e
+                    let start = stack.iter().position(|n| n == e).expect("灰色节点必在栈上");
+                    let mut path = stack[start..].to_vec();
+                    path.push(e.clone());
+                    return Some(path);
+                }
+                Some(2) => {}
+                _ => {
+                    if let Some(path) = dfs_cycle(e, graph, state, stack) {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+    stack.pop();
+    state.insert(name.to_string(), 2);
+    None
+}
+
+/// 在组引用图中找环（按 names 顺序起搜，保证路径确定性）。
+fn find_cycle(graph: &HashMap<String, Vec<String>>, names: &[String]) -> Option<Vec<String>> {
+    let mut state: HashMap<String, u8> = HashMap::new();
+    let mut stack: Vec<String> = Vec::new();
+    for name in names {
+        if let Some(path) = dfs_cycle(name, graph, &mut state, &mut stack) {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// 注入自动组「🚀 节点选择」（组员=全部节点名）。组名已存在时跳过（保留自定义同名组）。
@@ -91,11 +144,11 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
         }
     }
 
-    // ---------- 2. 自定义组（成员引用校验 → MergeError） ----------
-    let mut groups: Vec<Value> = Vec::new();
-    let mut group_names: Vec<String> = Vec::new();
+    // ---------- b. 自定义组第一遍：重名/空检查，收集全部组名（成员校验延后） ----------
+    let mut custom_values: Vec<Value> = Vec::new();
+    let mut custom_names: Vec<String> = Vec::new();
     for g in &ctx.overrides.groups {
-        if group_names.contains(&g.name) {
+        if custom_names.contains(&g.name) {
             return Err(MergeError {
                 message: format!("自定义组「{}」与已有自定义组重名，请修改组名", g.name),
             });
@@ -105,25 +158,21 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
                 message: format!("自定义组「{}」与订阅节点重名，请修改组名", g.name),
             });
         }
-        if g.proxies.is_empty() {
+        if BUILTIN_TARGETS.iter().any(|b| *b == g.name) {
             return Err(MergeError {
                 message: format!(
-                    "自定义组「{}」没有成员：mihomo 要求每个规则组至少有一个成员，请在规则组页按 m 勾选节点",
+                    "自定义组「{}」与内置目标重名（DIRECT/REJECT 等），请修改组名",
                     g.name
                 ),
             });
         }
-        for member in &g.proxies {
-            if !is_valid_member(member, &node_names) {
-                return Err(MergeError {
-                    message: format!(
-                        "自定义组「{}」的成员「{}」不存在（可用：订阅节点/内置 {}）",
-                        g.name,
-                        member,
-                        BUILTIN_TARGETS.join("/")
-                    ),
-                });
-            }
+        if g.proxies.is_empty() {
+            return Err(MergeError {
+                message: format!(
+                    "自定义组「{}」没有成员：mihomo 要求每个规则组至少有一个成员，请在规则组页按 m 勾选成员（节点/其他组/内置目标）",
+                    g.name
+                ),
+            });
         }
         let mut m = Mapping::new();
         kv(&mut m, "name", g.name.clone());
@@ -145,11 +194,15 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
             }
             _ => {} // select：仅 name/type/proxies
         }
-        group_names.push(g.name.clone());
-        groups.push(Value::Mapping(m));
+        custom_names.push(g.name.clone());
+        custom_values.push(Value::Mapping(m));
     }
 
-    // ---------- 3. 订阅组（去重 + 成员校验，全部记 warning） ----------
+    // ---------- c. 订阅组保留决策：与自定义组/节点/已有订阅组重名 → 丢弃 + warning ----------
+    // shadowed：与自定义组重名而被丢弃的订阅组名。订阅组内的同名引用视为悬空
+    // （订阅侧指向的组已不存在），不得误指向同名自定义组，故过滤时一并剔除。
+    let mut sub_groups: Vec<(String, Value)> = Vec::new();
+    let mut shadowed: Vec<String> = Vec::new();
     if let Some(cache) = ctx.subscription.and_then(|s| s.cache.as_ref()) {
         for g in &cache.proxy_groups {
             let Some(m) = g.as_mapping() else { continue };
@@ -157,42 +210,147 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
                 continue;
             };
             let name = name.to_string();
-            if group_names.contains(&name) {
+            if custom_names.contains(&name) {
                 warnings.push(format!("订阅组「{name}」与自定义组重名，已丢弃订阅组"));
+                shadowed.push(name);
                 continue;
             }
             if node_names.contains(&name) {
                 warnings.push(format!("订阅组「{name}」与节点重名，已丢弃订阅组"));
                 continue;
             }
-            let mut m2 = m.clone();
-            if let Some(Value::Sequence(members)) =
-                m2.get_mut(Value::String("proxies".into()))
-            {
-                let mut kept: Vec<Value> = Vec::new();
-                for mv in members.iter() {
-                    match mv.as_str() {
-                        Some(s) if is_valid_member(s, &node_names) => kept.push(mv.clone()),
-                        _ => {
-                            warnings.push(format!(
-                                "订阅组「{name}」的成员「{}」不存在，已丢弃该成员",
-                                val_str(mv)
-                            ));
-                        }
-                    }
-                }
-                if kept.is_empty() {
-                    warnings.push(format!("订阅组「{name}」成员为空，已丢弃该组"));
-                    continue;
-                }
-                *members = kept;
+            if BUILTIN_TARGETS.iter().any(|b| *b == name) {
+                warnings.push(format!("订阅组「{name}」与内置目标重名，已丢弃订阅组"));
+                continue;
             }
-            group_names.push(name.clone());
-            groups.push(Value::Mapping(m2));
+            if sub_groups.iter().any(|(n, _)| *n == name) {
+                warnings.push(format!("订阅组「{name}」与已有订阅组重名，已丢弃订阅组"));
+                continue;
+            }
+            sub_groups.push((name, Value::Mapping(m.clone())));
         }
     }
 
+    // ---------- d. 有效成员集合（universe = 节点 ∪ 自定义组名 ∪ 保留订阅组名） ----------
+    let mut universe: Vec<String> = node_names.clone();
+    universe.extend(custom_names.iter().cloned());
+    universe.extend(sub_groups.iter().map(|(n, _)| n.clone()));
+
+    // ---------- e/f. 订阅组成员过滤 + 级联（被丢弃组移出 universe，重滤至不动点） ----------
+    let mut changed = true;
+    while changed {
+        changed = false;
+        let mut i = 0;
+        while i < sub_groups.len() {
+            let name = sub_groups[i].0.clone();
+            let mut dropped = false;
+            {
+                let (_, m2) = &mut sub_groups[i];
+                if let Some(Value::Sequence(members)) =
+                    m2.get_mut(Value::String("proxies".into()))
+                {
+                    let before = members.len();
+                    let mut kept: Vec<Value> = Vec::new();
+                    for mv in members.drain(..) {
+                        match mv.as_str() {
+                            Some(s) if BUILTIN_TARGETS.contains(&s) => kept.push(mv),
+                            Some(s) if shadowed.iter().any(|n| n == s) => {
+                                warnings.push(format!(
+                                    "订阅组「{name}」的成员「{s}」引用了已丢弃的订阅组，已剔除该成员"
+                                ));
+                            }
+                            Some(s) if universe.iter().any(|n| n == s) => kept.push(mv),
+                            Some(s) => {
+                                warnings.push(format!(
+                                    "订阅组「{name}」的成员「{s}」不存在，已丢弃该成员"
+                                ));
+                            }
+                            None => {
+                                warnings.push(format!(
+                                    "订阅组「{name}」的成员「{}」不存在，已丢弃该成员",
+                                    val_str(&mv)
+                                ));
+                            }
+                        }
+                    }
+                    if kept.is_empty() {
+                        dropped = true;
+                    } else {
+                        if kept.len() != before {
+                            changed = true;
+                        }
+                        *members = kept;
+                    }
+                }
+            }
+            if dropped {
+                warnings.push(format!("订阅组「{name}」成员为空，已丢弃该组"));
+                sub_groups.remove(i);
+                universe.retain(|n| n != &name);
+                changed = true;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    // ---------- g. 自定义组成员校验（所有组名已知、universe 收敛后） ----------
+    for g in &ctx.overrides.groups {
+        for member in &g.proxies {
+            if !is_valid_member(member, &universe) {
+                return Err(MergeError {
+                    message: format!(
+                        "自定义组「{}」的成员「{}」不存在（可用：订阅节点/自定义组/订阅组/内置 {}）",
+                        g.name,
+                        member,
+                        BUILTIN_TARGETS.join("/")
+                    ),
+                });
+            }
+        }
+    }
+
+    // ---------- h. 循环引用检测（最终组集：自定义 + 保留订阅组） ----------
+    let mut group_names: Vec<String> = custom_names.clone();
+    group_names.extend(sub_groups.iter().map(|(n, _)| n.clone()));
+    let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+    for g in &ctx.overrides.groups {
+        graph.insert(
+            g.name.clone(),
+            g.proxies
+                .iter()
+                .filter(|m| group_names.iter().any(|n| n == *m))
+                .cloned()
+                .collect(),
+        );
+    }
+    for (name, m2) in &sub_groups {
+        let edges: Vec<String> = m2
+            .as_mapping()
+            .and_then(|mp| mp.get(Value::String("proxies".into())))
+            .and_then(|v| v.as_sequence())
+            .map(|seq| {
+                seq.iter()
+                    .filter_map(|mv| mv.as_str())
+                    .filter(|s| group_names.contains(&s.to_string()))
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        graph.insert(name.clone(), edges);
+    }
+    if let Some(cycle) = find_cycle(&graph, &group_names) {
+        return Err(MergeError {
+            message: format!(
+                "检测到循环引用：组「{}」，mihomo 不允许组互相引用成环，请调整组成员",
+                cycle.join("」→「")
+            ),
+        });
+    }
+
     // ---------- 4. 兜底自动组：有节点但无任何组 ----------
+    let mut groups: Vec<Value> = custom_values;
+    groups.extend(sub_groups.into_iter().map(|(_, v)| v));
     if !nodes.is_empty() && groups.is_empty() {
         inject_auto_group(
             &mut groups,
@@ -235,8 +393,19 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
                 warnings.push(format!("订阅规则「{r}」与已有规则重复，已丢弃"));
                 continue;
             }
-            // 目标 = 最后一段逗号分隔
-            let target = r.rsplit(',').next().unwrap_or("");
+            // 目标解析：mihomo 规则格式 TYPE,payload,target[,选项...]。
+            // MATCH 类（无 payload）目标在第 2 段，其余类型目标在第 3 段
+            // （第 2 段是 payload）；选项（如 no-resolve）不影响校验，
+            // 规则原文原样保留。段数不足视为格式异常，丢弃并记 warning。
+            let parts: Vec<&str> = r.split(',').collect();
+            let target = match parts.as_slice() {
+                ["MATCH", t, ..] => *t,
+                [_, _, t, ..] => *t,
+                _ => {
+                    warnings.push(format!("订阅规则「{r}」格式异常，已丢弃"));
+                    continue;
+                }
+            };
             if !targets.contains(&target.to_string()) {
                 warnings.push(format!(
                     "订阅规则「{r}」的目标「{target}」不存在，已丢弃该规则"
@@ -922,5 +1091,446 @@ mod tests {
         assert_eq!(members.len(), 2);
         assert_eq!(members[0], Value::String("DIRECT".into()));
         assert_eq!(members[1], Value::String("节点1".into()));
+    }
+
+    // ---- 嵌套组支持 ----
+
+    // 1. 自定义组引用另一自定义组（后定义）→ 输出正确无警告
+    #[test]
+    fn custom_group_references_later_custom_group() {
+        let mut o = Overrides::default();
+        o.groups.push(group("外层组", &["内层组"]));
+        o.groups.push(group("内层组", &["节点1"]));
+        o.rules.push(rule("MATCH", "", "外层组"));
+        let s = sub(vec![node("节点1")], vec![], vec![]);
+        let out = do_merge(o, Some(s));
+        assert!(out.warnings.is_empty(), "警告: {:?}", out.warnings);
+        let v = parse_out(&out);
+        let gs = v["proxy-groups"].as_sequence().unwrap();
+        assert_eq!(gs.len(), 2);
+        assert_eq!(gs[0]["name"], Value::String("外层组".into()));
+        let m1: Vec<String> = gs[0]["proxies"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(m1, vec!["内层组"], "后定义的组也须可引用");
+        assert_eq!(gs[1]["name"], Value::String("内层组".into()));
+    }
+
+    // 2. 顶层自定义 select 引用两个订阅组 + DIRECT（成员顺序保持）
+    #[test]
+    fn top_level_select_references_sub_groups() {
+        let mut o = Overrides::default();
+        o.groups.push(group("手动选择", &["美国节点", "香港节点", "DIRECT"]));
+        o.rules.push(rule("MATCH", "", "手动选择"));
+        let s = sub(
+            vec![node("美1"), node("港1")],
+            vec![
+                sub_group("美国节点", &["美1"]),
+                sub_group("香港节点", &["港1"]),
+            ],
+            vec![],
+        );
+        let out = do_merge(o, Some(s));
+        assert!(out.warnings.is_empty(), "警告: {:?}", out.warnings);
+        let v = parse_out(&out);
+        let gs = v["proxy-groups"].as_sequence().unwrap();
+        assert_eq!(gs.len(), 3);
+        assert_eq!(gs[0]["name"], Value::String("手动选择".into()));
+        let members: Vec<String> = gs[0]["proxies"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(members, vec!["美国节点", "香港节点", "DIRECT"], "成员顺序保持");
+        assert_eq!(gs[1]["name"], Value::String("美国节点".into()));
+        assert_eq!(gs[2]["name"], Value::String("香港节点".into()));
+    }
+
+    // 3. 订阅组链式引用（A 引用 B）→ 保留无警告
+    #[test]
+    fn sub_group_chain_reference_kept() {
+        let s = sub(
+            vec![node("节点1")],
+            vec![sub_group("A组", &["B组"]), sub_group("B组", &["节点1"])],
+            vec!["MATCH,A组".into()],
+        );
+        let out = do_merge(Overrides::default(), Some(s));
+        assert!(out.warnings.is_empty(), "警告: {:?}", out.warnings);
+        let v = parse_out(&out);
+        let gs = v["proxy-groups"].as_sequence().unwrap();
+        assert_eq!(gs.len(), 2);
+        assert_eq!(gs[0]["name"], Value::String("A组".into()));
+        assert_eq!(gs[1]["name"], Value::String("B组".into()));
+        let members: Vec<String> = gs[0]["proxies"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(members, vec!["B组"], "A 组引用 B 组应保留");
+    }
+
+    // 4. 订阅组引用自定义组 → 保留
+    #[test]
+    fn sub_group_references_custom_group_kept() {
+        let mut o = Overrides::default();
+        o.groups.push(group("我的组", &["节点1"]));
+        let s = sub(
+            vec![node("节点1")],
+            vec![sub_group("订阅层", &["我的组"])],
+            vec!["MATCH,订阅层".into()],
+        );
+        let out = do_merge(o, Some(s));
+        assert!(out.warnings.is_empty(), "警告: {:?}", out.warnings);
+        let v = parse_out(&out);
+        let gs = v["proxy-groups"].as_sequence().unwrap();
+        assert_eq!(gs.len(), 2);
+        assert_eq!(gs[0]["name"], Value::String("我的组".into()));
+        assert_eq!(gs[1]["name"], Value::String("订阅层".into()));
+        let members: Vec<String> = gs[1]["proxies"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(members, vec!["我的组"]);
+    }
+
+    // 5. 订阅组引用被丢弃的订阅组（名字被自定义覆盖）→ 级联剔除 + warning，组保留
+    #[test]
+    fn sub_group_references_dropped_sub_group_cascades() {
+        let mut o = Overrides::default();
+        o.groups.push(group("重名组", &["节点1"]));
+        let s = sub(
+            vec![node("节点1"), node("节点2")],
+            vec![
+                sub_group("重名组", &["节点2"]), // 与自定义组重名 → 丢弃
+                sub_group("外层", &["重名组", "节点1"]), // 引用被丢弃的组 → 成员级联剔除
+            ],
+            vec!["MATCH,外层".into()],
+        );
+        let out = do_merge(o, Some(s));
+        let v = parse_out(&out);
+        let gs = v["proxy-groups"].as_sequence().unwrap();
+        assert_eq!(gs.len(), 2, "组: {gs:?}");
+        assert_eq!(gs[0]["name"], Value::String("重名组".into()));
+        assert_eq!(gs[1]["name"], Value::String("外层".into()), "外层组应保留");
+        let members: Vec<String> = gs[1]["proxies"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(members, vec!["节点1"], "被丢弃组的成员应级联剔除");
+        assert!(
+            out.warnings.iter().any(|w| w.contains("重名组") && w.contains("已丢弃")),
+            "应警告丢弃订阅组: {:?}",
+            out.warnings
+        );
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("外层") && w.contains("引用了已丢弃的订阅组")),
+            "应警告级联剔除: {:?}",
+            out.warnings
+        );
+    }
+
+    // 6. 直接循环（自定义 A 引用自身）→ MergeError 含路径
+    #[test]
+    fn direct_cycle_custom_group_is_error() {
+        let mut o = Overrides::default();
+        o.groups.push(group("A", &["A"]));
+        let e = do_merge_err(o, None);
+        assert!(
+            e.message.contains("组「A」→「A」"),
+            "应含循环路径: {}",
+            e.message
+        );
+        assert!(e.message.contains("循环引用"), "应含循环提示: {}", e.message);
+    }
+
+    // 7. 间接循环 A→B→A → MergeError
+    #[test]
+    fn indirect_cycle_is_error() {
+        let mut o = Overrides::default();
+        o.groups.push(group("A", &["B"]));
+        o.groups.push(group("B", &["A"]));
+        let e = do_merge_err(o, None);
+        assert!(
+            e.message.contains("组「A」→「B」→「A」"),
+            "应含循环路径: {}",
+            e.message
+        );
+    }
+
+    // 8. 订阅组间循环 → MergeError
+    #[test]
+    fn sub_group_cycle_is_error() {
+        let s = sub(
+            vec![node("节点1")],
+            vec![sub_group("S1", &["S2"]), sub_group("S2", &["S1"])],
+            vec![],
+        );
+        let e = do_merge_err(Overrides::default(), Some(s));
+        assert!(
+            e.message.contains("组「S1」→「S2」→「S1」"),
+            "应含循环路径: {}",
+            e.message
+        );
+    }
+
+    // 9. 自定义组引用不存在的组（模拟订阅切换后消失）→ MergeError「成员不存在」
+    #[test]
+    fn custom_group_references_missing_group_is_error() {
+        let mut o = Overrides::default();
+        o.groups.push(group("外层", &["消失的组"]));
+        let s = sub(vec![node("节点1")], vec![], vec![]);
+        let e = do_merge_err(o, Some(s));
+        assert!(
+            e.message.contains("外层") && e.message.contains("消失的组") && e.message.contains("不存在"),
+            "错误信息应含组与缺失成员: {}",
+            e.message
+        );
+        assert!(
+            e.message.contains("自定义组/订阅组"),
+            "应提示可用范围: {}",
+            e.message
+        );
+    }
+
+    // 10. 订阅组重名去重：两个同名订阅组 + 第三个组引用该名 + 一条规则引用该名
+    //     → 输出只有首个组；引用/规则保留并解析到首个组；warning 提示重名丢弃
+    #[test]
+    fn duplicate_sub_group_name_keeps_first() {
+        let s = sub(
+            vec![node("节点1")],
+            vec![
+                sub_group("组X", &["节点1"]),
+                sub_group("组X", &["节点1"]), // 与已有订阅组重名 → 丢弃第二个
+                sub_group("外层", &["组X"]), // 引用重名订阅组 → 保留，解析到首个组
+            ],
+            vec!["MATCH,组X".into()],
+        );
+        let out = do_merge(Overrides::default(), Some(s));
+        let v = parse_out(&out);
+        let gs = v["proxy-groups"].as_sequence().unwrap();
+        let names: Vec<&str> = gs.iter().map(|g| g["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["组X", "外层"], "同名订阅组只保留首个: {gs:?}");
+        let first: Vec<String> = gs[0]["proxies"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(first, vec!["节点1"]);
+        let outer: Vec<String> = gs[1]["proxies"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(outer, vec!["组X"], "对重名订阅组的引用保留并解析到首个组");
+        let rs = v["rules"].as_sequence().unwrap();
+        assert_eq!(rs, &vec![Value::String("MATCH,组X".into())], "引用该名的规则保留");
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("与已有订阅组重名") && w.contains("已丢弃订阅组")),
+            "应警告重名丢弃: {:?}",
+            out.warnings
+        );
+    }
+
+    // 11. 混合循环：自定义组 ↔ 订阅组 → MergeError
+    #[test]
+    fn mixed_custom_sub_cycle_is_error() {
+        let mut o = Overrides::default();
+        o.groups.push(group("自定义", &["订阅组X"]));
+        let s = sub(
+            vec![node("节点1")],
+            vec![sub_group("订阅组X", &["自定义"])],
+            vec![],
+        );
+        let e = do_merge_err(o, Some(s));
+        assert!(
+            e.message.contains("组「自定义」→「订阅组X」→「自定义」"),
+            "应含循环路径: {}",
+            e.message
+        );
+    }
+
+    // 12. 正常嵌套 + 订阅规则引用顶层组 → 全链路正确
+    #[test]
+    fn nested_groups_full_flow_with_sub_rules() {
+        let mut o = Overrides::default();
+        o.groups.push(group("顶层", &["子组", "节点1"]));
+        o.groups.push(group("子组", &["订阅组A"]));
+        o.rules.push(rule("DOMAIN-SUFFIX", "example.com", "顶层"));
+        let s = sub(
+            vec![node("节点1"), node("节点2")],
+            vec![sub_group("订阅组A", &["节点2"])],
+            vec!["MATCH,顶层".into()],
+        );
+        let out = do_merge(o, Some(s));
+        assert!(out.warnings.is_empty(), "警告: {:?}", out.warnings);
+        let v = parse_out(&out);
+        let gs = v["proxy-groups"].as_sequence().unwrap();
+        let names: Vec<&str> = gs.iter().map(|g| g["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["顶层", "子组", "订阅组A"], "组顺序: 自定义在前");
+        let top: Vec<String> = gs[0]["proxies"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(top, vec!["子组", "节点1"]);
+        let mid: Vec<String> = gs[1]["proxies"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(mid, vec!["订阅组A"], "自定义组可引用订阅组");
+        let rs = v["rules"].as_sequence().unwrap();
+        assert_eq!(rs[0], Value::String("DOMAIN-SUFFIX,example.com,顶层".into()));
+        assert_eq!(rs[1], Value::String("MATCH,顶层".into()), "订阅规则引用顶层组");
+    }
+
+    // 13. 自定义组名 = 内置目标（DIRECT）→ MergeError 提示改名
+    #[test]
+    fn custom_group_named_builtin_target_is_error() {
+        let mut o = Overrides::default();
+        o.groups.push(group("DIRECT", &["节点1"]));
+        let s = sub(vec![node("节点1")], vec![], vec![]);
+        let e = do_merge_err(o, Some(s));
+        assert!(
+            e.message.contains("与内置目标重名") && e.message.contains("请修改组名"),
+            "应提示内置目标重名并建议改名: {}",
+            e.message
+        );
+        assert!(e.message.contains("DIRECT"), "应含组名: {}", e.message);
+    }
+
+    // 14. 订阅组名 = 内置目标（DIRECT）→ 丢弃 + warning（不污染内置目标语义）
+    #[test]
+    fn sub_group_named_builtin_target_is_dropped() {
+        let s = sub(
+            vec![node("节点1")],
+            vec![
+                sub_group("DIRECT", &["节点1"]),
+                sub_group("外层", &["DIRECT"]), // 引用该名 → 保留，解析为内置目标
+            ],
+            vec!["MATCH,外层".into()], // 有规则，避免兜底自动组/默认规则干扰
+        );
+        let out = do_merge(Overrides::default(), Some(s));
+        let v = parse_out(&out);
+        let gs = v["proxy-groups"].as_sequence().unwrap();
+        let names: Vec<&str> = gs.iter().map(|g| g["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["外层"], "内置名订阅组应被丢弃: {gs:?}");
+        let outer: Vec<String> = gs[0]["proxies"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(outer, vec!["DIRECT"], "引用解析为内置目标 DIRECT");
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("与内置目标重名") && w.contains("已丢弃订阅组")),
+            "应警告内置目标重名丢弃: {:?}",
+            out.warnings
+        );
+    }
+
+    // ---- 补充：订阅规则带 no-resolve 选项（IP-CIDR,payload,组,no-resolve）→
+    // 目标解析取第 3 段（payload 之后），规则原样保留 ----------------
+
+    #[test]
+    fn sub_rule_with_no_resolve_option_kept() {
+        let s = sub(
+            vec![node("节点1")],
+            vec![sub_group("组A", &["节点1"])],
+            vec!["IP-CIDR,0.0.0.0/8,组A,no-resolve".into()],
+        );
+        let out = do_merge(Overrides::default(), Some(s));
+        assert!(out.warnings.is_empty(), "警告: {:?}", out.warnings);
+        let v = parse_out(&out);
+        let rs = v["rules"].as_sequence().unwrap();
+        assert_eq!(
+            rs[0],
+            Value::String("IP-CIDR,0.0.0.0/8,组A,no-resolve".into()),
+            "规则应原样保留（含 no-resolve 选项），不被误当目标"
+        );
+    }
+
+    // ---- 补充：MATCH 类规则（无 payload）目标在第 2 段 → 保留 ----
+
+    #[test]
+    fn sub_rule_match_target_is_second_segment() {
+        let s = sub(
+            vec![node("节点1")],
+            vec![sub_group("组A", &["节点1"])],
+            vec!["MATCH,组A".into()],
+        );
+        let out = do_merge(Overrides::default(), Some(s));
+        assert!(out.warnings.is_empty(), "警告: {:?}", out.warnings);
+        let v = parse_out(&out);
+        let rs = v["rules"].as_sequence().unwrap();
+        assert_eq!(rs[0], Value::String("MATCH,组A".into()));
+    }
+
+    // ---- 补充：带 no-resolve 的规则目标确实不存在 → 仍丢弃（选项不影响校验） ----
+
+    #[test]
+    fn sub_rule_no_resolve_with_missing_target_dropped() {
+        let s = sub(
+            vec![node("节点1")],
+            vec![sub_group("组A", &["节点1"])],
+            vec![
+                "IP-CIDR,8.8.8.8/32,不存在组,no-resolve".into(),
+                "MATCH,组A".into(),
+            ],
+        );
+        let out = do_merge(Overrides::default(), Some(s));
+        let v = parse_out(&out);
+        let rs = v["rules"].as_sequence().unwrap();
+        assert_eq!(rs.len(), 1, "不存在组的规则应被丢弃: {rs:?}");
+        assert_eq!(rs[0], Value::String("MATCH,组A".into()));
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("IP-CIDR,8.8.8.8/32,不存在组,no-resolve") && w.contains("已丢弃")),
+            "应警告丢弃: {:?}",
+            out.warnings
+        );
+    }
+
+    // ---- 补充：格式异常的订阅规则（段数不足）→ 丢弃 + 格式异常 warning ----
+
+    #[test]
+    fn malformed_sub_rule_dropped_with_format_warning() {
+        let s = sub(
+            vec![node("节点1")],
+            vec![sub_group("组A", &["节点1"])],
+            vec!["FOO,BAR".into(), "MATCH,组A".into()],
+        );
+        let out = do_merge(Overrides::default(), Some(s));
+        let v = parse_out(&out);
+        let rs = v["rules"].as_sequence().unwrap();
+        assert_eq!(rs.len(), 1, "格式异常的规则应被丢弃: {rs:?}");
+        assert_eq!(rs[0], Value::String("MATCH,组A".into()));
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| w.contains("FOO,BAR") && w.contains("格式异常")),
+            "应警告格式异常: {:?}",
+            out.warnings
+        );
     }
 }

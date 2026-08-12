@@ -1,0 +1,34 @@
+# 基础 CI：push / PR 时运行 fmt + clippy + test（仅 x86_64，保证质量门槛）
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # stable 工具链 + rustfmt / clippy 组件
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # 依赖缓存
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test

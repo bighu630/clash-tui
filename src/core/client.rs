@@ -420,7 +420,13 @@ impl Client {
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| ApiError::Json(e.to_string()))?;
         let mut out = Vec::new();
-        if let Some(proxies) = v.get("proxies").and_then(|x| x.as_object()) {
+        // 兼容两种响应格式（实测 mihomo v1.19.x 返回扁平 {节点: ms}；部分文档/版本为 {"proxies": {...}}）：
+        // 优先取包装格式，否则按扁平对象解析；两者都不是（如错误对象）→ 空列表。
+        let map = v
+            .get("proxies")
+            .and_then(|x| x.as_object())
+            .or_else(|| v.as_object());
+        if let Some(proxies) = map {
             for (n, d) in proxies {
                 if let Some(ms) = d.as_u64() {
                     out.push((n.clone(), ms.min(u16::MAX as u64) as u16));
@@ -664,8 +670,9 @@ mod tests {
                             "手动选择":{"name":"手动选择","type":"Selector","now":"节点B","all":["节点A","节点B","DIRECT"]},
                             "自动选择":{"name":"自动选择","type":"URLTest","now":"节点A","all":["节点A","节点B"]}
                         }}"#.to_string(),
+                        // 对齐真实 mihomo v1.19.x：GET /group/{name}/delay 返回扁平 {节点: 延迟ms}
                         _ if path.starts_with("/group/") && path.ends_with("/delay") => {
-                            r#"{"proxies":{"节点A":123,"节点B":8000}}"#.to_string()
+                            r#"{"节点A":123,"节点B":8000}"#.to_string()
                         }
                         "/traffic" => {
                             let payload = "{\"up\":1,\"down\":2,\"upTotal\":3,\"downTotal\":4}\n{\"up\":5,\"down\":6,\"upTotal\":7,\"downTotal\":8}\n";
@@ -1013,11 +1020,56 @@ mod tests {
         assert!(!first_line.contains('🚀'), "不应含裸 emoji: {first_line}");
     }
 
+    /// 启动一个只响应单次请求的假服务器，固定返回 body（用于覆盖 spawn_api_server 无法表达的响应）。
+    async fn spawn_single_response_server(body: String) -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut tmp).await {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    Err(_) => break,
+                }
+            }
+            let _ = sock
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+        });
+        port
+    }
+
     #[tokio::test]
     async fn test_group_delay_parses_proxies_map() {
         let (port, _rx) = spawn_api_server().await;
         let list = client_on(port).test_group_delay("自动选择").await.unwrap();
         assert_eq!(list, vec![("节点A".to_string(), 123), ("节点B".to_string(), 8000)]);
+    }
+
+    #[tokio::test]
+    async fn test_group_delay_parses_wrapped_format() {
+        // 兼容路径：部分文档/旧版本返回 {"proxies": {...}} 包装格式
+        let port = spawn_single_response_server(r#"{"proxies":{"节点A":123}}"#.to_string()).await;
+        let list = client_on(port).test_group_delay("自动选择").await.unwrap();
+        assert_eq!(list, vec![("节点A".to_string(), 123)]);
+    }
+
+    #[tokio::test]
+    async fn test_group_delay_flat_empty_object() {
+        // 空对象 {} → 空列表，不报错
+        let port = spawn_single_response_server(r#"{}"#.to_string()).await;
+        let list = client_on(port).test_group_delay("自动选择").await.unwrap();
+        assert!(list.is_empty());
     }
 
     #[tokio::test]

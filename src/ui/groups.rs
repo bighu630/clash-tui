@@ -4,15 +4,17 @@
 //! 数据源优先级：运行时策略组（含当前选择 now/成员 all）→ 激活订阅缓存组
 //! （API 不可用时降级展示名称/类型/成员数，无当前选择）。
 
+use std::collections::HashMap;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{AppState, UiCommand};
-use crate::core::client::GroupInfo;
+use crate::core::client::{GroupInfo, GROUP_DELAY_TIMEOUT_MS};
 use crate::ui::widgets::{centered_rect, MessagePopup, SelectList};
 use crate::ui::Page;
 
@@ -191,6 +193,7 @@ impl GroupsPage {
         self.pending = Some(g.name.clone());
         self.popup = Some(GroupPopup::Selector(SelectorPopup::new(
             format!("选择节点：{}", g.name),
+            g.name.clone(),
             g.all.clone(),
             g.now.clone(),
         )));
@@ -206,7 +209,10 @@ impl GroupsPage {
             )));
             return None;
         };
-        Some(UiCommand::TestGroupDelay(g.name.clone()))
+        Some(UiCommand::TestGroupDelay {
+            group: g.name.clone(),
+            silent: false,
+        })
     }
 
     /// 单选确认：按组名在运行时列表中定位后发切换命令；
@@ -232,6 +238,16 @@ impl GroupsPage {
                 Some(SelectAction::Cancel) => {
                     self.pending = None;
                     None
+                }
+                Some(SelectAction::TestDelay) => {
+                    // 弹窗内测速：静默模式（结果只进 AppState.group_delays，
+                    // 由弹窗 render 时 sync_delays 读取展示/排序），弹窗保持打开
+                    let cmd = self.pending.clone().map(|group| UiCommand::TestGroupDelay {
+                        group,
+                        silent: true,
+                    });
+                    self.popup = Some(GroupPopup::Selector(p));
+                    cmd
                 }
                 None => {
                     self.popup = Some(GroupPopup::Selector(p));
@@ -291,68 +307,178 @@ impl Page for GroupsPage {
         }
         if let Some(popup) = &mut self.popup {
             match popup {
-                GroupPopup::Selector(p) => p.render(f, area),
+                GroupPopup::Selector(p) => p.render(f, area, st),
                 GroupPopup::Message(p) => p.render(f, area),
             }
         }
     }
 }
 
+/// 排序模式。
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SortMode {
+    /// 订阅/接口原始顺序
+    Original,
+    /// 按名称字母序（to_lowercase 不区分大小写）
+    Name,
+    /// 按延迟升序（超时排最后，无数据排最后）
+    Delay,
+}
+
 /// 单选弹窗动作。
 enum SelectAction {
     Confirm(String),
     Cancel,
+    TestDelay,
 }
 
-/// select 组节点单选弹窗：j/k 移动、Enter 确认、Esc 取消、当前项 ▶ 标记。
+/// select 组节点单选弹窗：j/k 移动、Enter 确认、Esc 取消、当前项 ▶ 标记；
+/// s 测速（结果行尾显示延迟）、n 按名称排序、d 按延迟排序。
 struct SelectorPopup {
     title: String,
+    /// 所属组名（用于从 AppState.group_delays 读延迟）
+    group_name: String,
     items: Vec<String>,
     now: Option<String>,
+    /// 显示顺序（items 的索引排列）
+    order: Vec<usize>,
+    /// 选中项在 order 中的位置
     selected: usize,
+    mode: SortMode,
+    /// 组内延迟（节点名 → ms，>= GROUP_DELAY_TIMEOUT_MS 为超时）
+    delays: HashMap<String, u16>,
+    /// 临时提示（如 d 无延迟数据时），显示在 footer 行，导航后清除
+    hint: Option<String>,
 }
 
 impl SelectorPopup {
-    fn new(title: String, items: Vec<String>, now: Option<String>) -> Self {
+    fn new(title: String, group_name: String, items: Vec<String>, now: Option<String>) -> Self {
+        let order: Vec<usize> = (0..items.len()).collect();
         // 初始定位到当前节点（now 缺失或不在列表中时回退第一项）
         let selected = now
             .as_ref()
-            .and_then(|n| items.iter().position(|i| i == n))
+            .and_then(|n| order.iter().position(|&i| items[i] == *n))
             .unwrap_or(0);
         Self {
             title,
+            group_name,
             items,
             now,
+            order,
             selected,
+            mode: SortMode::Original,
+            delays: HashMap::new(),
+            hint: None,
+        }
+    }
+
+    /// 按 mode 重建显示顺序：记录当前选中节点名，排序后重定位；
+    /// Delay 模式无数据节点视为 u16::MAX 排最后，延迟相等时按名称序保证稳定可预期。
+    fn reorder(&mut self) {
+        let current = self.items[self.order[self.selected]].clone();
+        let n = self.items.len();
+        self.order = (0..n).collect();
+        match self.mode {
+            SortMode::Original => {}
+            SortMode::Name => {
+                self.order.sort_by(|&a, &b| {
+                    self.items[a].to_lowercase().cmp(&self.items[b].to_lowercase())
+                });
+            }
+            SortMode::Delay => {
+                self.order.sort_by(|&a, &b| {
+                    let da = self.delays.get(&self.items[a]).copied().unwrap_or(u16::MAX);
+                    let db = self.delays.get(&self.items[b]).copied().unwrap_or(u16::MAX);
+                    da.cmp(&db)
+                        .then_with(|| self.items[a].to_lowercase().cmp(&self.items[b].to_lowercase()))
+                });
+            }
+        }
+        self.selected = self
+            .order
+            .iter()
+            .position(|&i| self.items[i] == current)
+            .unwrap_or(0);
+    }
+
+    /// 从 AppState.group_delays 同步本组延迟；延迟数据到达后清除「请先测速」提示，
+    /// 且若处于 Delay 模式则重排（数据变化后保持有序）。
+    fn sync_delays(&mut self, st: &AppState) {
+        if let Some(list) = st.group_delays.get(&self.group_name) {
+            let m: HashMap<String, u16> = list.iter().cloned().collect();
+            if !m.is_empty() {
+                self.delays = m;
+                self.hint = None;
+            }
+        }
+        if self.mode == SortMode::Delay && !self.delays.is_empty() {
+            self.reorder();
         }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Option<SelectAction> {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                if self.selected + 1 < self.items.len() {
+                if self.selected + 1 < self.order.len() {
                     self.selected += 1;
                 }
+                self.hint = None;
                 None
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 self.selected = self.selected.saturating_sub(1);
+                self.hint = None;
                 None
             }
-            KeyCode::Enter => Some(SelectAction::Confirm(self.items[self.selected].clone())),
+            KeyCode::Enter => {
+                Some(SelectAction::Confirm(self.items[self.order[self.selected]].clone()))
+            }
             KeyCode::Esc => Some(SelectAction::Cancel),
+            KeyCode::Char('s') => Some(SelectAction::TestDelay),
+            KeyCode::Char('n') => {
+                self.mode = SortMode::Name;
+                self.reorder();
+                self.hint = None;
+                None
+            }
+            KeyCode::Char('d') => {
+                if self.delays.is_empty() {
+                    // 无延迟数据：提示先测速，保持原顺序
+                    self.hint = Some("请先按 s 测速".to_string());
+                    None
+                } else {
+                    self.mode = SortMode::Delay;
+                    self.reorder();
+                    self.hint = None;
+                    None
+                }
+            }
             _ => None,
         }
     }
 
-    fn render(&mut self, f: &mut Frame, area: Rect) {
+    fn render(&mut self, f: &mut Frame, area: Rect, st: &AppState) {
+        self.sync_delays(st);
+        // 关键修复 1：弹窗矩形先清底，避免未填充行透出下层主列表文字
         let rect = centered_rect(60, 60, area);
+        f.render_widget(Clear, rect);
+        // 关键修复 2：list 只渲染 chunks[0]，footer 独占最后一行，互不覆盖
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(rect);
         let items: Vec<ListItem> = self
-            .items
+            .order
             .iter()
-            .map(|n| {
+            .map(|&i| {
+                let n = &self.items[i];
                 let mark = if self.now.as_deref() == Some(n.as_str()) { "▶ " } else { "  " };
-                ListItem::new(format!("{mark}{n}"))
+                let suffix = match self.delays.get(n) {
+                    Some(ms) if *ms >= GROUP_DELAY_TIMEOUT_MS => "  超时".to_string(),
+                    Some(ms) => format!("  {ms}ms"),
+                    None => String::new(),
+                };
+                ListItem::new(format!("{mark}{n}{suffix}"))
             })
             .collect();
         let list = List::new(items)
@@ -360,19 +486,19 @@ impl SelectorPopup {
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
         let mut state = ListState::default();
         state.select(Some(self.selected));
-        f.render_stateful_widget(list, rect, &mut state);
-        let footer = Paragraph::new(Line::from("j/k 移动  Enter 切换  Esc 取消"));
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1)])
-            .split(rect);
+        f.render_stateful_widget(list, chunks[0], &mut state);
+        let footer_text = match &self.hint {
+            Some(h) => h.clone(),
+            None => "j/k 移动  Enter 切换  s 测速  n 按名  d 按延迟  Esc 取消".to_string(),
+        };
+        let footer = Paragraph::new(Line::from(footer_text));
         f.render_widget(footer, chunks[1]);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
 
     use super::*;
     use crate::core::client::RuntimeConfig;
@@ -395,6 +521,7 @@ mod tests {
             connections: Vec::new(),
             exit_ip: None,
             proxy_groups: groups,
+            group_delays: HashMap::new(),
             notices: VecDeque::new(),
         }
     }
@@ -447,6 +574,7 @@ mod tests {
     fn selector_popup_navigation_and_confirm() {
         let mut p = SelectorPopup::new(
             "选择节点：g".into(),
+            "g".into(),
             vec!["A".into(), "B".into(), "C".into()],
             Some("B".into()),
         );
@@ -467,17 +595,13 @@ mod tests {
             Some(SelectAction::Cancel)
         ));
         // now 不在列表中 → 回退第一项
-        let mut p2 = SelectorPopup::new(
-            "t".into(),
-            vec!["A".into(), "B".into()],
-            Some("X".into()),
-        );
+        let mut p2 = SelectorPopup::new("t".into(), "g".into(), vec!["A".into(), "B".into()], Some("X".into()));
         assert!(matches!(
             p2.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Some(SelectAction::Confirm(ref t)) if t == "A"
         ));
         // 越界保护
-        let mut p3 = SelectorPopup::new("t".into(), vec!["A".into()], None);
+        let mut p3 = SelectorPopup::new("t".into(), "g".into(), vec!["A".into()], None);
         let _ = p3.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         assert!(matches!(
             p3.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -503,20 +627,110 @@ mod tests {
         }
     }
 
-    /// SelectorPopup 极小终端渲染不 panic。
+    /// SelectorPopup 极小终端渲染不 panic（渲染签名带 AppState）。
     #[test]
     fn selector_popup_tiny_terminal_no_panic() {
         for h in [0u16, 1, 2, 24] {
             let mut popup = SelectorPopup::new(
                 "选择节点：g".into(),
+                "g".into(),
                 vec!["a".into(), "b".into()],
                 Some("a".into()),
             );
+            let state = state_with_groups(Vec::new());
             let mut terminal = Terminal::new(TestBackend::new(30, h)).unwrap();
             terminal
-                .draw(|f| popup.render(f, f.area()))
+                .draw(|f| popup.render(f, f.area(), &state))
                 .expect("render 不应失败");
         }
+    }
+
+    /// n 按名称排序（to_lowercase 不区分大小写）：b,a,C → a,b,C；
+    /// 选中项跟随原节点（初始选中 b → 排序后仍在 b），确认返回正确节点名。
+    #[test]
+    fn selector_popup_name_sort_reorders() {
+        let mut p = SelectorPopup::new(
+            "t".into(),
+            "g".into(),
+            vec!["b".into(), "a".into(), "C".into()],
+            None,
+        );
+        // 初始选中第一项 b，移到第二项 a
+        let _ = p.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        let _ = p.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        let names: Vec<&str> = p.order.iter().map(|&i| p.items[i].as_str()).collect();
+        assert_eq!(names, vec!["a", "b", "C"], "按名称升序: {names:?}");
+        // selected 重定位到排序前的节点 a
+        assert_eq!(p.selected, 0);
+        assert!(matches!(
+            p.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SelectAction::Confirm(ref t)) if t == "a"
+        ));
+    }
+
+    /// d 按延迟排序：升序、超时（>=5000）排后、无数据排最后、相等按名称序。
+    #[test]
+    fn selector_popup_delay_sort() {
+        let mut p = SelectorPopup::new(
+            "t".into(),
+            "g".into(),
+            vec!["c".into(), "a".into(), "b".into(), "x".into(), "d".into()],
+            None,
+        );
+        p.delays.insert("c".into(), 100);
+        p.delays.insert("a".into(), 300);
+        p.delays.insert("d".into(), 300);
+        p.delays.insert("b".into(), 8000); // 超时
+        let _ = p.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let names: Vec<&str> = p.order.iter().map(|&i| p.items[i].as_str()).collect();
+        assert_eq!(names, vec!["c", "a", "d", "b", "x"], "延迟升序: {names:?}");
+        assert!(matches!(p.mode, SortMode::Delay));
+    }
+
+    /// d 无延迟数据：不排序（保持原始顺序），提示先测速，不切换模式。
+    #[test]
+    fn selector_popup_delay_sort_without_data_keeps_order() {
+        let mut p = SelectorPopup::new(
+            "t".into(),
+            "g".into(),
+            vec!["b".into(), "a".into()],
+            None,
+        );
+        let _ = p.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let names: Vec<&str> = p.order.iter().map(|&i| p.items[i].as_str()).collect();
+        assert_eq!(names, vec!["b", "a"], "无数据不应排序: {names:?}");
+        assert!(matches!(p.mode, SortMode::Original));
+        assert_eq!(p.hint.as_deref(), Some("请先按 s 测速"));
+        // 导航后提示清除
+        let _ = p.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(p.hint.is_none(), "导航后提示应清除");
+    }
+
+    /// sync_delays：从 AppState.group_delays 读入本组延迟；数据到达后 d 可排序。
+    #[test]
+    fn selector_popup_sync_delays_from_state() {
+        let mut st = state_with_groups(Vec::new());
+        st.group_delays.insert(
+            "g".into(),
+            vec![("a".into(), 300u16), ("b".into(), 100u16)],
+        );
+        let mut p = SelectorPopup::new(
+            "t".into(),
+            "g".into(),
+            vec!["a".into(), "b".into()],
+            None,
+        );
+        // 先按 d：无数据 → 提示
+        let _ = p.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(p.hint.is_some());
+        // render 时 sync_delays 读到数据（模拟测速完成），提示清除
+        p.sync_delays(&st);
+        assert_eq!(p.delays.get("b"), Some(&100), "延迟应同步");
+        assert!(p.hint.is_none(), "数据到达后提示应清除");
+        // 再按 d 排序
+        let _ = p.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let names: Vec<&str> = p.order.iter().map(|&i| p.items[i].as_str()).collect();
+        assert_eq!(names, vec!["b", "a"]);
     }
 
     /// Enter：URLTest 自动组弹「不可手动切换」提示，不发切换命令。

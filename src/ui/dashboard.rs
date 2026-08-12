@@ -546,7 +546,7 @@ mod tests {
     use crate::core::models::Overrides;
     use crate::core::settings::{load_settings, settings_path, with_settings_dir};
     use crossterm::event::KeyModifiers;
-    use std::collections::VecDeque;
+    use std::collections::{HashMap, VecDeque};
 
     /// 构造最小 AppState（字段全 pub，参照 app.rs test_app 的构造）。
     fn test_state() -> AppState {
@@ -562,6 +562,7 @@ mod tests {
             connections: Vec::new(),
             exit_ip: None,
             proxy_groups: Vec::new(),
+            group_delays: HashMap::new(),
             notices: VecDeque::new(),
         }
     }

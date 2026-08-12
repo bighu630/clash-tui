@@ -1,7 +1,7 @@
 //! 应用主循环：AppState、UiCommand/UiEvent、后台任务（traffic/memory/exit_ip）、
 //! tokio::select! 事件分发。契约见 docs/superpowers/plans/2026-08-10-mihomo-tui.md §3。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -51,6 +51,9 @@ pub struct AppState {
     pub exit_ip: Option<String>,
     /// 运行时策略组快照（GET /proxies；规则组页数据源）
     pub proxy_groups: Vec<GroupInfo>,
+    /// 整组延迟测试结果缓存（组名 → 节点延迟；弹窗内测速静默模式也写入，
+    /// 供节点选择弹窗按延迟排序/展示延迟）
+    pub group_delays: HashMap<String, Vec<(String, u16)>>,
     pub notices: VecDeque<String>,
 }
 
@@ -97,6 +100,7 @@ impl AppState {
             connections: Vec::new(),
             exit_ip: None,
             proxy_groups: Vec::new(),
+            group_delays: HashMap::new(),
             notices,
         }
     }
@@ -128,8 +132,9 @@ pub enum UiCommand {
     RefreshGroups,
     /// 切换 select 组当前节点（PUT /proxies）
     SwitchGroup { group: String, target: String },
-    /// 整组延迟测试（GET /group/{name}/delay）
-    TestGroupDelay(String),
+    /// 整组延迟测试（GET /group/{name}/delay）；silent=true 为弹窗内测速
+    /// （结果只进 AppState.group_delays 供弹窗展示/排序，不弹结果弹窗）
+    TestGroupDelay { group: String, silent: bool },
 }
 
 /// 后台任务 → 主循环的事件。
@@ -152,6 +157,7 @@ pub enum UiEvent {
     },
     GroupDelayDone {
         group: String,
+        silent: bool,
         result: Result<Vec<(String, u16)>, String>,
     },
 }
@@ -707,12 +713,16 @@ where
                 }
                 Err(e) => self.popup_error("切换失败", e),
             },
-            UiEvent::GroupDelayDone { group, result } => match result {
+            UiEvent::GroupDelayDone { group, silent, result } => match result {
                 Ok(list) => {
-                    self.result_popup = Some(MessagePopup::new(
-                        format!("延迟测试：{group}"),
-                        delay_lines(&list),
-                    ));
+                    // 弹窗内测速（silent）只更新缓存供弹窗展示/排序，不弹结果弹窗
+                    self.state.group_delays.insert(group.clone(), list.clone());
+                    if !silent {
+                        self.result_popup = Some(MessagePopup::new(
+                            format!("延迟测试：{group}"),
+                            delay_lines(&list),
+                        ));
+                    }
                     self.state.notice(format!("[✓] 延迟测试完成：{group}"));
                     let _ = self.cmd_tx.send(UiCommand::RefreshGroups);
                 }
@@ -821,14 +831,14 @@ where
                     let _ = ui_tx.send(UiEvent::GroupSwitched { group, target, result: res });
                 });
             }
-            UiCommand::TestGroupDelay(group) => {
+            UiCommand::TestGroupDelay { group, silent } => {
                 let ui_tx = ui_tx.clone();
                 tokio::spawn(async move {
                     let res = client
                         .test_group_delay(&group)
                         .await
                         .map_err(|e| e.to_string());
-                    let _ = ui_tx.send(UiEvent::GroupDelayDone { group, result: res });
+                    let _ = ui_tx.send(UiEvent::GroupDelayDone { group, silent, result: res });
                 });
             }
             UiCommand::InstallSetup => {
@@ -1326,6 +1336,7 @@ mod tests {
             connections: Vec::new(),
             exit_ip: None,
             proxy_groups: Vec::new(),
+            group_delays: HashMap::new(),
             notices: VecDeque::new(),
         };
         let (ui_tx, _) = mpsc::unbounded_channel();
@@ -1585,20 +1596,44 @@ mod tests {
         assert_eq!(app.result_popup.as_ref().unwrap().title(), "切换失败");
     }
 
-    /// 延迟测试完成：结果弹窗 + 刷新命令。
+    /// 延迟测试完成：结果弹窗 + 缓存 + 刷新命令。
     #[test]
     fn group_delay_done_popup_and_refresh() {
         let (mut app, mut rx) = test_app(24);
+        let list = vec![
+            ("节点B".to_string(), 8000),
+            ("节点A".to_string(), 123),
+        ];
         app.on_ui_event(UiEvent::GroupDelayDone {
             group: "自动选择".into(),
-            result: Ok(vec![
-                ("节点B".to_string(), 8000),
-                ("节点A".to_string(), 123),
-            ]),
+            silent: false,
+            result: Ok(list.clone()),
         });
         let popup = app.result_popup.as_ref().expect("应有结果弹窗");
         assert_eq!(popup.title(), "延迟测试：自动选择");
+        assert_eq!(app.state.group_delays.get("自动选择"), Some(&list), "结果应缓存");
         let _ = rx.try_recv().expect("应发送刷新命令");
+    }
+
+    /// 静默测速完成（弹窗内 s）：不弹结果弹窗，但结果存入 group_delays 且仍刷新。
+    #[test]
+    fn group_delay_done_silent_no_popup_but_stored() {
+        let (mut app, mut rx) = test_app(24);
+        let list = vec![("节点A".to_string(), 123), ("节点B".to_string(), 8000)];
+        app.on_ui_event(UiEvent::GroupDelayDone {
+            group: "手动选择".into(),
+            silent: true,
+            result: Ok(list.clone()),
+        });
+        assert!(app.result_popup.is_none(), "静默测速不应弹结果弹窗");
+        assert_eq!(app.state.group_delays.get("手动选择"), Some(&list), "结果应入缓存");
+        assert!(
+            app.state.notices.iter().any(|n| n.contains("延迟测试完成")),
+            "应有完成通知: {:?}",
+            app.state.notices
+        );
+        let cmd = rx.try_recv().expect("静默测速仍应发送刷新命令");
+        assert!(matches!(cmd, UiCommand::RefreshGroups), "命令: {cmd:?}");
     }
 
     /// 延迟结果行：按延迟升序，超时（>= GROUP_DELAY_TIMEOUT_MS）标记并排最后。

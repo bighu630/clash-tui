@@ -1,4 +1,4 @@
-//! 首页仪表盘：状态行（模式/TUN/IPv6/出口IP/API 状态）、实时网速、总流量、内存。
+//! 首页仪表盘：状态行（模式/TUN/IPv6/出口IP/API 状态）、连接、网络、内存。
 //! 交互规格见 docs/superpowers/plans/2026-08-10-mihomo-tui.md §3。
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -9,6 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Sparkline};
 use ratatui::Frame;
 
 use crate::app::{AppState, UiCommand};
+use crate::core::client::ConnInfo;
 use crate::core::merger::{merge, MergeContext};
 use crate::core::models::NetworkSettings;
 use crate::core::settings::save_settings;
@@ -182,11 +183,16 @@ impl Page for DashboardPage {
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
         render_status(f, status, st);
 
-        let [left, right] =
-            Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .areas(body);
-        render_traffic(f, left, st);
-        render_totals(f, right, st);
+        if connections_visible(body.width) {
+            let [left, right] =
+                Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
+                    .areas(body);
+            render_connections(f, left, st);
+            render_right(f, right, st);
+        } else {
+            // 窄窗口：隐藏连接框，网络+内存占满全宽
+            render_right(f, body, st);
+        }
 
         if let Some(popup) = &mut self.popup {
             match popup {
@@ -225,6 +231,14 @@ fn settings_form(s: &NetworkSettings) -> FormPopup {
             FormField { label: "dns.nameserver".into(), value: s.dns.nameserver.join(","), kind: FieldKind::Text },
         ],
     )
+}
+
+/// 连接框响应式隐藏阈值：body 宽度低于此值时不渲染左列连接框。
+const CONNECTIONS_MIN_WIDTH: u16 = 60;
+
+/// 宽度是否足够显示连接框。
+fn connections_visible(width: u16) -> bool {
+    width >= CONNECTIONS_MIN_WIDTH
 }
 
 /// 模式循环 rule → global → direct → rule（非 global/direct 一律 → "global"）。
@@ -270,10 +284,18 @@ fn render_status(f: &mut Frame, area: Rect, st: &AppState) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// 左 60%：实时网速双 Sparkline。
-fn render_traffic(f: &mut Frame, area: Rect, st: &AppState) {
+/// 右列：网络（上 50%）+ 内存（下 50%）。
+fn render_right(f: &mut Frame, area: Rect, st: &AppState) {
+    let [net, mem] =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+    render_network(f, net, st);
+    render_memory(f, mem, st);
+}
+
+/// 网络框：上行/下行速率（左对齐）+ 累计流量（右对齐）同排，双 Sparkline。
+fn render_network(f: &mut Frame, area: Rect, st: &AppState) {
     let block = Block::new()
-        .title(Span::styled(" 实时网速 ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(" 网络 ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
@@ -282,6 +304,8 @@ fn render_traffic(f: &mut Frame, area: Rect, st: &AppState) {
     let last = st.traffic.back().copied();
     let up_rate = last.map(|frame| frame.up).unwrap_or(0);
     let down_rate = last.map(|frame| frame.down).unwrap_or(0);
+    let up_total = last.map(|frame| frame.up_total).unwrap_or(0);
+    let down_total = last.map(|frame| frame.down_total).unwrap_or(0);
     let up_data: Vec<u64> = st.traffic.iter().map(|frame| frame.up).collect();
     let down_data: Vec<u64> = st.traffic.iter().map(|frame| frame.down).collect();
 
@@ -295,10 +319,7 @@ fn render_traffic(f: &mut Frame, area: Rect, st: &AppState) {
     .areas(inner);
 
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("↑ 上行 ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::styled(crate::ui::widgets::format_rate(up_rate), Style::default().fg(Color::Green)),
-        ])),
+        Paragraph::new(rate_row("↑ 上行", up_rate, up_total, Color::Green, inner.width)),
         l1,
     );
     f.render_widget(
@@ -306,10 +327,7 @@ fn render_traffic(f: &mut Frame, area: Rect, st: &AppState) {
         s1,
     );
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("↓ 下行 ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-            Span::styled(crate::ui::widgets::format_rate(down_rate), Style::default().fg(Color::Blue)),
-        ])),
+        Paragraph::new(rate_row("↓ 下行", down_rate, down_total, Color::Blue, inner.width)),
         l2,
     );
     f.render_widget(
@@ -318,51 +336,103 @@ fn render_traffic(f: &mut Frame, area: Rect, st: &AppState) {
     );
 }
 
-/// 右 40%：总流量 + 内存。
-fn render_totals(f: &mut Frame, area: Rect, st: &AppState) {
-    let [tot, mem] =
-        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+/// 速率行：`↑ 上行 37.4 KB/s` 左对齐 + `累计 6.1 MB` 右对齐。
+fn rate_row(label: &str, rate: u64, total: u64, color: Color, inner_width: u16) -> Line<'static> {
+    let left = Span::styled(
+        format!("{label} {}", crate::ui::widgets::format_rate(rate)),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    );
+    let right = Span::styled(
+        format!("累计 {}", crate::ui::widgets::format_bytes(total)),
+        Style::default().fg(color),
+    );
+    let pad = inner_width.saturating_sub((left.width() + right.width()) as u16);
+    Line::from(vec![left, Span::raw(" ".repeat(pad as usize)), right])
+}
 
-    // 总流量
+/// 左列：最近连接列表（start 降序，已在 app 层排序）。
+fn render_connections(f: &mut Frame, area: Rect, st: &AppState) {
     let block = Block::new()
-        .title(Span::styled(" 总流量 ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(" 连接 ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
-    let inner = block.inner(tot);
-    f.render_widget(block, tot);
-    let last = st.traffic.back().copied();
-    let (up_total, down_total) = last
-        .map(|frame| (frame.up_total, frame.down_total))
-        .unwrap_or((0, 0));
-    let [t1, t2] = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner);
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("↑ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                crate::ui::widgets::format_bytes(up_total),
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        t1,
-    );
-    f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("↓ ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-            Span::styled(
-                crate::ui::widgets::format_bytes(down_total),
-                Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
-            ),
-        ])),
-        t2,
-    );
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
-    // 内存
+    if st.connections.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                "暂无活动连接",
+                Style::default().fg(Color::DarkGray),
+            )])),
+            inner,
+        );
+        return;
+    }
+    let rows: Vec<Line> = st
+        .connections
+        .iter()
+        .take(inner.height as usize)
+        .map(conn_line)
+        .collect();
+    f.render_widget(Paragraph::new(rows), inner);
+}
+
+/// 单行连接：`{host} {TCP|UDP} ↑{upload} ↓{download}`；过长由 Paragraph 自动裁剪。
+fn conn_line(c: &ConnInfo) -> Line<'static> {
+    let kind = if c.meta.network == "tcp" {
+        Span::styled("TCP", Style::default().fg(Color::Green))
+    } else if c.meta.network == "udp" {
+        Span::styled("UDP", Style::default().fg(Color::Blue))
+    } else {
+        Span::raw("?")
+    };
+    Line::from(vec![
+        Span::raw(conn_host(c)),
+        Span::raw(" "),
+        kind,
+        Span::raw(" ↑"),
+        Span::styled(
+            crate::ui::widgets::format_bytes(c.upload),
+            Style::default().fg(Color::Green),
+        ),
+        Span::raw(" ↓"),
+        Span::styled(
+            crate::ui::widgets::format_bytes(c.download),
+            Style::default().fg(Color::Blue),
+        ),
+    ])
+}
+
+/// 连接目标展示：host → sniffHost → remoteDestination → destinationIP:port → 未知目标。
+fn conn_host(c: &ConnInfo) -> String {
+    if !c.meta.host.is_empty() {
+        return c.meta.host.clone();
+    }
+    if !c.meta.sniff_host.is_empty() {
+        return c.meta.sniff_host.clone();
+    }
+    if !c.meta.remote_destination.is_empty() {
+        return c.meta.remote_destination.clone();
+    }
+    if !c.meta.destination_ip.is_empty() {
+        return if c.meta.destination_port.is_empty() {
+            c.meta.destination_ip.clone()
+        } else {
+            format!("{}:{}", c.meta.destination_ip, c.meta.destination_port)
+        };
+    }
+    "未知目标".to_string()
+}
+
+/// 内存框：inuse 数值 + Sparkline。
+fn render_memory(f: &mut Frame, area: Rect, st: &AppState) {
     let block = Block::new()
         .title(Span::styled(" 内存 ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
-    let inner = block.inner(mem);
-    f.render_widget(block, mem);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
     let inuse = st.mem_history.back().copied().unwrap_or(0);
     let mem_data: Vec<u64> = st.mem_history.iter().copied().collect();
     let [m1, m2] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
@@ -385,6 +455,94 @@ fn render_totals(f: &mut Frame, area: Rect, st: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::client::ConnMeta;
+
+    fn meta(host: &str, network: &str) -> ConnMeta {
+        ConnMeta {
+            host: host.into(),
+            network: network.into(),
+            ..ConnMeta::default()
+        }
+    }
+
+    /// 响应式阈值：60 列及以上显示连接框。
+    #[test]
+    fn connections_visible_threshold() {
+        assert!(!connections_visible(59));
+        assert!(connections_visible(60));
+        assert!(connections_visible(61));
+        assert!(connections_visible(200));
+    }
+
+    /// host 兜底链：host → sniffHost → remoteDestination → destinationIP:port。
+    #[test]
+    fn conn_host_fallback_chain() {
+        let mut c = ConnInfo {
+            meta: meta("example.com", "tcp"),
+            ..ConnInfo::default()
+        };
+        assert_eq!(conn_host(&c), "example.com");
+
+        c.meta = ConnMeta { host: String::new(), sniff_host: "sniffed.dev".into(), ..ConnMeta::default() };
+        assert_eq!(conn_host(&c), "sniffed.dev");
+
+        c.meta = ConnMeta {
+            host: String::new(),
+            remote_destination: "1.2.3.4:443".into(),
+            ..ConnMeta::default()
+        };
+        assert_eq!(conn_host(&c), "1.2.3.4:443");
+
+        c.meta = ConnMeta {
+            host: String::new(),
+            destination_ip: "5.6.7.8".into(),
+            destination_port: "8080".into(),
+            ..ConnMeta::default()
+        };
+        assert_eq!(conn_host(&c), "5.6.7.8:8080");
+
+        c.meta = ConnMeta::default();
+        assert_eq!(conn_host(&c), "未知目标");
+    }
+
+    /// 速率行极窄宽度：inner_width=0/5 时 pad 用 saturating_sub 截断为 0，
+    /// 不 panic；行宽应恰为左右内容宽度之和（超出部分由 Paragraph 裁剪）。
+    #[test]
+    fn rate_row_narrow_inner_width() {
+        for inner_width in [0u16, 5] {
+            let line = rate_row("↑ 上行", 1024, 1024 * 1024, Color::Green, inner_width);
+            let content_width =
+                Span::raw("↑ 上行 1.0 KB/s").width() + Span::raw("累计 1.0 MB").width();
+            assert_eq!(
+                line.width(),
+                content_width,
+                "inner_width={inner_width}: 极窄宽度下不应补 padding"
+            );
+            assert!(
+                line.to_string().contains("↑ 上行"),
+                "inner_width={inner_width}: 应含上行标签"
+            );
+            assert!(
+                line.to_string().contains("累计"),
+                "inner_width={inner_width}: 应含累计标签"
+            );
+        }
+    }
+
+    /// UDP 连接行含 UDP 标；TCP 行含 TCP 标。
+    #[test]
+    fn conn_line_kind_marker() {
+        let tcp = ConnInfo { meta: meta("a.com", "tcp"), upload: 1024, download: 2048, ..ConnInfo::default() };
+        let udp = ConnInfo { meta: meta("b.com", "udp"), ..ConnInfo::default() };
+        let line_tcp = conn_line(&tcp);
+        let line_udp = conn_line(&udp);
+        assert!(line_tcp.to_string().contains("TCP"));
+        assert!(!line_tcp.to_string().contains("UDP"));
+        assert!(line_udp.to_string().contains("UDP"));
+        assert!(line_tcp.to_string().contains("↑1.0 KB"));
+        assert!(line_tcp.to_string().contains("↓2.0 KB"));
+    }
+
     use crate::core::client::RuntimeConfig;
     use crate::core::models::Overrides;
     use crate::core::settings::{load_settings, settings_path, with_settings_dir};
@@ -402,6 +560,7 @@ mod tests {
             api_confirmed: false,
             traffic: VecDeque::new(),
             mem_history: VecDeque::new(),
+            connections: Vec::new(),
             exit_ip: None,
             notices: VecDeque::new(),
         }

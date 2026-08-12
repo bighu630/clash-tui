@@ -309,12 +309,11 @@ fn render_network(f: &mut Frame, area: Rect, st: &AppState) {
     let up_data: Vec<u64> = st.traffic.iter().map(|frame| frame.up).collect();
     let down_data: Vec<u64> = st.traffic.iter().map(|frame| frame.down).collect();
 
-    let [l1, s1, l2, s2, _rest] = Layout::vertical([
+    let [l1, s1, l2, s2] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(3),
+        Constraint::Min(1),
         Constraint::Length(1),
-        Constraint::Length(3),
-        Constraint::Min(0),
+        Constraint::Min(1),
     ])
     .areas(inner);
 

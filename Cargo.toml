@@ -18,6 +18,7 @@ serde_yaml = "0.9"
 toml = "0.9"
 base64 = "0.22"
 url = "2"
+percent-encoding = "2"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 futures-util = "0.3"

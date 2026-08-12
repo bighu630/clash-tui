@@ -8,6 +8,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::{Stream, StreamExt};
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 
 use crate::core::models::NetworkSettings;
@@ -33,6 +34,41 @@ pub struct TrafficFrame {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct MemoryFrame {
     pub inuse: u64,
+}
+
+/// 运行时策略组信息（GET /proxies 中的组条目）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GroupInfo {
+    pub name: String,
+    /// "Selector" | "URLTest" | "Fallback" | "LoadBalance" | "Relay" | "Compatible" | "Pass"
+    pub group_type: String,
+    /// 当前选中项（自动组为当前生效节点；无选择时 None）
+    pub now: Option<String>,
+    /// 全部可选成员
+    pub all: Vec<String>,
+}
+
+impl FromStr for GroupInfo {
+    type Err = ApiError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let v: serde_json::Value =
+            serde_json::from_str(s).map_err(|e| ApiError::Json(e.to_string()))?;
+        Ok(Self {
+            name: v.get("name").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+            group_type: v.get("type").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+            now: v.get("now").and_then(|x| x.as_str()).map(|s| s.to_string()),
+            all: v
+                .get("all")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|i| i.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -97,6 +133,16 @@ impl FromStr for MemoryFrame {
 }
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 整组延迟测试：单节点超时（ms）。超时节点 mihomo 返回 8000，UI 按 >= 此值显示超时。
+pub const GROUP_DELAY_TIMEOUT_MS: u16 = 5000;
+/// 整组延迟测试：测试 URL（与合并器默认测速地址一致）。
+pub const GROUP_DELAY_TEST_URL: &str = "http://www.gstatic.com/generate_204";
+
+/// 路径段百分号编码（组名可含中文/emoji/空格）。
+fn encode_path_segment(s: &str) -> String {
+    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
+}
 
 pub struct Client {
     base: String,
@@ -176,6 +222,89 @@ impl Client {
         let resp = self.stream_response("/memory").await?;
         let stream = LineStream::new(resp.bytes_stream().map(|c| c.map(|b| b.to_vec())));
         Ok(stream.map(|line| line.and_then(|l| l.parse())))
+    }
+
+    /// GET /proxies → 全部策略组信息（仅含带 all 字段的组条目，节点被过滤）。
+    pub async fn get_proxies(&self) -> Result<Vec<GroupInfo>, ApiError> {
+        let body = self.request_text(reqwest::Method::GET, "/proxies").await?;
+        let v: serde_json::Value =
+            serde_json::from_str(&body).map_err(|e| ApiError::Json(e.to_string()))?;
+        let mut out = Vec::new();
+        if let Some(proxies) = v.get("proxies").and_then(|x| x.as_object()) {
+            for (key, entry) in proxies {
+                if entry.get("all").and_then(|x| x.as_array()).is_none() {
+                    continue; // 节点无 all 字段，仅策略组保留
+                }
+                let mut gi: GroupInfo = entry
+                    .to_string()
+                    .parse()
+                    .map_err(|e: ApiError| ApiError::Json(format!("组「{key}」解析失败: {e}")))?;
+                if gi.name.is_empty() {
+                    gi.name = key.clone();
+                }
+                out.push(gi);
+            }
+        }
+        Ok(out)
+    }
+
+    /// PUT /proxies/{name}，body {"name": target}：切换 select 组当前节点。
+    pub async fn switch_group(&self, name: &str, target: &str) -> Result<(), ApiError> {
+        let mut req = self
+            .http
+            .put(self.url(&format!("/proxies/{}", encode_path_segment(name))))
+            .timeout(REQUEST_TIMEOUT)
+            .header(CONTENT_TYPE, "application/json");
+        if let Some(auth) = self.auth_header() {
+            req = req.header(AUTHORIZATION, auth);
+        }
+        let resp = req
+            .body(serde_json::json!({ "name": target }).to_string())
+            .send()
+            .await
+            .map_err(|e| ApiError::Conn(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(ApiError::Status(resp.status().as_u16()));
+        }
+        Ok(())
+    }
+
+    /// GET /group/{name}/delay → 整组延迟测试，返回 (节点名, 延迟ms) 列表。
+    /// 组内节点多时整体较慢，请求超时放宽到 30s。
+    pub async fn test_group_delay(&self, name: &str) -> Result<Vec<(String, u16)>, ApiError> {
+        let path = format!(
+            "/group/{}/delay?url={}&timeout={}",
+            encode_path_segment(name),
+            encode_path_segment(GROUP_DELAY_TEST_URL),
+            GROUP_DELAY_TIMEOUT_MS
+        );
+        let mut req = self
+            .http
+            .get(self.url(&path))
+            .timeout(Duration::from_secs(30));
+        if let Some(auth) = self.auth_header() {
+            req = req.header(AUTHORIZATION, auth);
+        }
+        let resp = req.send().await.map_err(|e| ApiError::Conn(e.to_string()))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .await
+            .map_err(|e| ApiError::Http(e.to_string()))?;
+        if !status.is_success() {
+            return Err(ApiError::Status(status.as_u16()));
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| ApiError::Json(e.to_string()))?;
+        let mut out = Vec::new();
+        if let Some(proxies) = v.get("proxies").and_then(|x| x.as_object()) {
+            for (n, d) in proxies {
+                if let Some(ms) = d.as_u64() {
+                    out.push((n.clone(), ms.min(u16::MAX as u64) as u16));
+                }
+            }
+        }
+        Ok(out)
     }
 
     async fn request_text(
@@ -382,7 +511,15 @@ mod tests {
                         .unwrap_or(buf.len());
                     let line = String::from_utf8_lossy(&buf[..head]).into_owned();
                     let first = line.lines().next().unwrap_or("").to_string();
-                    let path = first.split(' ').nth(1).unwrap_or("/");
+                    let encoded = first.split(' ').nth(1).unwrap_or("/").to_string();
+                    let path = encoded.split('?').next().unwrap_or("").to_string();
+                    if first.starts_with("PUT") && path.starts_with("/proxies/") {
+                        // PUT /proxies/{name} → 204（非 200，用于断言成功路径）
+                        let _ = sock
+                            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .await;
+                        return;
+                    }
                     if path == "/configs" && first.starts_with("PATCH") {
                         // PATCH /configs → 204
                         let _ = sock
@@ -390,9 +527,17 @@ mod tests {
                             .await;
                         return;
                     }
-                    let body = match path {
+                    let body = match path.as_str() {
                         "/version" => r#"{"version":"v1.19.29"}"#.to_string(),
                         "/configs" => r#"{"mode":"rule","ipv6":true,"tun":{"enable":false}}"#.to_string(),
+                        "/proxies" => r#"{"proxies":{
+                            "节点A":{"name":"节点A","type":"Shadowsocks","history":[]},
+                            "手动选择":{"name":"手动选择","type":"Selector","now":"节点B","all":["节点A","节点B","DIRECT"]},
+                            "自动选择":{"name":"自动选择","type":"URLTest","now":"节点A","all":["节点A","节点B"]}
+                        }}"#.to_string(),
+                        _ if path.starts_with("/group/") && path.ends_with("/delay") => {
+                            r#"{"proxies":{"节点A":123,"节点B":8000}}"#.to_string()
+                        }
                         "/traffic" => {
                             let payload = "{\"up\":1,\"down\":2,\"upTotal\":3,\"downTotal\":4}\n{\"up\":5,\"down\":6,\"upTotal\":7,\"downTotal\":8}\n";
                             let _ = sock
@@ -571,5 +716,101 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         drop(l);
         assert!(client_on(port).traffic_stream().await.is_err());
+    }
+
+    // ---------- 组信息 / 组操作 API ----------
+
+    #[test]
+    fn group_info_from_json() {
+        let gi = GroupInfo::from_str(
+            r#"{"name":"手动选择","type":"Selector","now":"节点B","all":["节点A","节点B","DIRECT"]}"#,
+        )
+        .unwrap();
+        assert_eq!(gi.name, "手动选择");
+        assert_eq!(gi.group_type, "Selector");
+        assert_eq!(gi.now.as_deref(), Some("节点B"));
+        assert_eq!(gi.all, vec!["节点A", "节点B", "DIRECT"]);
+    }
+
+    #[test]
+    fn group_info_no_now_is_none() {
+        let gi = GroupInfo::from_str(r#"{"name":"g","type":"URLTest","all":["a"]}"#).unwrap();
+        assert_eq!(gi.now, None);
+        assert_eq!(gi.all, vec!["a"]);
+    }
+
+    #[tokio::test]
+    async fn get_proxies_filters_nodes_keeps_groups() {
+        let (port, _rx) = spawn_api_server().await;
+        let groups = client_on(port).get_proxies().await.unwrap();
+        let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["手动选择", "自动选择"], "节点应被过滤: {names:?}");
+        assert_eq!(groups[0].group_type, "Selector");
+        assert_eq!(groups[0].now.as_deref(), Some("节点B"));
+        assert_eq!(groups[0].all.len(), 3);
+        assert_eq!(groups[1].group_type, "URLTest");
+    }
+
+    #[tokio::test]
+    async fn switch_group_sends_put_with_body_and_auth() {
+        let (port, mut rx) = spawn_api_server().await;
+        client_on(port)
+            .switch_group("手动选择", "节点A")
+            .await
+            .unwrap();
+        let req = rx.recv().await.expect("服务器应收到请求");
+        assert!(req.starts_with("PUT /proxies/"), "请求行: {req}");
+        assert!(
+            req.to_lowercase().contains("authorization: bearer testsecret"),
+            "应带 Bearer 鉴权: {req}"
+        );
+        assert!(req.contains(r#"{"name":"节点A"}"#), "body 应为选择目标: {req}");
+    }
+
+    #[tokio::test]
+    async fn switch_group_encodes_unicode_name() {
+        let (port, mut rx) = spawn_api_server().await;
+        client_on(port).switch_group("🚀 节点选择", "DIRECT").await.unwrap();
+        let req = rx.recv().await.expect("服务器应收到请求");
+        let first_line = req.lines().next().unwrap_or("");
+        assert!(
+            first_line.starts_with("PUT /proxies/%F0%9F%9A%80%20"),
+            "组名应百分号编码: {first_line}"
+        );
+        assert!(!first_line.contains('🚀'), "不应含裸 emoji: {first_line}");
+    }
+
+    #[tokio::test]
+    async fn test_group_delay_parses_proxies_map() {
+        let (port, _rx) = spawn_api_server().await;
+        let list = client_on(port).test_group_delay("自动选择").await.unwrap();
+        assert_eq!(list, vec![("节点A".to_string(), 123), ("节点B".to_string(), 8000)]);
+    }
+
+    #[tokio::test]
+    async fn switch_group_http_400_returns_status_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut tmp).await {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    Err(_) => break,
+                }
+            }
+            let _ = sock
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        });
+        let e = client_on(port)
+            .switch_group("不存在", "x")
+            .await
+            .unwrap_err();
+        assert!(matches!(e, ApiError::Status(400)), "期望 Status(400)，实际: {e}");
     }
 }

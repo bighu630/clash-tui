@@ -17,10 +17,13 @@ use ratatui::{CompletedFrame, Terminal};
 use tokio::sync::mpsc;
 
 use crate::core::apply::{apply_config, validate_config, ApplyOutcome};
-use crate::core::client::{Client, MemoryFrame, RuntimeConfig, TrafficFrame};
+use crate::core::client::{Client, GroupInfo, MemoryFrame, RuntimeConfig, TrafficFrame};
+use crate::core::client::GROUP_DELAY_TIMEOUT_MS;
 use crate::core::exit_ip::{self, ProxyPorts};
 use crate::core::models::{NetworkSettings, Overrides, Subscription, SubscriptionCache};
-use crate::core::settings::{load_overrides, load_settings, load_subscriptions, save_subscriptions};
+use crate::core::settings::{
+    load_overrides, load_settings, load_subscriptions, save_overrides, save_subscriptions,
+};
 use crate::ui::dashboard::DashboardPage;
 use crate::ui::groups::GroupsPage;
 use crate::ui::rules::RulesPage;
@@ -45,6 +48,8 @@ pub struct AppState {
     pub traffic: VecDeque<TrafficFrame>,
     pub mem_history: VecDeque<u64>,
     pub exit_ip: Option<String>,
+    /// 运行时策略组快照（GET /proxies；规则组页数据源）
+    pub proxy_groups: Vec<GroupInfo>,
     pub notices: VecDeque<String>,
 }
 
@@ -65,13 +70,20 @@ impl AppState {
                 Vec::new()
             }
         };
-        let overrides = match load_overrides() {
+        let mut overrides = match load_overrides() {
             Ok(o) => o,
             Err(e) => {
                 notices.push_back(format!("[✗] 加载规则覆盖失败: {e}"));
                 Overrides::default()
             }
         };
+        // 旧版自定义规则组数据迁移（方案 A：清空 + 一次提示）
+        if let Some(msg) = migrate_legacy_groups(&mut overrides) {
+            if let Err(e) = save_overrides(&overrides) {
+                notices.push_back(format!("[✗] 旧数据清理落盘失败: {e}"));
+            }
+            notices.push_back(msg);
+        }
         Self {
             settings,
             subs,
@@ -82,6 +94,7 @@ impl AppState {
             traffic: VecDeque::new(),
             mem_history: VecDeque::new(),
             exit_ip: None,
+            proxy_groups: Vec::new(),
             notices,
         }
     }
@@ -97,6 +110,7 @@ impl AppState {
 
 /// 页面 → 主循环的异步操作请求。
 /// PatchConfigs 携带双写结果：saved=settings.toml 是否已持久化，label=开关名。
+#[derive(Debug)]
 pub enum UiCommand {
     PatchConfigs {
         patch: serde_json::Value,
@@ -108,6 +122,12 @@ pub enum UiCommand {
     FetchExitIp,
     ReloadConfigs,
     InstallSetup,
+    /// 拉取运行时策略组（GET /proxies）
+    RefreshGroups,
+    /// 切换 select 组当前节点（PUT /proxies）
+    SwitchGroup { group: String, target: String },
+    /// 整组延迟测试（GET /group/{name}/delay）
+    TestGroupDelay(String),
 }
 
 /// 后台任务 → 主循环的事件。
@@ -122,6 +142,16 @@ pub enum UiEvent {
     SubscriptionFetched(usize, Result<SubscriptionCache, String>),
     ExitIp(Result<String, String>),
     ConfigsRefreshed(Result<RuntimeConfig, String>),
+    GroupsRefreshed(Result<Vec<GroupInfo>, String>),
+    GroupSwitched {
+        group: String,
+        target: String,
+        result: Result<(), String>,
+    },
+    GroupDelayDone {
+        group: String,
+        result: Result<Vec<(String, u16)>, String>,
+    },
 }
 
 /// traffic 后台任务发往主循环的消息。
@@ -171,10 +201,9 @@ const HELP_LINES: &[&str] = &[
     "  d                  删除订阅",
     "",
     "规则组:",
-    "  n                  新建组",
-    "  Enter              编辑组",
-    "  m                  编辑组成员",
-    "  d                  删除组",
+    "  Enter              切换节点（select 组）",
+    "  r                  整组延迟测试",
+    "  R                  刷新组列表",
     "",
     "规则:",
     "  n                  新建规则",
@@ -300,6 +329,14 @@ where
         Ok(frame)
     }
 
+    /// 切页；进入规则组页（index 2）时刷新运行时策略组。
+    fn switch_page(&mut self, idx: usize) {
+        self.current = idx;
+        if idx == 2 {
+            let _ = self.cmd_tx.send(UiCommand::RefreshGroups);
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> Option<KeyAction> {
         // Ctrl-C 永远退出（raw 模式下无 SIGINT）
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -342,20 +379,16 @@ where
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Some(KeyAction::Quit),
-            KeyCode::Tab => {
-                self.current = (self.current + 1) % self.pages.len();
-            }
+            KeyCode::Tab => self.switch_page((self.current + 1) % self.pages.len()),
             KeyCode::BackTab => {
-                self.current = (self.current + self.pages.len() - 1) % self.pages.len();
+                self.switch_page((self.current + self.pages.len() - 1) % self.pages.len());
             }
-            KeyCode::Right => {
-                self.current = (self.current + 1) % self.pages.len();
-            }
+            KeyCode::Right => self.switch_page((self.current + 1) % self.pages.len()),
             KeyCode::Left => {
-                self.current = (self.current + self.pages.len() - 1) % self.pages.len();
+                self.switch_page((self.current + self.pages.len() - 1) % self.pages.len());
             }
             KeyCode::Char(c) if ('1'..='4').contains(&c) => {
-                self.current = c.to_digit(10).unwrap_or(1) as usize - 1;
+                self.switch_page(c.to_digit(10).unwrap_or(1) as usize - 1);
             }
             KeyCode::Char('?') => {
                 self.help_popup = Some(MessagePopup::new(
@@ -576,6 +609,10 @@ where
                             "[!] 订阅拉取完成，但该订阅已被删除（缓存已丢弃）".to_string(),
                         ),
                     }
+                    // 订阅内容变化可能影响规则组：当前在规则组页则刷新
+                    if self.current == 2 {
+                        let _ = self.cmd_tx.send(UiCommand::RefreshGroups);
+                    }
                 }
                 Err(e) => self.popup_error("订阅拉取失败", e),
             },
@@ -637,6 +674,30 @@ where
                     self.state.api_confirmed = true;
                     self.set_api_ok(false, Some(&e));
                 }
+            },
+            UiEvent::GroupsRefreshed(res) => match res {
+                Ok(groups) => self.state.proxy_groups = groups,
+                // API 连接失败已有独立通知（set_api_ok），此处静默清空降级到订阅缓存展示
+                Err(_) => self.state.proxy_groups.clear(),
+            },
+            UiEvent::GroupSwitched { group, target, result } => match result {
+                Ok(()) => {
+                    self.state
+                        .notice(format!("[✓] 已切换「{group}」→「{target}」"));
+                    let _ = self.cmd_tx.send(UiCommand::RefreshGroups);
+                }
+                Err(e) => self.popup_error("切换失败", e),
+            },
+            UiEvent::GroupDelayDone { group, result } => match result {
+                Ok(list) => {
+                    self.result_popup = Some(MessagePopup::new(
+                        format!("延迟测试：{group}"),
+                        delay_lines(&list),
+                    ));
+                    self.state.notice(format!("[✓] 延迟测试完成：{group}"));
+                    let _ = self.cmd_tx.send(UiCommand::RefreshGroups);
+                }
+                Err(e) => self.popup_error("延迟测试失败", e),
             },
         }
     }
@@ -722,6 +783,33 @@ where
                 tokio::spawn(async move {
                     let res = client.get_configs().await.map_err(|e| e.to_string());
                     let _ = ui_tx.send(UiEvent::ConfigsRefreshed(res));
+                });
+            }
+            UiCommand::RefreshGroups => {
+                let ui_tx = ui_tx.clone();
+                tokio::spawn(async move {
+                    let res = client.get_proxies().await.map_err(|e| e.to_string());
+                    let _ = ui_tx.send(UiEvent::GroupsRefreshed(res));
+                });
+            }
+            UiCommand::SwitchGroup { group, target } => {
+                let ui_tx = ui_tx.clone();
+                tokio::spawn(async move {
+                    let res = client
+                        .switch_group(&group, &target)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = ui_tx.send(UiEvent::GroupSwitched { group, target, result: res });
+                });
+            }
+            UiCommand::TestGroupDelay(group) => {
+                let ui_tx = ui_tx.clone();
+                tokio::spawn(async move {
+                    let res = client
+                        .test_group_delay(&group)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = ui_tx.send(UiEvent::GroupDelayDone { group, result: res });
                 });
             }
             UiCommand::InstallSetup => {
@@ -842,10 +930,9 @@ fn page_hints(current: usize) -> Vec<(String, String)> {
             ("d".into(), "删除".into()),
         ],
         2 => vec![
-            ("n".into(), "新建".into()),
-            ("Enter".into(), "编辑".into()),
-            ("m".into(), "成员".into()),
-            ("d".into(), "删除".into()),
+            ("Enter".into(), "切换".into()),
+            ("r".into(), "测速".into()),
+            ("R".into(), "刷新".into()),
         ],
         _ => vec![
             ("n".into(), "新建".into()),
@@ -858,6 +945,32 @@ fn page_hints(current: usize) -> Vec<(String, String)> {
     hints.push(("?".into(), "帮助".into()));
     hints.push(("q".into(), "退出".into()));
     hints
+}
+
+/// 延迟测试结果行：按延迟升序，超时（>= GROUP_DELAY_TIMEOUT_MS）排最后。
+fn delay_lines(list: &[(String, u16)]) -> Vec<String> {
+    let mut items: Vec<(&String, u16)> = list.iter().map(|(n, ms)| (n, *ms)).collect();
+    items.sort_by_key(|(_, ms)| *ms);
+    items
+        .iter()
+        .map(|(n, ms)| {
+            if *ms >= GROUP_DELAY_TIMEOUT_MS {
+                format!("{n}  超时")
+            } else {
+                format!("{n}  {ms}ms")
+            }
+        })
+        .collect()
+}
+
+/// 迁移旧版自定义规则组：非空则清空并返回提示（无旧数据返回 None）。纯函数便于测试。
+fn migrate_legacy_groups(overrides: &mut Overrides) -> Option<String> {
+    if overrides.groups.is_empty() {
+        return None;
+    }
+    let n = overrides.groups.len();
+    overrides.groups.clear();
+    Some(format!("[!] 已清空 {n} 个旧版自定义规则组（规则组页现只读展示订阅内容）"))
 }
 
 fn now_rfc3339() -> String {
@@ -1017,6 +1130,7 @@ pub async fn run() -> Result<(), BoxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::models::UserGroup;
     use ratatui::backend::TestBackend;
 
     /// 底栏行计算纯函数：任意终端高度下提示行与通知行数都不越界。
@@ -1053,7 +1167,7 @@ mod tests {
     #[test]
     fn draw_tiny_terminal_no_panic() {
         for h in [0u16, 1, 2, 3, 4, 5, 6, 7, 24] {
-            let mut app = test_app(h);
+            let (mut app, _rx) = test_app(h);
             app.state.notice("[✓] 通知一".to_string());
             app.state.notice("[✗] 通知二".to_string());
             app.state.notice("[!] 通知三".to_string());
@@ -1102,7 +1216,9 @@ mod tests {
     }
 
     /// 构造最小 App（TestBackend 终端），不触盘、不建后台任务。
-    fn test_app(h: u16) -> App<TestBackend> {
+    /// 返回 (App, probe_rx)：App 的 cmd_tx 被替换为 probe 通道发送端，
+    /// 测试从 probe_rx 观察 App 发出的 UiCommand（App 自身 cmd_rx 无人消费无妨）。
+    fn test_app(h: u16) -> (App<TestBackend>, mpsc::UnboundedReceiver<UiCommand>) {
         let state = AppState {
             settings: NetworkSettings::default(),
             subs: Vec::new(),
@@ -1113,6 +1229,7 @@ mod tests {
             traffic: VecDeque::new(),
             mem_history: VecDeque::new(),
             exit_ip: None,
+            proxy_groups: Vec::new(),
             notices: VecDeque::new(),
         };
         let (ui_tx, _) = mpsc::unbounded_channel();
@@ -1121,7 +1238,7 @@ mod tests {
         let (exit_trigger, _) = mpsc::unbounded_channel();
         let client = Arc::new(Client::new(&state.settings));
         let exit_ports = Arc::new(Mutex::new(ProxyPorts::from_settings(&state.settings)));
-        App {
+        let mut app = App {
             state,
             pages: vec![
                 Box::new(DashboardPage::new()),
@@ -1145,13 +1262,16 @@ mod tests {
             tick_count: 0,
             quit: false,
             terminal: Terminal::new(TestBackend::new(30, h)).unwrap(),
-        }
+        };
+        let (probe_tx, probe_rx) = mpsc::unbounded_channel();
+        app.cmd_tx = probe_tx;
+        (app, probe_rx)
     }
 
     /// PatchDone 成功且已保存：正常成功通知。
     #[test]
     fn patch_done_ok_saved_notices_success() {
-        let mut app = test_app(24);
+        let (mut app, _rx) = test_app(24);
         app.on_ui_event(UiEvent::PatchDone {
             res: Ok(()),
             saved: true,
@@ -1171,7 +1291,7 @@ mod tests {
     /// 禁止静默部分成功。
     #[test]
     fn patch_done_ok_not_saved_notices_warning() {
-        let mut app = test_app(24);
+        let (mut app, _rx) = test_app(24);
         app.on_ui_event(UiEvent::PatchDone {
             res: Ok(()),
             saved: false,
@@ -1191,7 +1311,7 @@ mod tests {
     /// 并立即 ReloadConfigs 拉取真实运行态纠正乐观更新（不等 5s 轮询）。
     #[test]
     fn patch_done_err_saved_shows_popup_and_reloads() {
-        let mut app = test_app(24);
+        let (mut app, mut rx) = test_app(24);
         app.on_ui_event(UiEvent::PatchDone {
             res: Err("x".into()),
             saved: true,
@@ -1206,7 +1326,7 @@ mod tests {
         assert!(!text.contains("重启后生效"), "文案不应再误导为裸重启即生效: {text}");
         // 失败后立即拉真实运行态
         assert!(
-            matches!(app.cmd_rx.try_recv(), Ok(UiCommand::ReloadConfigs)),
+            matches!(rx.try_recv(), Ok(UiCommand::ReloadConfigs)),
             "失败后应立即发送 ReloadConfigs"
         );
     }
@@ -1214,7 +1334,7 @@ mod tests {
     /// PatchDone 失败且未保存：错误弹窗提示「且设置未能保存」，同样立即 ReloadConfigs。
     #[test]
     fn patch_done_err_not_saved_shows_popup_and_reloads() {
-        let mut app = test_app(24);
+        let (mut app, mut rx) = test_app(24);
         app.on_ui_event(UiEvent::PatchDone {
             res: Err("x".into()),
             saved: false,
@@ -1224,7 +1344,7 @@ mod tests {
         let text = buffer_text(&mut app);
         assert!(text.contains("且设置未能保存"), "弹窗应含未保存提示: {text}");
         assert!(
-            matches!(app.cmd_rx.try_recv(), Ok(UiCommand::ReloadConfigs)),
+            matches!(rx.try_recv(), Ok(UiCommand::ReloadConfigs)),
             "失败后应立即发送 ReloadConfigs"
         );
     }
@@ -1251,7 +1371,7 @@ mod tests {
     /// 不重复通知。
     #[test]
     fn exit_ip_recovery_closes_stale_popup_and_notices() {
-        let mut app = test_app(24);
+        let (mut app, _rx) = test_app(24);
         // 失败：弹出「出口 IP 获取失败」弹窗
         app.on_ui_event(UiEvent::ExitIp(Err("出口 IP 获取失败: 连接被拒".into())));
         assert!(app.result_popup.is_some(), "失败应弹出错误弹窗");
@@ -1282,7 +1402,7 @@ mod tests {
     /// 恢复成功只关闭「出口 IP 获取失败」弹窗：其他弹窗（如应用结果）不受影响。
     #[test]
     fn exit_ip_recovery_keeps_unrelated_popup() {
-        let mut app = test_app(24);
+        let (mut app, _rx) = test_app(24);
         app.on_ui_event(UiEvent::ExitIp(Err("出口 IP 获取失败: 连接被拒".into())));
         assert!(app.exit_ip_was_error, "失败应置位 exit_ip_was_error");
         // 用户随后打开了另一个弹窗
@@ -1302,6 +1422,101 @@ mod tests {
             app.state.notices.iter().any(|n| n.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
             "应通知恢复: {:?}",
             app.state.notices
+        );
+    }
+
+    /// 迁移纯函数：无旧数据不提示；有旧数据清空并返回含数量的提示。
+    #[test]
+    fn migrate_legacy_groups_clears_and_reports() {
+        let mut o = Overrides::default();
+        assert_eq!(migrate_legacy_groups(&mut o), None, "无旧数据不提示");
+        o.groups.push(UserGroup {
+            name: "旧组".into(),
+            group_type: "select".into(),
+            url: String::new(),
+            interval: 0,
+            tolerance: 0,
+            proxies: vec!["节点1".into()],
+        });
+        let msg = migrate_legacy_groups(&mut o).expect("有旧数据应提示");
+        assert!(o.groups.is_empty(), "应清空");
+        assert!(msg.contains("1 个旧版自定义规则组"), "提示应含数量: {msg}");
+    }
+
+    /// GroupsRefreshed Ok 更新状态；Err 清空降级（订阅缓存展示）。
+    #[test]
+    fn groups_refreshed_updates_state() {
+        let (mut app, _rx) = test_app(24);
+        let groups = vec![GroupInfo {
+            name: "手动选择".into(),
+            group_type: "Selector".into(),
+            now: Some("节点A".into()),
+            all: vec!["节点A".into(), "DIRECT".into()],
+        }];
+        app.on_ui_event(UiEvent::GroupsRefreshed(Ok(groups.clone())));
+        assert_eq!(app.state.proxy_groups, groups);
+        app.on_ui_event(UiEvent::GroupsRefreshed(Err("连接失败".into())));
+        assert!(app.state.proxy_groups.is_empty(), "失败应清空降级");
+    }
+
+    /// 切换成功：成功通知 + 发送 RefreshGroups 命令。
+    #[test]
+    fn group_switched_success_notices_and_refreshes() {
+        let (mut app, mut rx) = test_app(24);
+        app.on_ui_event(UiEvent::GroupSwitched {
+            group: "手动选择".into(),
+            target: "节点A".into(),
+            result: Ok(()),
+        });
+        assert!(
+            app.state.notices.iter().any(|n| n.contains("已切换「手动选择」→「节点A」")),
+            "应通知切换成功: {:?}",
+            app.state.notices
+        );
+        let cmd = rx.try_recv().expect("应发送刷新命令");
+        assert!(matches!(cmd, UiCommand::RefreshGroups), "命令: {cmd:?}");
+    }
+
+    /// 切换失败：错误弹窗，不发刷新命令。
+    #[test]
+    fn group_switched_failure_popup() {
+        let (mut app, _rx) = test_app(24);
+        app.on_ui_event(UiEvent::GroupSwitched {
+            group: "g".into(),
+            target: "x".into(),
+            result: Err("HTTP 状态 400".into()),
+        });
+        assert_eq!(app.result_popup.as_ref().unwrap().title(), "切换失败");
+    }
+
+    /// 延迟测试完成：结果弹窗 + 刷新命令。
+    #[test]
+    fn group_delay_done_popup_and_refresh() {
+        let (mut app, mut rx) = test_app(24);
+        app.on_ui_event(UiEvent::GroupDelayDone {
+            group: "自动选择".into(),
+            result: Ok(vec![
+                ("节点B".to_string(), 8000),
+                ("节点A".to_string(), 123),
+            ]),
+        });
+        let popup = app.result_popup.as_ref().expect("应有结果弹窗");
+        assert_eq!(popup.title(), "延迟测试：自动选择");
+        let _ = rx.try_recv().expect("应发送刷新命令");
+    }
+
+    /// 延迟结果行：按延迟升序，超时（>= GROUP_DELAY_TIMEOUT_MS）标记并排最后。
+    #[test]
+    fn delay_lines_sort_and_timeout() {
+        let lines = delay_lines(&[
+            ("B".to_string(), 8000),
+            ("A".to_string(), 123),
+            ("C".to_string(), 5000),
+        ]);
+        assert_eq!(
+            lines,
+            vec!["A  123ms".to_string(), "C  超时".to_string(), "B  超时".to_string()],
+            "升序 + 超时标记: {lines:?}"
         );
     }
 }

@@ -67,7 +67,10 @@ pub struct ExitInfo {
 /// 端点表（顺序即优先级）：前三个为"带国家"端点（一次请求拿 IP+国家），
 /// 其后为纯 IP 端点（国家=None，UI 显示「未知」）。
 const ENDPOINTS: &[(&str, ParseMode)] = &[
-    // ip-api.com 免费版仅支持 HTTP；fields 精简响应；45 req/min 对 60s 轮询足够
+    // ip-api.com 免费版仅支持 HTTP；fields 精简响应；45 req/min 对 60s 轮询足够。
+    // 注意：免费版可能拒绝数据中心出口（403，经代理出口多为 VPS IP）——
+    // 实测本机代理出口正常（200）；若遇 403 自动降级下一端点（cloudflare/ipwho.is），
+    // 不影响功能，仅国家信息改由兜底端点提供。
     ("http://ip-api.com/json/?fields=status,query,country,countryCode", ParseMode::IpApi),
     // cloudflare trace 零成本（HTTPS）：ip= 与 loc= 同行返回
     ("https://www.cloudflare.com/cdn-cgi/trace", ParseMode::Trace),

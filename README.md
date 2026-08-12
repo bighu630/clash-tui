@@ -7,8 +7,11 @@ Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订�
 
 ## 功能总览
 
-四个页面，顶部 Tabs 切换（`Tab`/`←`/`→`/`1`-`4`），底部为按键提示栏与最近通知
-（`[✓]` 绿色成功 / `[✗]` 红色失败 / `[!]` 黄色警告，**显示**最近 3 条、内部保留 5 条）。
+五个页面，顶部 Tabs 切换（`Tab`/`←`/`→`/`1`-`5`），底部为按键提示栏与最近通知
+（`[✓]` 绿色成功 / `[✗]` 红色失败 / `[!]` 黄色警告，**显示**最近 3 条、内部保留 5 条，
+5-10 秒自动隐藏，无通知时底栏收缩为仅按键提示）。
+
+- **日志页**：实时日志流展示，级别过滤（error/warning/info/debug）、滚动回溯、一键清空
 
 **仪表盘（首页）**——模式/TUN/IPv6/出口 IP 热切换、连接列表、网络速率/累计流量、内存：
 
@@ -167,6 +170,15 @@ cargo build --release
 2. `K`/`J` 上移/下移调整优先级；合并输出时自定义规则恒排在订阅规则之前
 3. 目标下拉 = 内置目标 ∪ 自定义组 ∪ 激活订阅组；MATCH 类型无 payload 字段
 
+### 日志页
+
+实时展示 mihomo 运行日志（`GET /logs` 流式接口，断线自动重连）：
+
+- **级别过滤**：按 `e` 在 error → warning → info → debug 间循环切换（服务端按阈值下发）
+- **滚动**：默认自动跟随底部；`↑/↓` 逐行、`PgUp/PgDn` 翻页回溯时暂停跟随；`f` 或 `End` 恢复跟随
+- **清空**：`c` 清空当前缓冲；缓冲上限 1000 条，超出自动淘汰最旧
+- 日志在切换页面/退出后不保留（重启清空）
+
 ## 前提
 
 - **Arch Linux**（或任何能装 mihomo 的 Linux 发行版；Arch 上 `sudo pacman -S mihomo`）
@@ -264,7 +276,7 @@ WantedBy=multi-user.target
 
 | 按键 | 功能 |
 |---|---|
-| `Tab` / `←` `→` / `1`-`4` | 切换页面（仪表盘/订阅/规则组/规则） |
+| `Tab` / `←` `→` / `1`-`5` | 切换页面（仪表盘/订阅/规则组/规则/日志） |
 | `?` | 帮助弹窗（列出全部按键，`↑↓` 滚动） |
 | `q` / `Esc`（无弹窗时）/ `Ctrl-C` | 退出 |
 
@@ -285,6 +297,8 @@ WantedBy=multi-user.target
 
 **规则页**：`n` 新建 · `Enter` 编辑 · `d` 删除 · `K` 上移 · `J` 下移
 
+**日志页**：`e` / `c` / `f` / `End` / `↑↓` / `PgUp` / `PgDn` —— 切换级别 / 清空 / 恢复跟随 / 滚动回溯
+
 弹窗通用：
 
 - 表单：`Tab`/`↑↓` 切换字段 · `←`/`→` 编辑（下拉选项循环切换）· `Enter` 确认 · `Esc` 取消
@@ -297,7 +311,7 @@ WantedBy=multi-user.target
 src/
   main.rs       终端初始化/恢复、panic hook（崩溃也保证恢复终端）
   app.rs        AppState + 事件循环（tokio::select!：键盘 / 1s tick / traffic / memory / 命令通道）
-  ui/           四个页面 + 通用弹窗组件（FormPopup/CheckboxList/ConfirmPopup/MessagePopup/SelectList）
+  ui/           五个页面 + 通用弹窗组件（FormPopup/CheckboxList/ConfirmPopup/MessagePopup/SelectList）
   core/         纯逻辑层（无 TUI 依赖，可单测）
     models.rs     数据模型（NetworkSettings/Tun/Dns/Subscription/Overrides…）
     settings.rs   配置文件读写（~/.config/mihomo-tui/，原子替换，目录 0700 / 文件 0600）

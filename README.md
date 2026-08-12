@@ -7,7 +7,7 @@ Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订�
 
 ## 功能总览
 
-五个页面，顶部 Tabs 切换（`Tab`/`←`/`→`/`1`-`5`），底部为按键提示栏与最近通知
+六个页面，顶部 Tabs 切换（`Tab`/`←`/`→`/`1`-`6`），底部为按键提示栏与最近通知
 （`[✓]` 绿色成功 / `[✗]` 红色失败 / `[!]` 黄色警告，**显示**最近 3 条、内部保留 5 条，
 5-10 秒自动隐藏，无通知时底栏收缩为仅按键提示）。
 
@@ -17,7 +17,7 @@ Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订�
 
 ```
 ┌ mihomo-tui ──────────────────────────────────────────────────────────────────────────────────────┐
-│ 仪表盘  │  订阅  │  规则组  │  规则                                                              │
+│ 仪表盘  │  订阅  │  规则组  │  规则  │  设置                                                     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 模式: rule [m]  TUN: 关 [t]  IPv6: 关 [6]  出口IP: 9.9.9.9「美国」 [r]  API: 已连接
 ┌ 连接 ────────────────────────────────────────────────────┐┌ 网络 ────────────────────────────────┐
@@ -55,7 +55,7 @@ Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订�
 - 左 60%：连接列表（GET /connections 每 3 秒轮询，按建立时间倒序；目标 host + TCP/UDP 色标 + ↑↓ 流量；窗口宽度 < 60 列时自动隐藏，网络/内存占满全宽）
 - 右 40%：网络（上行/下行速率左对齐 + 累计流量右对齐，双 Sparkline；累计来自 /traffic 流 upTotal/downTotal）+ 内存占用（inuse + Sparkline）
 - `m`/`t`/`6`：模式 / TUN / IPv6 运行时热切换（PATCH，不重启）；`r` 手动刷新出口 IP（含国家/地区）；
-  `i` 安装提权组件（首次启动拒绝后的重试入口）；`s` 网络设置表单（结构性变更流程）
+  `i` 安装提权组件（首次启动拒绝后的重试入口）；`s` 跳转设置页
 
 **订阅管理**
 
@@ -96,6 +96,38 @@ Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订�
   payload + 目标下拉）；MATCH 规则无 payload 字段
 - `Enter` 编辑；`d` 删除；`K`/`J` 上移/下移（顺序即优先级，自定义规则恒在订阅规则之前）
 
+**设置页**——集中编辑 config.yaml 可配置的网络参数（保存与运行时热切分离）：
+
+```
+┌ 设置 ──────────────────────────────────────────────────────────────────────┐
+│ ── 网络 ──                                                                 │
+│ mode: ◀ rule ▶       ipv6: ◀ 否 ▶       allow-lan: ◀ 否 ▶                  │
+│ ── 端口 ──                                                                 │
+│ port: 7890           socks-port: 7891        mixed-port: 7892              │
+│ ── 日志 ──                                                                 │
+│ log-level: ◀ info ▶                                                        │
+│ ── TUN ──                                                                  │
+│ tun.enable: ◀ 否 ▶   tun.stack: ◀ mixed ▶   tun.auto-route: ◀ 是 ▶         │
+│ tun.mtu: 9000        tun.dns-hijack: any:53                                │
+│ ── DNS ──                                                                  │
+│ dns.enable: ◀ 是 ▶   dns.listen: 0.0.0.0:1053                              │
+│ ...（其余区块与字段：DNS 8 项 / 其他 2 项，共 22 个字段）                  │
+└────────────────────────────────────────────────────────────────────────────┘
+[未保存] ↑↓/Tab 移动 · ←→ 下拉 · Enter 编辑(secret 重新生成) · Ctrl+S 保存 · Ctrl+A 保存并应用
+```
+
+- 区块：网络（mode/ipv6/allow-lan）、端口（port/socks-port/mixed-port）、日志（log-level）、
+  TUN（enable/stack/auto-route/mtu/dns-hijack）、DNS（enable/listen/enhanced-mode/
+  fake-ip-range/nameserver/default-nameserver/fallback/fake-ip-filter）、其他
+  （external-controller/secret）——共 22 个字段，即 settings.toml 全部可配置项
+- `↑↓`/`Tab` 移动字段，`←→` 循环下拉，`Enter` 编辑文本/数字字段（`Esc` 退出；
+  secret 只读字段上按 `Enter` 重新生成 32 位密钥）
+- `Ctrl+S` 仅保存 settings.toml（不重启不断网）；`Ctrl+A` 保存并应用——合并生成
+  config.yaml → `mihomo -t` 校验 → 提权重启。校验失败弹窗提示并保留已填内容
+- 与仪表盘热切的关系：仪表盘 `m`/`t`/`6` 是运行时立即生效（同时写回 settings.toml）；
+  设置页是持久配置编辑——两者读写同一份 settings.toml，进入设置页自动同步最新值；
+  设置页的改动需 `Ctrl+S`/`Ctrl+A` 才落盘
+
 ## 快速上手（从零开始）
 
 ```bash
@@ -119,7 +151,7 @@ cargo build --release
 #    按 Enter 激活：自动完成「合并 → mihomo -t 预校验 → 提权应用 → 重启」
 
 # 5. 日常使用：
-#    仪表盘  m/t/6 热切换模式/TUN/IPv6，r 刷新出口 IP，s 网络设置
+#    仪表盘  m/t/6 热切换模式/TUN/IPv6，r 刷新出口 IP，s 跳转设置页
 #    规则组/规则页  分流策略：规则组只读展示与切换、规则页自定义规则（见「使用指南」）
 #    也可手动生成配置：cargo run --example merge_sample > /tmp/config.yaml
 ```
@@ -132,12 +164,9 @@ cargo build --release
   `PATCH /configs` 热切换，立即生效、不重启（TUN 需进程持有 `CAP_NET_ADMIN`，见「前提」）
 - `r`：手动刷新出口 IP（每 60s 自动刷新；应用配置成功后自动立即重测一次）；出口 IP 经代理探测，
   同时返回国家/地区（ip-api.com / cloudflare / ipwho.is 优先，纯 IP 端点兜底）
-- `s`：网络设置表单（port / socks-port / mixed-port / allow-lan / log-level /
-  tun.stack · auto-route · mtu · dns-hijack / dns.enable · nameserver）→ 保存
-  `settings.toml` → 合并 → 校验 → 应用（结构性变更流程，见「混合生效策略」）。
-  注意：DNS 仅 `enable` 与 `nameserver` 两项可在表单中修改；其余 DNS 字段
-  （`listen` / `enhanced-mode` / `fake-ip-range` / `default-nameserver` / `fallback` /
-  `fake-ip-filter`）需手改 `settings.toml` 后重启本程序与 mihomo
+- `s`：跳转设置页（tab 6）——集中编辑全部 22 个网络字段（port / socks-port /
+  mixed-port / allow-lan / log-level / tun.stack · auto-route · mtu · dns-hijack /
+  dns.enable · listen · nameserver 等），见「功能总览 · 设置页」
 - 出口 IP 获取失败时弹出诊断弹窗（见 FAQ），恢复成功自动关闭陈旧弹窗并通知（恢复通知含国家名）
 
 ### 订阅管理
@@ -275,7 +304,7 @@ WantedBy=multi-user.target
 
 | 按键 | 功能 |
 |---|---|
-| `Tab` / `←` `→` / `1`-`5` | 切换页面（仪表盘/订阅/规则组/规则/日志） |
+| `Tab` / `←` `→` / `1`-`6` | 切换页面（仪表盘/订阅/规则组/规则/日志/设置） |
 | `?` | 帮助弹窗（列出全部按键，`↑↓` 滚动） |
 | `q` / `Esc`（无弹窗时）/ `Ctrl-C` | 退出 |
 
@@ -287,7 +316,7 @@ WantedBy=multi-user.target
 | `t` | 开关 TUN（PATCH 热切，需进程持有 CAP_NET_ADMIN） |
 | `6` | 开关 IPv6（PATCH 热切） |
 | `r` | 手动刷新出口 IP（含国家） |
-| `s` | 网络设置表单（结构性变更：保存 → 合并 → 校验 → 应用重启） |
+| `s` | 跳转设置页（tab 6） |
 | `i` | 安装提权组件（首次启动拒绝后的重试入口） |
 
 **订阅页**：`a` 添加 · `Enter` 激活 · `r` 刷新 · `d` 删除
@@ -297,6 +326,8 @@ WantedBy=multi-user.target
 **规则页**：`n` 新建 · `Enter` 编辑 · `d` 删除 · `K` 上移 · `J` 下移
 
 **日志页**：`e` / `c` / `f` / `End` / `↑↓` / `PgUp` / `PgDn` —— 切换级别 / 清空 / 恢复跟随 / 滚动回溯
+
+**设置页**：`↑↓` / `Tab` 移动字段 · `←→` 下拉选项 · `Enter` 编辑（secret 只读字段上为重新生成密钥）· `Esc` 退出编辑 · `Ctrl+S` 仅保存 · `Ctrl+A` 保存并应用
 
 弹窗通用：
 
@@ -310,7 +341,7 @@ WantedBy=multi-user.target
 src/
   main.rs       终端初始化/恢复、panic hook（崩溃也保证恢复终端）
   app.rs        AppState + 事件循环（tokio::select!：键盘 / 1s tick / traffic / memory / 命令通道）
-  ui/           五个页面 + 通用弹窗组件（FormPopup/CheckboxList/ConfirmPopup/MessagePopup/SelectList）
+  ui/           六个页面（settings.rs 设置页整页表单）+ 通用弹窗组件（FormPopup/CheckboxList/ConfirmPopup/MessagePopup/SelectList）
   core/         纯逻辑层（无 TUI 依赖，可单测）
     models.rs     数据模型（NetworkSettings/Tun/Dns/Subscription/Overrides…）
     settings.rs   配置文件读写（~/.config/mihomo-tui/，原子替换，目录 0700 / 文件 0600）
@@ -362,8 +393,9 @@ examples/
 | 变更类型 | 生效方式 |
 |---|---|
 | mode / tun.enable / ipv6（仪表盘 `m`/`t`/`6`） | **PATCH 热切**：`PATCH /configs` 即时生效，不重载、不重启 |
-| 订阅切换 / 规则 / `s` 表单保存的网络设置（端口、allow-lan、log-level、TUN/DNS 等） | **结构性重启**：合并 → `mihomo -t` 预校验 → 提权脚本原子替换 → `systemctl restart` → 失败自动回滚 |
-| external-controller / secret 修改 | 进程重启（需改 `settings.toml` 后重启 mihomo 与本程序） |
+| 订阅切换 / 规则 / 设置页 `Ctrl+A` 保存并应用的网络设置（端口、allow-lan、log-level、TUN/DNS 等） | **结构性重启**：合并 → `mihomo -t` 预校验 → 提权脚本原子替换 → `systemctl restart` → 失败自动回滚 |
+| 设置页 `Ctrl+S` 仅保存（settings.toml） | **暂不生效**：落盘待下次 `Ctrl+A` 保存并应用或重启后生效 |
+| external-controller / secret 修改 | 进程重启（设置页编辑/重新生成 secret 并 `Ctrl+S` 落盘后，重启 mihomo 与本程序） |
 
 ## 配置文件
 

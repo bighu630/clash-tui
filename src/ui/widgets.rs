@@ -24,6 +24,8 @@ pub enum FieldKind {
     Dropdown(Vec<String>),
     /// 数字（仅允许 0-9 输入）
     Number,
+    /// 只读展示（如 secret）：不响应任何编辑按键
+    ReadOnly,
 }
 
 /// 表单字段。
@@ -57,6 +59,7 @@ impl FormPopup {
     /// 处理按键。返回 `Some(Confirm/Cancel)` 表示弹窗关闭。
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<FormAction> {
         let is_dropdown = matches!(self.fields[self.focused].kind, FieldKind::Dropdown(_));
+        let is_readonly = matches!(self.fields[self.focused].kind, FieldKind::ReadOnly);
         match key.code {
             KeyCode::Esc => return Some(FormAction::Cancel),
             KeyCode::Enter => return Some(FormAction::Confirm),
@@ -69,34 +72,34 @@ impl FormPopup {
             KeyCode::Left => {
                 if is_dropdown {
                     self.cycle_dropdown(-1);
-                } else {
+                } else if !is_readonly {
                     self.move_cursor(-1);
                 }
             }
             KeyCode::Right => {
                 if is_dropdown {
                     self.cycle_dropdown(1);
-                } else {
+                } else if !is_readonly {
                     self.move_cursor(1);
                 }
             }
             KeyCode::Home => {
-                if !is_dropdown {
+                if !is_dropdown && !is_readonly {
                     self.cursor[self.focused] = 0;
                 }
             }
             KeyCode::End => {
-                if !is_dropdown {
+                if !is_dropdown && !is_readonly {
                     self.cursor[self.focused] = self.fields[self.focused].value.len();
                 }
             }
             KeyCode::Backspace => {
-                if !is_dropdown {
+                if !is_dropdown && !is_readonly {
                     self.backspace();
                 }
             }
             KeyCode::Delete => {
-                if !is_dropdown {
+                if !is_dropdown && !is_readonly {
                     self.delete_at_cursor();
                 }
             }
@@ -108,6 +111,7 @@ impl FormPopup {
                     }
                 }
                 FieldKind::Text => self.insert_char(c),
+                FieldKind::ReadOnly => {}
             },
             _ => {}
         }
@@ -967,6 +971,30 @@ mod tests {
         list.handle_key(key(KeyCode::Char('j')));
         list.handle_key(key(KeyCode::Char('j'))); // 越界不动
         assert_eq!(list.selected(), 2);
+    }
+
+    /// ReadOnly 字段：FormPopup 中按键不修改值、不移动光标。
+    #[test]
+    fn readonly_field_ignores_keys() {
+        let mut form = FormPopup::new(
+            "测试".into(),
+            vec![FormField {
+                label: "secret".into(),
+                value: "abc".into(),
+                kind: FieldKind::ReadOnly,
+            }],
+        );
+        // 各种编辑键均不应改变值
+        for k in [
+            KeyCode::Char('x'),
+            KeyCode::Backspace,
+            KeyCode::Delete,
+            KeyCode::Left,
+            KeyCode::Right,
+        ] {
+            form.handle_key(key(k));
+            assert_eq!(form.values(), vec!["abc".to_string()]);
+        }
     }
 
     #[test]

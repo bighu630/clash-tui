@@ -480,7 +480,7 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
 mod tests {
     use super::*;
     use crate::core::models::{
-        Overrides, ProxyNode, Subscription, SubscriptionCache, UserGroup, UserRule,
+        Overrides, ProxyNode, Subscription, SubscriptionCache, TunSettings, UserGroup, UserRule,
     };
     use serde_yaml::{Mapping, Value};
 
@@ -1532,5 +1532,32 @@ mod tests {
             "应警告格式异常: {:?}",
             out.warnings
         );
+    }
+
+    // ---- 补充：settings 非默认值（mode/ipv6/tun.enable）写入 config.yaml ----
+    // 仪表盘热切开关双写 settings.toml 后，merge 必须把持久化值带进 config.yaml，
+    // 结构性变更（订阅更新/切换 → 重启）后开关状态不丢失。
+
+    #[test]
+    fn settings_mode_ipv6_tun_written_to_config() {
+        let s = NetworkSettings {
+            mode: "global".into(),
+            ipv6: true,
+            tun: TunSettings {
+                enable: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out = merge(MergeContext {
+            settings: &s,
+            overrides: &Overrides::default(),
+            subscription: None,
+        })
+        .expect("merge 应成功");
+        let v = parse_out(&out);
+        assert_eq!(v["mode"], Value::String("global".into()));
+        assert_eq!(v["ipv6"], Value::Bool(true));
+        assert_eq!(v["tun"]["enable"], Value::Bool(true));
     }
 }

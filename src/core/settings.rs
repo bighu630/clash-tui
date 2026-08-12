@@ -130,33 +130,41 @@ fn atomic_write(path: &Path, body: &[u8]) -> Result<(), SettingsError> {
     Ok(())
 }
 
+/// 设置目录测试串行锁：MIHOMO_TUI_SETTINGS_DIR 是进程级环境变量，
+/// 所有依赖它的测试（settings 自身 + dashboard 双写测试）必须共用同一把锁
+/// 串行执行，否则并行测试会互相覆盖临时目录造成竞态。
+#[cfg(test)]
+pub(crate) static SETTINGS_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 在临时目录下运行（MIHOMO_TUI_SETTINGS_DIR 覆盖），结束后清理。
+/// dashboard 等模块的设置持久化测试复用此辅助（与 SETTINGS_DIR_LOCK 配套）。
+#[cfg(test)]
+pub(crate) fn with_settings_dir<T>(f: impl FnOnce() -> T) -> T {
+    let _guard: std::sync::MutexGuard<()> = SETTINGS_DIR_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("mihomo-tui-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let old = std::env::var("MIHOMO_TUI_SETTINGS_DIR").ok();
+    std::env::set_var("MIHOMO_TUI_SETTINGS_DIR", &dir);
+    let r = f();
+    match old {
+        Some(v) => std::env::set_var("MIHOMO_TUI_SETTINGS_DIR", v),
+        None => std::env::remove_var("MIHOMO_TUI_SETTINGS_DIR"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    r
+}
+
+/// 兼容别名（settings 自身测试沿用原名）。
+#[cfg(test)]
+fn with_dir<T>(f: impl FnOnce() -> T) -> T {
+    with_settings_dir(f)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::models::{SubscriptionCache, UserGroup, UserRule};
-    use std::sync::{Mutex, MutexGuard, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
-    /// 在临时目录下运行（MIHOMO_TUI_SETTINGS_DIR 覆盖），结束后清理。
-    fn with_dir<T>(f: impl FnOnce() -> T) -> T {
-        let _guard: MutexGuard<()> = env_lock().lock().unwrap();
-        let dir = std::env::temp_dir().join(format!("mihomo-tui-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let old = std::env::var("MIHOMO_TUI_SETTINGS_DIR").ok();
-        std::env::set_var("MIHOMO_TUI_SETTINGS_DIR", &dir);
-        let r = f();
-        match old {
-            Some(v) => std::env::set_var("MIHOMO_TUI_SETTINGS_DIR", v),
-            None => std::env::remove_var("MIHOMO_TUI_SETTINGS_DIR"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-        r
-    }
+    use crate::core::models::{SubscriptionCache, TunSettings, UserGroup, UserRule};
 
     #[test]
     fn settings_roundtrip() {
@@ -266,6 +274,40 @@ mod tests {
     fn missing_overrides_is_default() {
         with_dir(|| {
             assert_eq!(load_overrides().unwrap(), Overrides::default());
+        });
+    }
+
+    /// 仪表盘三开关字段（mode/ipv6/tun.enable）落盘往返：save → load 全等。
+    /// 这是热切开关双写的持久化契约：任何一次 save 后 load 必须还原全部三个字段。
+    #[test]
+    fn toggle_fields_roundtrip() {
+        with_dir(|| {
+            let s = NetworkSettings {
+                mode: "global".into(),
+                ipv6: true,
+                tun: TunSettings {
+                    enable: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            save_settings(&s).unwrap();
+            let back = load_settings().unwrap();
+            assert_eq!(back.mode, "global");
+            assert!(back.ipv6);
+            assert!(back.tun.enable);
+        });
+    }
+
+    /// settings.toml 被建成目录（异常场景）时 save_settings 必须返回 Err：
+    /// 原子写依赖 rename 覆盖目标文件，目标为目录时系统拒绝。
+    /// dashboard 的「保存失败」弹窗路径依赖此失败可见性。
+    #[test]
+    fn save_fails_when_settings_path_is_directory() {
+        with_dir(|| {
+            std::fs::create_dir_all(settings_path()).unwrap();
+            let e = save_settings(&NetworkSettings::default()).unwrap_err();
+            assert!(matches!(e, SettingsError::Io(_)), "错误: {e}");
         });
     }
 

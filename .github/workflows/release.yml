@@ -22,7 +22,7 @@ jobs:
       contents: write # 创建 release 需要
     steps:
       - uses: actions/checkout@v6
-      - uses: taiki-e/create-gh-release@v1
+      - uses: taiki-e/create-gh-release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           # 仓库目前没有 CHANGELOG.md；未来新增后取消注释即可自动生成说明：
@@ -62,15 +62,16 @@ jobs:
       # 依赖缓存（key 自动包含 rustc 版本与 target，跨平台共享）
       - uses: Swatinem/rust-cache@v2
 
-      # 构建 + 打包 tar.gz + 上传 Release（自动附带 .sha256 校验文件）
+      # 构建 + 打包 tar.gz + 上传 Release（checksum: sha256 生成 .sha256 校验文件）
       # archive 模板变量：$bin / $target / $tag
       # 产物命名：mihomo-tui-v0.1.0-x86_64-unknown-linux-gnu.tar.gz（含版本与平台）
       # 只打包 二进制 + README + LICENSE；不含配置（settings.toml 等含订阅凭据，严禁发布）
-      - uses: taiki-e/upload-rust-binary@v1
+      - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: mihomo-tui
           target: ${{ matrix.target }}
           build-tool: cargo-zigbuild
           archive: $bin-$tag-$target
           include: README.md,LICENSE
+          checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}

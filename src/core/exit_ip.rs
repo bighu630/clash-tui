@@ -4,6 +4,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::core::country::country_display;
 use crate::core::models::NetworkSettings;
 
 /// 代理候选端口集合（0 表示未启用）。
@@ -56,9 +57,22 @@ impl std::fmt::Display for Scheme {
     }
 }
 
-/// 端点表（顺序即优先级；Trace/Ipip 为特殊解析格式）。
+/// 出口探测结果：IP + 展示用国家名（中文名 > 英文名 > 代码；None=无国家信息）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExitInfo {
+    pub ip: String,
+    pub country: Option<String>,
+}
+
+/// 端点表（顺序即优先级）：前三个为"带国家"端点（一次请求拿 IP+国家），
+/// 其后为纯 IP 端点（国家=None，UI 显示「未知」）。
 const ENDPOINTS: &[(&str, ParseMode)] = &[
+    // ip-api.com 免费版仅支持 HTTP；fields 精简响应；45 req/min 对 60s 轮询足够
+    ("http://ip-api.com/json/?fields=status,query,country,countryCode", ParseMode::IpApi),
+    // cloudflare trace 零成本（HTTPS）：ip= 与 loc= 同行返回
     ("https://www.cloudflare.com/cdn-cgi/trace", ParseMode::Trace),
+    // ipwho.is HTTPS 免费 10k/月；fields 精简响应
+    ("https://ipwho.is/?fields=ip,success,country,country_code", ParseMode::Ipwho),
     ("https://api.ipify.org", ParseMode::Plain),
     ("https://ipv4.icanhazip.com", ParseMode::Plain),
     ("https://checkip.amazonaws.com", ParseMode::Plain),
@@ -75,6 +89,8 @@ enum ParseMode {
     Plain,
     Trace,
     Ipip,
+    IpApi,
+    Ipwho,
 }
 
 /// 出口 IP 失败分类（供错误提示与测试使用）。
@@ -170,7 +186,7 @@ pub fn hint_for(kind: ExitErrorKind) -> &'static str {
 
 /// 逐候选端口探测：每端口构建独立 Client（单请求 timeout 8s，单端口总预算 30s），
 /// 依次请求端点，成功解析出 IP 立即返回；全部失败返回聚合错误（每端口一行摘要）。
-pub async fn fetch_exit_ip(ports: &ProxyPorts) -> Result<String, String> {
+pub async fn fetch_exit_ip(ports: &ProxyPorts) -> Result<ExitInfo, String> {
     let candidates = ports.candidates();
     if candidates.is_empty() {
         return Err("没有可用的代理端口".to_string());
@@ -239,7 +255,7 @@ pub async fn fetch_exit_ip(ports: &ProxyPorts) -> Result<String, String> {
 /// 出口 IP 探测（带重试）：最多 3 次尝试，失败间隔 5s，返回最后一次错误。
 /// mihomo 重启窗口（apply 后 ~10-30s）内代理端口短暂不可用，单次探测必失败；
 /// 重试可覆盖该窗口，避免对瞬时失败误弹「出口 IP 获取失败」。
-pub async fn fetch_exit_ip_retry(ports: Arc<Mutex<ProxyPorts>>) -> Result<String, String> {
+pub async fn fetch_exit_ip_retry(ports: Arc<Mutex<ProxyPorts>>) -> Result<ExitInfo, String> {
     let mut last_err = String::new();
     for attempt in 0..3 {
         // 先 clone 快照再释放锁：MutexGuard 非 Send，不能跨 await 持锁
@@ -263,7 +279,7 @@ async fn fetch_one(
     client: &reqwest::Client,
     url: &str,
     mode: ParseMode,
-) -> Result<String, (ExitErrorKind, String)> {
+) -> Result<ExitInfo, (ExitErrorKind, String)> {
     let resp = client
         .get(url)
         .send()
@@ -279,13 +295,15 @@ async fn fetch_one(
         .text()
         .await
         .map_err(|e| (classify_reqwest(&e), format!("{url}: {}", chain_string(&e))))?;
-    let ip = match mode {
-        ParseMode::Plain => parse_plain(&text),
+    let info = match mode {
+        ParseMode::Plain => parse_plain(&text).map(|ip| ExitInfo { ip, country: None }),
         ParseMode::Trace => parse_trace(&text),
-        ParseMode::Ipip => parse_ipip(&text),
+        ParseMode::IpApi => parse_ip_api(&text),
+        ParseMode::Ipwho => parse_ipwho(&text),
+        ParseMode::Ipip => parse_ipip(&text).map(|ip| ExitInfo { ip, country: None }),
     }
-    .ok_or_else(|| (ExitErrorKind::BadBody, format!("{url} 内容不含有效 IP")))?;
-    Ok(ip)
+    .ok_or_else(|| (ExitErrorKind::BadBody, format!("{url} 内容不含有效 IP/国家信息")))?;
+    Ok(info)
 }
 
 /// 纯函数解析：trim 后要求符合 IP 形态（非空、≤45 字符、无空白、
@@ -300,10 +318,64 @@ pub fn parse_plain(text: &str) -> Option<String> {
     }
 }
 
-/// cloudflare /cdn-cgi/trace：逐行找 "ip=" 前缀行，值经 parse_plain。
-pub fn parse_trace(text: &str) -> Option<String> {
-    text.lines()
-        .find_map(|line| line.strip_prefix("ip=").and_then(parse_plain))
+/// cloudflare /cdn-cgi/trace：逐行找 "ip=" 前缀行（必须合法 IP），
+/// 同响应中找 "loc=" 前缀行作为国家代码（可选，缺失/空白则 None）。
+/// 注：loc 值（如 HK）是 alpha-2 代码而非 IP，不能经 parse_plain 校验。
+pub fn parse_trace(text: &str) -> Option<ExitInfo> {
+    let ip = text
+        .lines()
+        .find_map(|line| line.strip_prefix("ip=").and_then(parse_plain))?;
+    let code = text
+        .lines()
+        .find_map(|line| line.strip_prefix("loc=").map(str::trim).filter(|v| !v.is_empty()));
+    Some(ExitInfo {
+        ip,
+        country: country_display(code, None),
+    })
+}
+
+/// ip-api.com JSON：{"status":"success","query":"1.2.3.4","country":"United States","countryCode":"US"}
+/// 要求 status=="success" 且 query 为合法 IP；country/countryCode 缺失时容忍
+/// （返回 ip + 按 code/英文名降级）。
+pub fn parse_ip_api(text: &str) -> Option<ExitInfo> {
+    #[derive(serde::Deserialize)]
+    struct IpApiResp {
+        status: String,
+        query: Option<String>,
+        country: Option<String>,
+        #[serde(rename = "countryCode")]
+        country_code: Option<String>,
+    }
+    let resp: IpApiResp = serde_json::from_str(text).ok()?;
+    if resp.status != "success" {
+        return None;
+    }
+    let ip = resp.query.as_deref().and_then(parse_plain)?;
+    Some(ExitInfo {
+        ip,
+        country: country_display(resp.country_code.as_deref(), resp.country.as_deref()),
+    })
+}
+
+/// ipwho.is JSON：{"ip":"1.2.3.4","success":true,"country":"United States","country_code":"US"}
+pub fn parse_ipwho(text: &str) -> Option<ExitInfo> {
+    #[derive(serde::Deserialize)]
+    struct IpwhoResp {
+        success: bool,
+        ip: Option<String>,
+        country: Option<String>,
+        #[serde(rename = "country_code")]
+        country_code: Option<String>,
+    }
+    let resp: IpwhoResp = serde_json::from_str(text).ok()?;
+    if !resp.success {
+        return None;
+    }
+    let ip = resp.ip.as_deref().and_then(parse_plain)?;
+    Some(ExitInfo {
+        ip,
+        country: country_display(resp.country_code.as_deref(), resp.country.as_deref()),
+    })
 }
 
 /// myip.ipip.net 中文文本（"当前 IP：1.2.3.4 来自于：..."）：
@@ -453,8 +525,10 @@ mod tests {
 
     #[test]
     fn parse_trace_hits_ip_line() {
-        let text = "fl=20f\nh=www.cloudflare.com\nip=103.151.172.89\nts=1710000000.000\n";
-        assert_eq!(parse_trace(text), Some("103.151.172.89".to_string()));
+        let text = "fl=20f\nh=www.cloudflare.com\nip=103.151.172.89\nloc=HK\nts=1710000000.000\n";
+        let info = parse_trace(text).expect("应解析成功");
+        assert_eq!(info.ip, "103.151.172.89");
+        assert_eq!(info.country.as_deref(), Some("中国香港"));
     }
 
     #[test]
@@ -462,6 +536,65 @@ mod tests {
         assert_eq!(parse_trace("fl=20f\nh=www.cloudflare.com\n"), None);
         assert_eq!(parse_trace("ip=foo\nh=www.cloudflare.com\n"), None);
         assert_eq!(parse_trace(""), None);
+    }
+
+    #[test]
+    fn parse_trace_no_loc_country_none() {
+        let text = "fl=20f\nip=103.151.172.89\nts=1710000000.000\n";
+        let info = parse_trace(text).expect("ip 存在应解析成功");
+        assert_eq!(info.ip, "103.151.172.89");
+        assert_eq!(info.country, None);
+    }
+
+    #[test]
+    fn parse_trace_unmapped_loc_falls_back_to_code() {
+        // loc 代码未进映射表：降级显示代码本身
+        let text = "ip=1.2.3.4\nloc=ZZ\n";
+        let info = parse_trace(text).expect("应解析成功");
+        assert_eq!(info.country.as_deref(), Some("ZZ"));
+    }
+
+    #[test]
+    fn parse_ip_api_ok() {
+        let text = r#"{"status":"success","country":"Hong Kong","countryCode":"HK","query":"43.243.192.91"}"#;
+        let info = parse_ip_api(text).expect("应解析成功");
+        assert_eq!(info.ip, "43.243.192.91");
+        assert_eq!(info.country.as_deref(), Some("中国香港"));
+    }
+
+    #[test]
+    fn parse_ip_api_error_status() {
+        assert_eq!(parse_ip_api(r#"{"status":"fail","message":"invalid query"}"#), None);
+    }
+
+    #[test]
+    fn parse_ip_api_missing_fields() {
+        // 仅 status+query：country 缺失 → 降级 None
+        let info = parse_ip_api(r#"{"status":"success","query":"1.2.3.4"}"#).expect("应解析成功");
+        assert_eq!(info.ip, "1.2.3.4");
+        assert_eq!(info.country, None);
+    }
+
+    #[test]
+    fn parse_ip_api_bad_ip_or_garbage() {
+        assert_eq!(parse_ip_api(r#"{"status":"success","query":"not-an-ip"}"#), None);
+        assert_eq!(parse_ip_api("not json at all"), None);
+        assert_eq!(parse_ip_api(""), None);
+    }
+
+    #[test]
+    fn parse_ipwho_ok() {
+        let text = r#"{"ip":"43.243.192.92","success":true,"country":"Hong Kong","country_code":"HK"}"#;
+        let info = parse_ipwho(text).expect("应解析成功");
+        assert_eq!(info.ip, "43.243.192.92");
+        assert_eq!(info.country.as_deref(), Some("中国香港"));
+    }
+
+    #[test]
+    fn parse_ipwho_success_false_or_missing() {
+        assert_eq!(parse_ipwho(r#"{"ip":"1.2.3.4","success":false}"#), None);
+        assert_eq!(parse_ipwho(r#"{"success":true,"country":"X"}"#), None); // 无 ip
+        assert_eq!(parse_ipwho("garbage"), None);
     }
 
     #[test]

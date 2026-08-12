@@ -27,8 +27,9 @@ enum GroupPopup {
 pub struct GroupsPage {
     list: SelectList,
     popup: Option<GroupPopup>,
-    /// 弹窗对应的组索引
-    pending: Option<usize>,
+    /// 弹窗对应的组名（弹窗期间列表可能因 GroupsRefreshed 重建，
+    /// 按名定位避免索引漂移切错组）
+    pending: Option<String>,
     /// 列表数据签名：内容变化时重建 SelectList
     sig: String,
 }
@@ -187,8 +188,7 @@ impl GroupsPage {
             )));
             return None;
         }
-        let idx = self.list.selected();
-        self.pending = Some(idx);
+        self.pending = Some(g.name.clone());
         self.popup = Some(GroupPopup::Selector(SelectorPopup::new(
             format!("选择节点：{}", g.name),
             g.all.clone(),
@@ -209,17 +209,20 @@ impl GroupsPage {
         Some(UiCommand::TestGroupDelay(g.name.clone()))
     }
 
-    /// 单选确认：发切换命令。
+    /// 单选确认：按组名在运行时列表中定位后发切换命令；
+    /// 弹窗期间列表已变化（组被移除）→ 提示重试。
     fn confirm_select(&mut self, target: String, st: &mut AppState) -> Option<UiCommand> {
-        let group = self
-            .pending
-            .and_then(|idx| st.proxy_groups.get(idx))
-            .map(|g| g.name.clone());
-        self.pending = None;
-        match group {
-            Some(name) => Some(UiCommand::SwitchGroup { group: name, target }),
-            None => None,
+        // 无 pending（理论上不会发生）时直接返回
+        let name = self.pending.take()?;
+        if st.proxy_groups.iter().any(|g| g.name == name) {
+            return Some(UiCommand::SwitchGroup { group: name, target });
         }
+        // popup 已被 take，需重新挂回提示
+        self.popup = Some(GroupPopup::Message(MessagePopup::new(
+            "组列表已变化".to_string(),
+            vec!["组列表已变化，请重试。".to_string()],
+        )));
+        None
     }
 
     fn handle_popup(&mut self, popup: GroupPopup, key: KeyEvent, st: &mut AppState) -> Option<UiCommand> {
@@ -311,11 +314,16 @@ struct SelectorPopup {
 
 impl SelectorPopup {
     fn new(title: String, items: Vec<String>, now: Option<String>) -> Self {
+        // 初始定位到当前节点（now 缺失或不在列表中时回退第一项）
+        let selected = now
+            .as_ref()
+            .and_then(|n| items.iter().position(|i| i == n))
+            .unwrap_or(0);
         Self {
             title,
             items,
             now,
-            selected: 0,
+            selected,
         }
     }
 
@@ -364,8 +372,32 @@ impl SelectorPopup {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use super::*;
+    use crate::core::client::RuntimeConfig;
+    use crate::core::models::{NetworkSettings, Overrides};
     use crossterm::event::KeyModifiers;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// 构造含运行时组的 AppState（其余字段默认）。
+    fn state_with_groups(groups: Vec<GroupInfo>) -> AppState {
+        AppState {
+            settings: NetworkSettings::default(),
+            subs: Vec::new(),
+            overrides: Overrides::default(),
+            runtime: RuntimeConfig::default(),
+            api_ok: false,
+            api_confirmed: false,
+            traffic: VecDeque::new(),
+            mem_history: VecDeque::new(),
+            connections: Vec::new(),
+            exit_ip: None,
+            proxy_groups: groups,
+            notices: VecDeque::new(),
+        }
+    }
 
     #[test]
     fn type_display_mapping() {
@@ -418,28 +450,165 @@ mod tests {
             vec!["A".into(), "B".into(), "C".into()],
             Some("B".into()),
         );
-        // 初始选中第一项
-        assert!(matches!(
-            p.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            Some(SelectAction::Confirm(ref t)) if t == "A"
-        ));
-        // 移到 B（当前项）再确认
-        let _ = p.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        // 初始选中当前项（now 定位到 B），直接 Enter 保持当前选择
         assert!(matches!(
             p.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Some(SelectAction::Confirm(ref t)) if t == "B"
+        ));
+        // 移到 C 再确认
+        let _ = p.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(matches!(
+            p.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SelectAction::Confirm(ref t)) if t == "C"
         ));
         // Esc 取消
         assert!(matches!(
             p.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Some(SelectAction::Cancel)
         ));
-        // 越界保护
-        let mut p2 = SelectorPopup::new("t".into(), vec!["A".into()], None);
-        let _ = p2.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        // now 不在列表中 → 回退第一项
+        let mut p2 = SelectorPopup::new(
+            "t".into(),
+            vec!["A".into(), "B".into()],
+            Some("X".into()),
+        );
         assert!(matches!(
             p2.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Some(SelectAction::Confirm(ref t)) if t == "A"
         ));
+        // 越界保护
+        let mut p3 = SelectorPopup::new("t".into(), vec!["A".into()], None);
+        let _ = p3.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(matches!(
+            p3.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SelectAction::Confirm(ref t)) if t == "A"
+        ));
+    }
+
+    /// 极小终端回归：h=0/1/2 时页面区域为空/极小，整页 render 不 panic。
+    #[test]
+    fn groups_page_tiny_terminal_no_panic() {
+        for h in [0u16, 1, 2, 24] {
+            let state = state_with_groups(vec![GroupInfo {
+                name: "g".into(),
+                group_type: "Selector".into(),
+                now: Some("a".into()),
+                all: vec!["a".into(), "b".into()],
+            }]);
+            let mut page = GroupsPage::new();
+            let mut terminal = Terminal::new(TestBackend::new(30, h)).unwrap();
+            terminal
+                .draw(|f| page.render(f, f.area(), &state))
+                .expect("render 不应失败");
+        }
+    }
+
+    /// SelectorPopup 极小终端渲染不 panic。
+    #[test]
+    fn selector_popup_tiny_terminal_no_panic() {
+        for h in [0u16, 1, 2, 24] {
+            let mut popup = SelectorPopup::new(
+                "选择节点：g".into(),
+                vec!["a".into(), "b".into()],
+                Some("a".into()),
+            );
+            let mut terminal = Terminal::new(TestBackend::new(30, h)).unwrap();
+            terminal
+                .draw(|f| popup.render(f, f.area()))
+                .expect("render 不应失败");
+        }
+    }
+
+    /// Enter：URLTest 自动组弹「不可手动切换」提示，不发切换命令。
+    #[test]
+    fn start_select_auto_group_blocks_with_message() {
+        let mut page = GroupsPage::new();
+        let mut st = state_with_groups(vec![GroupInfo {
+            name: "自动组".into(),
+            group_type: "URLTest".into(),
+            now: Some("a".into()),
+            all: vec!["a".into(), "b".into()],
+        }]);
+        let cmd = page.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut st);
+        assert!(cmd.is_none(), "自动组不应发切换命令");
+        assert!(page.popup_open(), "应弹出提示");
+        // 弹窗内容为 Message 类型且渲染出「不可手动切换」标题
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        let frame = terminal
+            .draw(|f| page.render(f, f.area(), &st))
+            .expect("render 不应失败");
+        let text: String = (0..frame.buffer.area.height)
+            .flat_map(|y| (0..frame.buffer.area.width).map(move |x| {
+                frame
+                    .buffer
+                    .cell((x, y))
+                    .map(|c| c.symbol().to_string())
+                    .unwrap_or_default()
+            }))
+            .collect::<String>()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(text.contains("不可手动切换"), "应显示不可手动切换提示");
+        assert!(matches!(page.popup, Some(GroupPopup::Message(_))));
+    }
+
+    /// Enter：Selector 组打开节点单选弹窗，不发切换命令。
+    #[test]
+    fn start_select_selector_opens_selector_popup() {
+        let mut page = GroupsPage::new();
+        let mut st = state_with_groups(vec![GroupInfo {
+            name: "手动组".into(),
+            group_type: "Selector".into(),
+            now: Some("a".into()),
+            all: vec!["a".into(), "b".into()],
+        }]);
+        let cmd = page.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut st);
+        assert!(cmd.is_none(), "弹窗打开阶段不发命令");
+        assert!(matches!(page.popup, Some(GroupPopup::Selector(_))), "应弹单选弹窗");
+    }
+
+    /// 确认切换：按组名定位成功 → 发 SwitchGroup 命令并关闭弹窗。
+    #[test]
+    fn confirm_select_sends_switch_group() {
+        let mut page = GroupsPage::new();
+        let mut st = state_with_groups(vec![GroupInfo {
+            name: "手动组".into(),
+            group_type: "Selector".into(),
+            now: Some("a".into()),
+            all: vec!["a".into(), "b".into()],
+        }]);
+        let _ = page.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut st);
+        let cmd = page.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut st);
+        match &cmd {
+            Some(UiCommand::SwitchGroup { group, target }) => {
+                assert_eq!(group.as_str(), "手动组");
+                assert_eq!(target.as_str(), "a");
+            }
+            _ => panic!("应发切换命令: {cmd:?}"),
+        }
+        assert!(!page.popup_open(), "确认后弹窗应关闭");
+        assert!(page.pending.is_none(), "pending 应已清空");
+    }
+
+    /// 弹窗期间列表变化（组被移除）：按组名找不到 → 提示重试，不发切换命令。
+    #[test]
+    fn confirm_select_stale_group_shows_retry_message() {
+        let mut page = GroupsPage::new();
+        let mut st = state_with_groups(vec![GroupInfo {
+            name: "手动组".into(),
+            group_type: "Selector".into(),
+            now: Some("a".into()),
+            all: vec!["a".into(), "b".into()],
+        }]);
+        let _ = page.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut st);
+        // 弹窗期间 GroupsRefreshed 重建列表（组被移除）
+        st.proxy_groups.clear();
+        let cmd = page.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut st);
+        assert!(cmd.is_none(), "列表变化后不应发切换命令");
+        assert!(matches!(page.popup, Some(GroupPopup::Message(_))), "应提示重试");
+        // Esc 关闭提示
+        let _ = page.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut st);
+        assert!(!page.popup_open(), "Esc 应关闭提示");
     }
 }

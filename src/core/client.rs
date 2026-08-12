@@ -57,7 +57,12 @@ impl FromStr for GroupInfo {
         Ok(Self {
             name: v.get("name").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
             group_type: v.get("type").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
-            now: v.get("now").and_then(|x| x.as_str()).map(|s| s.to_string()),
+            now: v
+                .get("now")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+                // mihomo 可能返回空串（组无当前选择）：空串视为 None，展示「-」
+                .filter(|s| !s.is_empty()),
             all: v
                 .get("all")
                 .and_then(|x| x.as_array())
@@ -954,6 +959,16 @@ mod tests {
     fn group_info_no_now_is_none() {
         let gi = GroupInfo::from_str(r#"{"name":"g","type":"URLTest","all":["a"]}"#).unwrap();
         assert_eq!(gi.now, None);
+        assert_eq!(gi.all, vec!["a"]);
+    }
+
+    #[test]
+    fn group_info_empty_now_is_none() {
+        let gi = GroupInfo::from_str(r#"{"name":"g","type":"Selector","now":"","all":["a"]}"#)
+            .unwrap();
+        assert_eq!(gi.now, None, "空串 now 应视为 None");
+        assert_eq!(gi.name, "g");
+        assert_eq!(gi.group_type, "Selector");
         assert_eq!(gi.all, vec!["a"]);
     }
 

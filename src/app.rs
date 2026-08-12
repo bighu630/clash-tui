@@ -967,7 +967,11 @@ fn page_hints(current: usize) -> Vec<(String, String)> {
 }
 
 /// 延迟测试结果行：按延迟升序，超时（>= GROUP_DELAY_TIMEOUT_MS）排最后。
+/// 空结果（整组全部超时且 mihomo 省略节点）→ 明确提示，避免空弹窗。
 fn delay_lines(list: &[(String, u16)]) -> Vec<String> {
+    if list.is_empty() {
+        return vec!["全部节点超时".to_string()];
+    }
     let mut items: Vec<(&String, u16)> = list.iter().map(|(n, ms)| (n, *ms)).collect();
     items.sort_by_key(|(_, ms)| *ms);
     items
@@ -1610,6 +1614,22 @@ mod tests {
             vec!["A  123ms".to_string(), "C  超时".to_string(), "B  超时".to_string()],
             "升序 + 超时标记: {lines:?}"
         );
+    }
+
+    /// 空结果（整组全部超时且 mihomo 省略节点）→ 明确提示而非空弹窗。
+    #[test]
+    fn delay_lines_empty_shows_all_timeout() {
+        assert_eq!(delay_lines(&[]), vec!["全部节点超时".to_string()]);
+    }
+
+    /// 切页触发刷新：进入规则组页（2）发 RefreshGroups；切到其他页不发。
+    #[test]
+    fn switch_page_refreshes_groups() {
+        let (mut app, mut rx) = test_app(24);
+        app.switch_page(2);
+        assert!(matches!(rx.try_recv(), Ok(UiCommand::RefreshGroups)));
+        app.switch_page(0);
+        assert!(rx.try_recv().is_err(), "非规则组页不应发刷新");
     }
 
     fn conn(id: &str, start: Option<&str>, upload: u64, download: u64) -> ConnInfo {

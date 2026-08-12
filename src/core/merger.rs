@@ -57,14 +57,6 @@ fn inject_auto_group(
     group_names.push(AUTO_GROUP_NAME.to_string());
 }
 
-/// Value 的展示串（非字符串元素用 Debug）。
-fn val_str(v: &Value) -> String {
-    match v.as_str() {
-        Some(s) => s.to_string(),
-        None => format!("{v:?}"),
-    }
-}
-
 /// 组装 config.yaml。顶层键顺序：网络段 → profile → proxy-groups → rules → proxies。
 /// 订阅组原样透传（不再去重/剔除失效成员/循环检测，订阅侧问题由 mihomo -t 预校验兜底）。
 pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {

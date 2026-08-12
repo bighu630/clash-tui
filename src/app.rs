@@ -17,7 +17,7 @@ use ratatui::{CompletedFrame, Terminal};
 use tokio::sync::mpsc;
 
 use crate::core::apply::{apply_config, validate_config, ApplyOutcome};
-use crate::core::client::{Client, MemoryFrame, RuntimeConfig, TrafficFrame};
+use crate::core::client::{Client, ConnInfo, ConnSnapshot, MemoryFrame, RuntimeConfig, TrafficFrame};
 use crate::core::exit_ip::{self, ProxyPorts};
 use crate::core::models::{NetworkSettings, Overrides, Subscription, SubscriptionCache};
 use crate::core::settings::{load_overrides, load_settings, load_subscriptions, save_subscriptions};
@@ -44,6 +44,7 @@ pub struct AppState {
     pub api_confirmed: bool,
     pub traffic: VecDeque<TrafficFrame>,
     pub mem_history: VecDeque<u64>,
+    pub connections: Vec<ConnInfo>,
     pub exit_ip: Option<String>,
     pub notices: VecDeque<String>,
 }
@@ -81,6 +82,7 @@ impl AppState {
             api_confirmed: false,
             traffic: VecDeque::new(),
             mem_history: VecDeque::new(),
+            connections: Vec::new(),
             exit_ip: None,
             notices,
         }
@@ -135,6 +137,11 @@ enum KeyAction {
 const TABS: [&str; 4] = ["仪表盘", "订阅", "规则组", "规则"];
 
 const TRAFFIC_HISTORY: usize = 120;
+
+/// 连接列表保留上限（快照替换天然有界，此处防御性截断）。
+const CONNECTIONS_KEEP: usize = 200;
+/// /connections 轮询间隔。
+const CONNECTIONS_POLL: Duration = Duration::from_secs(3);
 
 /// API 状态通知去抖窗口：同向状态变化在此窗口内不重复入列通知
 /// （traffic 流断连与 5s 轮询成功竞态会造成高频翻转刷屏）。
@@ -368,6 +375,7 @@ where
         &mut self,
         mut traffic_rx: mpsc::UnboundedReceiver<BgMsg>,
         mut memory_rx: mpsc::UnboundedReceiver<MemoryFrame>,
+        mut conns_rx: mpsc::UnboundedReceiver<ConnSnapshot>,
         mut ui_rx: mpsc::UnboundedReceiver<UiEvent>,
         mut sudo_rx: mpsc::UnboundedReceiver<String>,
     ) -> Result<(), BoxError> {
@@ -381,6 +389,7 @@ where
                 Tick,
                 Bg(BgMsg),
                 Mem(MemoryFrame),
+                Conns(ConnSnapshot),
                 Ui(UiEvent),
                 Cmd(UiCommand),
                 Sudo(String),
@@ -396,6 +405,7 @@ where
                 _ = ticker.tick() => Act::Tick,
                 msg = traffic_rx.recv() => match msg { Some(m) => Act::Bg(m), None => continue },
                 msg = memory_rx.recv() => match msg { Some(m) => Act::Mem(m), None => continue },
+                msg = conns_rx.recv() => match msg { Some(m) => Act::Conns(m), None => continue },
                 ev = ui_rx.recv() => match ev { Some(e) => Act::Ui(e), None => continue },
                 cmd = self.cmd_rx.recv() => match cmd { Some(c) => Act::Cmd(c), None => continue },
                 yaml = sudo_rx.recv() => match yaml { Some(y) => Act::Sudo(y), None => continue },
@@ -424,6 +434,7 @@ where
                 }
                 Act::Bg(msg) => self.on_bg_msg(msg),
                 Act::Mem(frame) => self.on_memory(frame),
+                Act::Conns(snap) => self.on_conns(snap),
                 Act::Ui(ev) => self.on_ui_event(ev),
                 Act::Cmd(cmd) => self.spawn_command(cmd),
                 Act::Sudo(yaml) => {
@@ -490,6 +501,14 @@ where
             self.state.mem_history.pop_front();
         }
         self.state.mem_history.push_back(frame.inuse);
+    }
+
+    /// 连接快照 → 排序 → 截断上限 → 替换状态。
+    fn on_conns(&mut self, snap: ConnSnapshot) {
+        let mut conns = snap.connections;
+        sort_connections(&mut conns);
+        conns.truncate(CONNECTIONS_KEEP);
+        self.state.connections = conns;
     }
 
     fn on_ui_event(&mut self, ev: UiEvent) {
@@ -831,6 +850,16 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// 连接排序：最新建立的在前（start 降序），start 缺失排末尾；
+/// 同 start 按 upload+download 降序（活跃连接靠前）。
+fn sort_connections(conns: &mut [ConnInfo]) {
+    conns.sort_by(|a, b| {
+        let ka = a.start.map(|t| t.timestamp()).unwrap_or(i64::MIN);
+        let kb = b.start.map(|t| t.timestamp()).unwrap_or(i64::MIN);
+        kb.cmp(&ka).then_with(|| (b.upload + b.download).cmp(&(a.upload + a.download)))
+    });
+}
+
 /// traffic 后台任务：流式拉取 /traffic，失败 sleep 2s 重连；API 状态联动。
 fn spawn_traffic_task(client: Arc<Client>, tx: mpsc::UnboundedSender<BgMsg>) {
     tokio::spawn(async move {
@@ -881,6 +910,22 @@ fn spawn_memory_task(client: Arc<Client>, tx: mpsc::UnboundedSender<MemoryFrame>
     });
 }
 
+/// connections 后台任务：每 3s 轮询 /connections 快照；失败静默跳过
+/// （下次轮询重试，保留上一次成功数据；API 状态联动由 traffic 任务负责）。
+fn spawn_connections_task(client: Arc<Client>, tx: mpsc::UnboundedSender<ConnSnapshot>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(CONNECTIONS_POLL);
+        loop {
+            interval.tick().await;
+            if let Ok(snap) = client.get_connections().await {
+                if tx.send(snap).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+}
+
 /// exit_ip 后台任务：每 60s 定时 + FetchExitIp 命令触发。
 fn spawn_exit_ip_task(
     ports: Arc<Mutex<ProxyPorts>>,
@@ -921,12 +966,14 @@ pub async fn run() -> Result<(), BoxError> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (traffic_tx, traffic_rx) = mpsc::unbounded_channel();
     let (memory_tx, memory_rx) = mpsc::unbounded_channel();
+    let (conns_tx, conns_rx) = mpsc::unbounded_channel();
     let (sudo_tx, sudo_rx) = mpsc::unbounded_channel();
     let (exit_trigger, trigger_rx) = mpsc::unbounded_channel();
     let exit_ports = Arc::new(Mutex::new(ProxyPorts::from_settings(&state.settings)));
 
     spawn_traffic_task(client.clone(), traffic_tx);
     spawn_memory_task(client.clone(), memory_tx);
+    spawn_connections_task(client.clone(), conns_tx);
     spawn_exit_ip_task(exit_ports.clone(), trigger_rx, ui_tx.clone());
 
     let backend = CrosstermBackend::new(io::stdout());
@@ -976,7 +1023,7 @@ pub async fn run() -> Result<(), BoxError> {
             InteractiveTask::Install,
         ));
     }
-    let result = app.run_loop(traffic_rx, memory_rx, ui_rx, sudo_rx).await;
+    let result = app.run_loop(traffic_rx, memory_rx, conns_rx, ui_rx, sudo_rx).await;
     let _ = app.terminal.show_cursor();
     result
 }
@@ -1079,6 +1126,7 @@ mod tests {
             api_confirmed: false,
             traffic: VecDeque::new(),
             mem_history: VecDeque::new(),
+            connections: Vec::new(),
             exit_ip: None,
             notices: VecDeque::new(),
         };
@@ -1171,5 +1219,46 @@ mod tests {
             "应通知恢复: {:?}",
             app.state.notices
         );
+    }
+
+    fn conn(id: &str, start: Option<&str>, upload: u64, download: u64) -> ConnInfo {
+        ConnInfo {
+            id: id.into(),
+            start: start
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc)),
+            upload,
+            download,
+            ..ConnInfo::default()
+        }
+    }
+
+    /// 排序：最新建立的在前；缺失 start 排末尾；同 start 按流量降序。
+    #[test]
+    fn sort_connections_order() {
+        let mut conns = vec![
+            conn("old", Some("2026-08-12T10:00:00Z"), 1, 1),
+            conn("missing", None, 999, 999),
+            conn("new", Some("2026-08-12T11:00:00Z"), 0, 0),
+            conn("same-a", Some("2026-08-12T10:30:00Z"), 5, 5),
+            conn("same-b", Some("2026-08-12T10:30:00Z"), 100, 100),
+        ];
+        sort_connections(&mut conns);
+        let ids: Vec<&str> = conns.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["new", "same-b", "same-a", "old", "missing"]);
+    }
+
+    /// on_conns：快照替换 + 上限截断 200。
+    #[test]
+    fn on_conns_truncates_and_sorts() {
+        let mut app = test_app(24);
+        let mut snap = ConnSnapshot::default();
+        snap.connections = (0..250)
+            .map(|i| conn(&format!("c{i}"), Some("2026-08-12T10:00:00Z"), i, 0))
+            .collect();
+        app.on_conns(snap);
+        assert_eq!(app.state.connections.len(), CONNECTIONS_KEEP);
+        // 排序后最新在上：所有连接 start 相同 → 流量降序 → c249 在最前
+        assert_eq!(app.state.connections[0].id, "c249");
     }
 }

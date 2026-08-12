@@ -3,58 +3,174 @@
 Linux 下的 [mihomo](https://github.com/MetaCubeX/mihomo)（Clash Meta 内核）终端控制器。
 Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订阅管理、配置合并、节点切换与流量监控。
 
+仓库：<https://github.com/bighu630/clash-tui>
+
 ## 功能总览
 
-四个页面，顶部 Tabs 切换，底部为按键提示栏与最近通知（成功 `[✓]` / 失败 `[✗]`，保留最近 3 条）：
+四个页面，顶部 Tabs 切换（`Tab`/`←`/`→`/`1`-`4`），底部为按键提示栏与最近通知
+（`[✓]` 绿色成功 / `[✗]` 红色失败 / `[!]` 黄色警告，**显示**最近 3 条、内部保留 5 条）。
 
-**仪表盘（首页）**
+**仪表盘（首页）**——模式/TUN/IPv6/出口 IP 热切换、实时网速双曲线、总流量、内存：
+
 ```
-┌ 仪表盘  订阅  规则组  规则 ────────────────────────────────────────┐
-│ 模式: rule [m] | TUN: 关 [t] | IPv6: 开 [6] | 出口IP: 1.2.3.4 [r] | API: 已连接 │
-│                                                                  │
-│  上行 ▅▃▅▇▅▂▃▅▇▅▃ 12.3 KB/s        ↑ 总流量  1.2 GB               │
-│  下行 ▂▄▆▇▆▄▂▃▅▇▆▄ 456.7 KB/s      ↓ 总流量  8.9 GB               │
-│                                   内存 82.3 MB  ▂▄▆▃▅              │
-│                                                                  │
-│ Tab/←→ 切页 | m 模式 | t TUN | 6 IPv6 | r 出口IP | s 设置 | ? 帮助 | q 退出 │
-└──────────────────────────────────────────────────────────────────┘
+┌ mihomo-tui ──────────────────────────────────────────────────────────────────────────────────────┐
+│ 仪表盘  │  订阅  │  规则组  │  规则                                                              │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+模式: rule [m]  TUN: 关 [t]  IPv6: 关 [6]  出口IP: 9.9.9.9 [r]  API: 已连接
+┌ 实时网速 ────────────────────────────────────────────────┐┌ 总流量 ──────────────────────────────┐
+│↑ 上行 53.0 KB/s                                          ││↑ 1.1 GB                              │
+│ ▆▃   ▃      ▁▇▃ ▃   █▃▆   ▇ ▁    ▁   ▄▆                  ││↓ 8.3 GB                              │
+│ ██▁  █     ▇███▆█▃█▁███▇ ▁█ █▂▇  █▅▂▂██                  ││                                      │
+│▄███▇▇█▅▂█▃▃█████████████▆██▇███▄███████                  ││                                      │
+│↓ 下行 171.9 KB/s                                         ││                                      │
+│▇▂ ▁▂▇  ▃  ▁ ▃  ▇    ▂▂    ▂ █ ▂  ▃▅  ▅                   ││                                      │
+│██████▅▁█ ▁█ █▆▇█  ▇███▁ ▅▆█▃█ █ ▆██▂▁█                   ││                                      │
+│█████████▂███████▅▅███████████▄████████▄                  ││                                      │
+│                                                          ││                                      │
+│                                                          │└──────────────────────────────────────┘
+│                                                          │┌ 内存 ────────────────────────────────┐
+│                                                          ││79.0 MB inuse                         │
+│                                                          ││█ ▄▇▃                ▇▆ ▇   ▁         │
+│                                                          ││█▂███   ▄   ▃▁       ██ █  ██▃   ▆  ▅ │
+│                                                          ││█████▃█ █  ▁██ ▅  ▁ ▁██ █ ▆███   █  █ │
+│                                                          ││█████████▃▃███▇█▂▂█▅███▆█▁████▂▆▃█▄▂██│
+│                                                          ││██████████████████████████████████████│
+│                                                          ││██████████████████████████████████████│
+│                                                          ││██████████████████████████████████████│
+│                                                          ││██████████████████████████████████████│
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────┘
+[✗] 已取消
+[✓] API 已连接
+
+[m] 模式   [t] TUN   [6] IPv6   [r] 出口IP   [s] 设置   [i] 安装   [Tab] 切页   [?] 帮助   [q] 退出
 ```
+
+> 上图来自演示环境（假 API 数据）；真实环境中「出口IP」显示经代理探测到的公网出口地址。
+
 - 左 60%：实时网速双 Sparkline（上行绿色、下行蓝色，120 样本环形缓冲）+ 当前速率
 - 右 40%：总流量（upTotal/downTotal 大数字）+ 内存占用（inuse + Sparkline）
-- `s`：网络设置表单（端口 / allow-lan / log-level / TUN stack、auto-route、mtu、dns-hijack / DNS 基础项）→ 存盘 → 合并 → 校验 → 应用（结构性变更流程）
+- `m`/`t`/`6`：模式 / TUN / IPv6 运行时热切换（PATCH，不重启）；`r` 手动刷新出口 IP；
+  `i` 安装提权组件（首次启动拒绝后的重试入口）；`s` 网络设置表单（结构性变更流程）
 
 **订阅管理**
+
 ```
-[★] 机场A    | 节点 12 · 组 3 · 规则 50 | 上次拉取 08-10 12:00
-[  ] 机场B    | 节点 8 · 组 1 · 规则 20 | 上次拉取 08-09 09:00
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ [★] 演示机场 | 节点3 组1 规则3 | 2026-08-12T10:00:00Z                                            │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
-- `a` 添加订阅（名称 + URL）→ 拉取并解析；`Enter` 激活（合并 → 校验 → 应用）；`r` 刷新；`d` 删除（确认弹窗）
+
+- `a` 添加订阅（名称 + URL）→ 拉取并解析（失败自动经本地 mixed-port 代理重试一次）；
+  `Enter` 激活（合并 → 校验 → 应用）；`r` 刷新；`d` 删除（确认弹窗）
 - 激活订阅的节点、其他自定义组、订阅组与内置目标（DIRECT 等）自动成为「规则组」页的组员候选
 
 **规则组**
+
 ```
-🚀 节点选择 | select   | 12 成员 | http://www.gstatic.com/generate_204 | 300s
-自动选择   | url-test | 10 成员 | http://www.gstatic.com/generate_204 | 300s
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ 🚀 节点选择 | select | 成员4 | http://www.gstatic.com/generate_204 | 300s                        │
+│ 流媒体 | url-test | 成员1 | http://www.gstatic.com/generate_204 | 300s                           │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
 - `n` 新建表单（名称 / 类型下拉 select·url-test·fallback / 测速 URL / interval / tolerance）
-- `Enter` 编辑；`m` 成员勾选弹窗（支持输入过滤）；`d` 删除（确认弹窗）
+- `Enter` 编辑；`m` 成员勾选弹窗（支持输入过滤）；`d` 删除（确认弹窗，被引用时提示引用方）
 
 **规则**
+
 ```
-DOMAIN-SUFFIX, example.com, 🚀 节点选择
-GEOIP, CN, DIRECT
-MATCH, 🚀 节点选择
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ DOMAIN-SUFFIX, netflix.com, 流媒体                                                               │
+│ MATCH, 🚀 节点选择                                                                               │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
-- `n` 新建（类型下拉 DOMAIN/DOMAIN-SUFFIX/DOMAIN-KEYWORD/GEOIP/PROCESS-NAME/MATCH + payload + 目标下拉）
+
+- `n` 新建（类型下拉 DOMAIN/DOMAIN-SUFFIX/DOMAIN-KEYWORD/GEOIP/PROCESS-NAME/MATCH +
+  payload + 目标下拉）；MATCH 规则无 payload 字段
 - `Enter` 编辑；`d` 删除；`K`/`J` 上移/下移（顺序即优先级，自定义规则恒在订阅规则之前）
 
-## 快速开始
+## 快速上手（从零开始）
 
-### 前提
+```bash
+# 1. 安装 mihomo 并注册为 systemd 服务（官方 unit 见下文「安装与手动配置」）
+sudo pacman -S mihomo                  # Arch；其他发行版用对应包管理器
+sudo mkdir -p /etc/mihomo
+# 创建 /etc/systemd/system/mihomo.service（内容见下文「官方 mihomo.service unit」）
+sudo systemctl daemon-reload
+sudo systemctl enable --now mihomo
+
+# 2. 编译并运行
+cargo build --release
+./target/release/mihomo-tui
+
+# 3. 首次启动：检测到缺少提权组件会弹确认框，回车确认后退出 raw 模式、
+#    交互式输入一次 sudo 密码，自动完成 mihomo-apply 脚本 + sudoers 规则 +
+#    mihomo-admin 组成员三步安装（步骤见「安装与手动配置」）
+#    **重新登录终端**使组权限生效（此后应用配置不再要密码）
+
+# 4. 订阅页按 a 添加订阅（名称 + 订阅 URL）→ 自动拉取并解析；
+#    按 Enter 激活：自动完成「合并 → mihomo -t 预校验 → 提权应用 → 重启」
+
+# 5. 日常使用：
+#    仪表盘  m/t/6 热切换模式/TUN/IPv6，r 刷新出口 IP，s 网络设置
+#    规则组/规则页  自定义分流策略（见「使用指南」）
+#    也可手动生成配置：cargo run --example merge_sample > /tmp/config.yaml
+```
+
+## 使用指南
+
+### 仪表盘
+
+- `m`：循环切换 `rule → global → direct`，`t` 开关 TUN，`6` 开关 IPv6——三者均为
+  `PATCH /configs` 热切换，立即生效、不重启（TUN 需进程持有 `CAP_NET_ADMIN`，见「前提」）
+- `r`：手动刷新出口 IP（每 60s 自动刷新；应用配置成功后自动立即重测一次）
+- `s`：网络设置表单（port / socks-port / mixed-port / allow-lan / log-level /
+  tun.stack · auto-route · mtu · dns-hijack / dns.enable · nameserver）→ 保存
+  `settings.toml` → 合并 → 校验 → 应用（结构性变更流程，见「混合生效策略」）。
+  注意：DNS 仅 `enable` 与 `nameserver` 两项可在表单中修改；其余 DNS 字段
+  （`listen` / `enhanced-mode` / `fake-ip-range` / `default-nameserver` / `fallback` /
+  `fake-ip-filter`）需手改 `settings.toml` 后重启本程序与 mihomo
+- 出口 IP 获取失败时弹出诊断弹窗（见 FAQ），恢复成功自动关闭陈旧弹窗并通知
+
+### 订阅管理
+
+1. `a` → 填写名称与订阅 URL → 回车拉取。支持完整 YAML 订阅与 ShareLinks 订阅
+2. 拉取成功自动更新缓存（通知显示节点/组/规则数量）；失败弹窗给出原因
+3. `Enter` 激活：**未拉取过（无缓存）或缓存无节点**的订阅会拒绝激活并提示
+4. `r` 刷新选中订阅；`d` 删除（确认后移除并落盘）
+
+### 规则组（支持嵌套：组引用组）
+
+创建「🚀 节点选择」select 组：
+
+1. 规则组页按 `n` → 名称 `🚀 节点选择`、类型 `select` → 回车（此时暂无成员）
+2. 按 `m` 打开成员勾选弹窗，`Space` 勾选节点（如 `🇯🇵 JP`、`🇭🇰 HK`）与 `DIRECT`，回车保存
+3. 成员候选 = 激活订阅节点 ∪ 其他自定义组 ∪ 订阅组 ∪ 内置目标（DIRECT 等）；
+   `/` 或直接输入字母过滤；勾选状态在过滤时保留；组不能为空（合并器/校验都会拒绝）
+
+创建引用订阅组的嵌套组（组引用组）：
+
+1. 再按 `n` → 名称 `流媒体`、类型 `url-test`、URL/interval 用默认值 → 回车
+2. 按 `m` 勾选 `自动选择`（来自订阅的 url-test 组）→ 回车
+3. 合并器允许自定义组 ↔ 订阅组互相引用、链式引用（如 A 组引用 B 组），
+   写前检测直接/间接/混合循环引用并报 MergeError（见「合并器组装顺序与去重规则」）
+
+删除组时若被规则或其他组引用，确认弹窗会列出引用方（仍可删除，应用时校验会报错）。
+
+### 规则（顺序即优先级）
+
+1. 规则页按 `n` → 类型 `DOMAIN-SUFFIX` → payload `netflix.com` → 目标下拉选 `流媒体` → 回车
+2. `K`/`J` 上移/下移调整优先级；合并输出时自定义规则恒排在订阅规则之前
+3. 目标下拉 = 内置目标 ∪ 自定义组 ∪ 激活订阅组；MATCH 类型无 payload 字段
+
+## 前提
 
 - **Arch Linux**（或任何能装 mihomo 的 Linux 发行版；Arch 上 `sudo pacman -S mihomo`）
 - mihomo 已安装并作为 **systemd 服务**存在（安装器要求 `systemctl list-unit-files` 中出现 `mihomo.service`）
-- 如需 **TUN 模式**：进程须持有 root 或 `CAP_NET_ADMIN`（+`CAP_NET_RAW`）能力，且内核有 `/dev/net/tun`。官方 unit 已通过 `AmbientCapabilities` 提供，见下文「手动安装」
+- 如需 **TUN 模式**：进程须持有 root 或 `CAP_NET_ADMIN`（+`CAP_NET_RAW`）能力，且内核有 `/dev/net/tun`。官方 unit 已通过 `AmbientCapabilities` 提供，见下文「官方 mihomo.service unit」
 
 ### 编译
 
@@ -71,25 +187,12 @@ cargo build --release
 3. 安装提权脚本 `/usr/local/sbin/mihomo-apply`（root:root 0755）
 4. 写入 `/etc/sudoers.d/99-mihomo`（0440，`visudo -cf` 校验通过才生效）
 5. 将当前用户加入 `mihomo-admin` 组
-6. 提示 `sudo systemctl enable --now mihomo`（不自动执行，由你决定；UI 会询问）
+6. 结果弹窗提示 `sudo systemctl enable --now mihomo`（不自动执行，由你决定）
 
 > **重新登录终端**后组成员资格生效，此后 `sudo -n` 免密调用提权脚本。
+> 拒绝安装后可在仪表盘按 `i` 重新发起安装。
 
-### 添加订阅
-
-`a` → 输入名称与订阅 URL → 回车拉取。支持完整 YAML 订阅（`proxies`/`proxy-groups`/`rules`）
-与 ShareLinks 订阅（base64 或明文的分享链接，7 种协议：vless / vmess / trojan / ss / ssr / hysteria2 / tuic）。
-
-### 激活
-
-`Enter` 激活订阅 → 自动完成「合并 → `mihomo -t` 预校验 → sudo 提权应用」三步：
-
-- 合并器把网络设置、自定义组/规则与订阅内容组装成 `config.yaml`
-- 预校验失败（配置语法/引用错误）直接把 mihomo 的报错弹给你，**不进入 sudo**
-- 提权脚本负责：原子替换 `/etc/mihomo/config.yaml` → `systemctl restart mihomo` →
-  健康检查失败自动回滚上一份配置并重启
-
-## 手动安装（等价步骤）
+## 安装与手动配置（等价步骤）
 
 不想用首启引导时，可手动执行以下命令（TUI 安装器做的事完全一致）：
 
@@ -161,7 +264,7 @@ WantedBy=multi-user.target
 | 按键 | 功能 |
 |---|---|
 | `Tab` / `←` `→` / `1`-`4` | 切换页面（仪表盘/订阅/规则组/规则） |
-| `?` | 帮助弹窗（列出全部按键） |
+| `?` | 帮助弹窗（列出全部按键，`↑↓` 滚动） |
 | `q` / `Esc`（无弹窗时）/ `Ctrl-C` | 退出 |
 
 **仪表盘**：
@@ -173,6 +276,7 @@ WantedBy=multi-user.target
 | `6` | 开关 IPv6（PATCH 热切） |
 | `r` | 手动刷新出口 IP |
 | `s` | 网络设置表单（结构性变更：保存 → 合并 → 校验 → 应用重启） |
+| `i` | 安装提权组件（首次启动拒绝后的重试入口） |
 
 **订阅页**：`a` 添加 · `Enter` 激活 · `r` 刷新 · `d` 删除
 
@@ -180,7 +284,11 @@ WantedBy=multi-user.target
 
 **规则页**：`n` 新建 · `Enter` 编辑 · `d` 删除 · `K` 上移 · `J` 下移
 
-弹窗通用：`Enter` 确认 · `Esc` 取消 · 勾选列表 `Space` 勾选、`/` 过滤。
+弹窗通用：
+
+- 表单：`Tab`/`↑↓` 切换字段 · `←`/`→` 编辑（下拉选项循环切换）· `Enter` 确认 · `Esc` 取消
+- 勾选列表（成员选择）：`j`/`k`/`↑↓` 移动 · `Space` 勾选 · `/` 或字母过滤 · `Enter` 确定 · `Esc` 取消
+- 确认/消息弹窗：`y`/`Enter` 确认 · `n`/`Esc` 取消（消息弹窗 `Esc`/`Enter`/`q` 关闭，`↑↓` 滚动）
 
 ## 架构
 
@@ -191,15 +299,19 @@ src/
   ui/           四个页面 + 通用弹窗组件（FormPopup/CheckboxList/ConfirmPopup/MessagePopup/SelectList）
   core/         纯逻辑层（无 TUI 依赖，可单测）
     models.rs     数据模型（NetworkSettings/Tun/Dns/Subscription/Overrides…）
-    settings.rs   配置文件读写（~/.config/mihomo-tui/，原子替换）
-    subscription.rs / parsers/   订阅拉取、识别（YAML vs ShareLinks）、7 协议解析
+    settings.rs   配置文件读写（~/.config/mihomo-tui/，原子替换，目录 0700 / 文件 0600）
+    subscription.rs / parsers/   订阅拉取（直连失败经本地代理重试）、识别（YAML vs ShareLinks）、
+                  7 种协议解析（vless/vmess/trojan/ss/ssr/hysteria2/tuic；hy2:// 并入 hysteria2）
     merger.rs     合并器：网络段 + 自定义组/规则 + 订阅内容 → config.yaml
-    client.rs     REST 客户端（/configs /traffic /memory /proxies…）
-    apply.rs      mihomo -t 预校验 + sudo 提权应用
+    client.rs     REST 客户端（/version /configs /traffic /memory，PATCH /configs）
+    exit_ip.rs    出口 IP 探测（多代理端口 × 多回显端点降级，失败分类 + 中文提示）
+    apply.rs      mihomo -t 预校验 + sudo 提权应用（非交互失败分类）
   service/
-    installer.rs 首装检测与提权组件安装（本组件）
+    installer.rs 首装检测与提权组件安装（脚本 + sudoers + 组）
 resources/
   mihomo-apply.sh  提权脚本（root 侧：校验→原子替换→重启→回滚）
+examples/
+  merge_sample.rs  加载本地三配置文件 → 合并输出 config.yaml（可管道给 mihomo -t 校验）
 ```
 
 ### 合并器组装顺序与去重规则
@@ -213,7 +325,7 @@ resources/
 3. **rules** = 自定义规则 + 订阅规则 + 默认模板（兜底，需要时）
 4. **proxies** = 订阅节点
 
-去重与冲突规则（全部记录 warning 展示）：
+去重与冲突规则（丢弃/剔除记 warning 展示）：
 
 | 冲突 | 处理 |
 |---|---|
@@ -221,28 +333,36 @@ resources/
 | 自定义组名 = 订阅组名 | 保留自定义，丢弃订阅同名组 |
 | 订阅组名 = 节点名 | 丢弃该订阅组（节点名优先） |
 | 订阅组名 = 内置目标（DIRECT 等） | 丢弃该订阅组（内置目标优先）；其他组成员引用该名仍保留，解析为内置目标 |
+| 订阅组之间重名 | 保留第一个，丢弃其余；对该名的引用解析到首个组 |
 | 订阅组成员引用「与自定义组重名被丢弃的订阅组」 | 剔除该成员 + warning「引用了已丢弃的订阅组」 |
 | 订阅组成员引用「与节点重名被丢弃的订阅组」 | 保留，解析为该节点 |
+| 订阅规则与已有规则重复 | 丢弃 + warning |
+| 订阅规则格式异常（段数不足） | 丢弃 + warning |
 | 自定义组名 = 节点名 | **MergeError**（用户必须改名） |
+| 自定义组之间重名 | **MergeError**（提示改名） |
+| 自定义组名 = 内置目标 | **MergeError**（提示改名） |
+| 自定义组无成员（空组） | **MergeError**（mihomo 拒绝空组；UI 也阻止零勾选保存） |
 | 自定义规则 target / 组成员不存在 | **MergeError**（消息指明规则/组与缺失项） |
 | 组成员引用其他组 / 内置目标 | 允许（组嵌套：订阅组↔自定义组均可作成员，链式引用保留）；组间循环引用写前 **MergeError** |
-| 订阅规则 / 组成员引用缺失 | 丢弃该项 + warning |
+| 订阅规则 / 组成员引用缺失 | 丢弃该项 + warning（成员剔除后空组 → 该组也丢弃 + warning） |
 
 兜底模板：订阅有节点但组列表为空 → 注入 select 组「🚀 节点选择」；
-订阅无规则 → 注入 `GEOIP,CN,DIRECT` + `MATCH,🚀 节点选择`；
+订阅无规则 → 先注入自动组（默认规则模板引用它），再注入 `GEOIP,CN,DIRECT` + `MATCH,🚀 节点选择`；
 无激活订阅 → 只输出网络段 + 自定义内容（mihomo 以直连运行）。
 
 ### 混合生效策略
 
 | 变更类型 | 生效方式 |
 |---|---|
-| mode / ipv6 / tun.enable / log-level / allow-lan / 端口 | **PATCH 热切**：`PATCH /configs` 即时生效，不重载（仪表盘 `m`/`t`/`6`） |
-| 订阅切换 / 组 / 规则 / DNS / 端口结构性修改（`s` 表单） | **结构性重启**：合并 → `mihomo -t` 预校验 → 提权脚本原子替换 → `systemctl restart` → 失败自动回滚 |
+| mode / tun.enable / ipv6（仪表盘 `m`/`t`/`6`） | **PATCH 热切**：`PATCH /configs` 即时生效，不重载、不重启 |
+| 订阅切换 / 组 / 规则 / `s` 表单保存的网络设置（端口、allow-lan、log-level、TUN/DNS 等） | **结构性重启**：合并 → `mihomo -t` 预校验 → 提权脚本原子替换 → `systemctl restart` → 失败自动回滚 |
 | external-controller / secret 修改 | 进程重启（需改 `settings.toml` 后重启 mihomo 与本程序） |
 
 ## 配置文件
 
-全部位于 `~/.config/mihomo-tui/`（首次运行自动创建）：
+全部位于 `~/.config/mihomo-tui/`（首次运行自动创建；目录权限 0700、文件 0600——
+配置含代理凭据；所有写入为「临时文件 + rename」原子替换）。
+可用环境变量 `MIHOMO_TUI_SETTINGS_DIR` 覆盖目录（测试/样例/打包用）。
 
 | 文件 | 格式 | 内容 |
 |---|---|---|
@@ -253,19 +373,19 @@ resources/
 **settings.toml**（示例）：
 
 ```toml
-mode = "rule"
-ipv6 = true
+mode = "rule"        # rule | global | direct
+ipv6 = false         # 默认关
 allow_lan = false
-port = 7890
+port = 7890          # 设 0 可禁用该入口（出口 IP 探测会跳过 0 端口）
 socks_port = 7891
 mixed_port = 7892
-log_level = "info"
+log_level = "info"   # silent | error | warning | info | debug
 external_controller = "127.0.0.1:9090"
-secret = "0123456789abcdef0123456789abcdef"
+secret = "0123456789abcdef0123456789abcdef"   # 首次运行随机生成 32 hex
 
 [tun]
 enable = false
-stack = "mixed"
+stack = "mixed"      # system | gvisor | mixed
 auto_route = true
 dns_hijack = ["any:53"]
 mtu = 9000
@@ -273,7 +393,7 @@ mtu = 9000
 [dns]
 enable = true
 listen = "0.0.0.0:1053"
-enhanced_mode = "fake-ip"
+enhanced_mode = "fake-ip"     # fake-ip | redir-host
 fake_ip_range = "198.18.0.1/16"
 nameserver = ["https://doh.pub/dns-query"]
 default_nameserver = ["223.5.5.5"]
@@ -281,7 +401,10 @@ fallback = ["tls://dns.alidns.com", "tls://dot.pub"]
 fake_ip_filter = ["*.lan", "+.local"]
 ```
 
-**subscriptions.toml**（示例，YAML 序列化）：
+> `fallback` 默认用国内可达 DoT（阿里云 + DNSPod 双冗余）；历史故障：
+> `8.8.4.4:853` 在中国大陆网络不可达会导致国外域名解析全失败（"all DNS requests failed"）。
+
+**subscriptions.toml**（示例，YAML 序列化；`cache` 为拉取解析缓存，激活/合并直接使用）：
 
 ```yaml
 - name: 机场A
@@ -313,22 +436,43 @@ fake_ip_filter = ["*.lan", "+.local"]
 ```yaml
 groups:
   - name: 🚀 节点选择
-    group_type: select
+    group_type: select        # select | url-test | fallback
     url: http://www.gstatic.com/generate_204
-    interval: 300
-    tolerance: 0
-    proxies: ["🇯🇵 JP", "🇭🇰 HK"]
+    interval: 300             # 秒
+    tolerance: 0              # 仅 fallback 输出到 config.yaml
+    proxies: ["🇯🇵 JP", "🇭🇰 HK"]   # 节点名 / 其他组名 / 内置目标
 rules:
-  - rule_type: DOMAIN-SUFFIX
-    payload: example.com
-    target: 🚀 节点选择
+  - rule_type: DOMAIN-SUFFIX  # DOMAIN | DOMAIN-SUFFIX | DOMAIN-KEYWORD | GEOIP | PROCESS-NAME | MATCH
+    payload: example.com      # MATCH 无 payload
+    target: 🚀 节点选择        # 节点 / 自定义组 / 订阅组 / 内置目标
 ```
 
+内置目标（保留名，不可用作组名/节点名）：`DIRECT` `REJECT` `REJECT-DROP` `COMPATIBLE` `PASS` `PASS-RULE` `GLOBAL`。
+
 ## FAQ
+
+**Q：出口 IP 显示未知 / 获取失败？**
+出口 IP 每 60s 自动刷新一次（应用配置成功后立即重测），探测顺序 mixed → http → socks5，
+每个端口依次尝试 10 个回显端点（cloudflare trace / ipify / icanhazip / ipinfo / 3322 / ifconfig 等），
+失败最多重试 3 次（间隔 5s）。失败弹窗带分类诊断：
+- 全部端口连接被拒 → mihomo 未运行或端口配置不一致（`systemctl status mihomo`）
+- REST API 可达但代理端口不通 → 检查 mihomo 运行配置的代理端口与设置是否一致（或防火墙拦截）
+- REST API 也不可达 → mihomo 可能未运行
+恢复成功后自动关闭陈旧错误弹窗并通知「出口 IP 恢复」。
 
 **Q：为什么安装/应用时还要输 sudo 密码？**
 安装器与提权应用都使用交互式 sudo（安全考虑，不缓存凭据）。安装完成后**重新登录终端**，
 `mihomo-admin` 组成员资格生效，此后 `sudo -n /usr/local/sbin/mihomo-apply` 免密调用。
+若已重登仍要密码：在仪表盘按 `i` 重新安装提权组件，或检查 `/etc/sudoers` 是否包含
+`@includedir /etc/sudoers.d`。应用时 sudo 要密码的确认弹窗会附诊断提示区分两种根因。
+
+**Q：添加订阅后节点不显示 / 无法激活？**
+- 拉取失败会弹窗显示原因（网络错误/HTTP 状态码/内容非 UTF-8/超 10MB 上限等），
+  直连失败会自动经本地 mixed-port 代理重试一次
+- 未拉取过的订阅（无缓存）按 `Enter` 会提示「尚未拉取，请先按 r 刷新」；
+  缓存无节点的坏订阅提示「没有可用节点」
+- 订阅内容含 `proxy-providers` 而无 `proxies` 暂不支持（会明确报错）；
+  分享链接无名称的节点自动命名「未命名-N」
 
 **Q：TUN 打不开 / 提示权限不足？**
 TUN 需要 `CAP_NET_ADMIN`（+`CAP_NET_RAW`）能力与 `/dev/net/tun`。用官方 systemd unit
@@ -336,21 +480,27 @@ TUN 需要 `CAP_NET_ADMIN`（+`CAP_NET_RAW`）能力与 `/dev/net/tun`。用官�
 
 **Q：订阅支持哪些格式？**
 完整 YAML（`proxies`/`proxy-groups`/`rules`）、base64 包裹的 YAML、以及 ShareLinks
-（base64 或明文行式链接），共 7 种协议：vless / vmess / trojan / ss（含 plugin）/ ssr / hysteria2 / tuic。
+（base64 或明文行式链接），共 7 种协议：vless / vmess / trojan / ss（含 plugin）/ ssr / hysteria2（含 `hy2://` 前缀）/ tuic。
 含 `proxy-providers` 而无 `proxies` 的订阅暂不支持（会明确报错）。
 
 **Q：合并报错是什么意思？**
-合并器报错（MergeError）都会指明具体规则/组与缺失项，常见四类：
+合并器报错（MergeError）都会指明具体规则/组与缺失项，常见几类：
 - 自定义规则的目标不是任何节点/组/内置目标（DIRECT、REJECT、REJECT-DROP、COMPATIBLE、PASS、PASS-RULE、GLOBAL）→ 改目标或建组
 - 自定义组成员不是任何节点/其他组/内置目标（如订阅切换后订阅组消失）→ 改成员
-- 自定义组名与节点名/内置目标（DIRECT 等）冲突 → 改组名
+- 自定义组名与节点名/其他自定义组/内置目标（DIRECT 等）冲突 → 改组名
+- 自定义组没有成员（空组）→ 在规则组页按 m 勾选至少一个成员
 - 组间循环引用（直接/间接/订阅组间/混合）→ 报错带路径，如「检测到循环引用：组「A」→「B」→「A」」，按路径断开一环
 订阅侧的引用问题（订阅组/规则引用不存在的节点）不会中断，丢弃并给 warning。
 
+**Q：mihomo -t 校验失败提示是什么意思？**
+激活订阅/保存网络设置时，TUI 先把合并产物写入临时文件执行 `mihomo -t -f` 预校验，
+失败**不进入 sudo**，直接把 mihomo 的原始报错弹给你。常见原因：
+YAML 语法错误、规则组空成员、引用不存在的代理/组、端口冲突等。修正后重试即可。
+预校验通过后，提权脚本内还会再校验一次（防止配置在传输中被篡改）。
+
 **Q：应用失败会自动回滚吗？**
-会。TUI 侧先 `mihomo -t -f` 预校验（失败直接弹 mihomo 报错，不进 sudo）；
-提权脚本在替换前保留 `config.yaml.bak`，重启后 `systemctl is-active` 健康检查失败
-即恢复备份并再次重启，stderr 返回 `rolling back` 说明。
+会。提权脚本在替换前保留 `config.yaml.bak`，重启后轮询健康检查（10 次 × 0.5s），
+`systemctl is-active` 失败即恢复备份并再次重启，stderr 返回 `rolling back` 说明。
 
 **Q：GEOIP 规则报错 / 不生效？**
 `GEOIP,CN,DIRECT` 等规则依赖 GeoIP 数据库（geodata）。mihomo 启动时会按需下载；
@@ -370,7 +520,9 @@ TUN 需要 `CAP_NET_ADMIN`（+`CAP_NET_RAW`）能力与 `/dev/net/tun`。用官�
 ## 开发
 
 ```bash
-cargo test                  # 单元测试（合并器/解析器/安装器/设置存取）
+cargo test                  # 单元测试：合并器（去重/嵌套/循环）、7 协议解析器、
+                            # exit_ip 失败分类、client 与假 API 联测、安装器、设置存取、
+                            # 小终端渲染回归
 cargo clippy -- -D warnings
 cargo build --release
 
@@ -379,6 +531,15 @@ cargo run --example merge_sample > /tmp/config.yaml
 MIHOMO_TUI_SETTINGS_DIR=/path/to/settings cargo run --example merge_sample > /tmp/config.yaml
 mihomo -t -f /tmp/config.yaml   # 用真实 mihomo 校验合并产物
 ```
+
+便携打包（二进制 + 配置 + README，新机器解包即用，含订阅缓存无需重新拉取）：
+
+```bash
+./pack.sh                          # 生成 mihomo-tui-portable.tar.gz
+./pack.sh my-name.tar.gz           # 自定义文件名
+```
+
+调研背景见 `docs/`（TUI 框架对比报告、mihomo 控制 API 研究）。
 
 ## 许可证
 

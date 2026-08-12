@@ -455,6 +455,28 @@ where
             return None;
         }
 
+        // 设置页编辑模式：所有键（除 Ctrl-C 已提前处理）归页面，支持输入任意字符
+        if self.pages[self.current].consumes_global_keys() {
+            let page = &mut self.pages[self.current];
+            if let Some(cmd) = page.handle_key(key, &mut self.state) {
+                let _ = self.cmd_tx.send(cmd);
+            }
+            return None;
+        }
+        // 设置页（非编辑态）：Tab/←→ 是字段操作而非切页（spec §2：Tab 移动选中行、←→ 循环下拉）
+        if self.current == 5 {
+            match key.code {
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
+                    let page = &mut self.pages[5];
+                    if let Some(cmd) = page.handle_key(key, &mut self.state) {
+                        let _ = self.cmd_tx.send(cmd);
+                    }
+                    return None;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Some(KeyAction::Quit),
             KeyCode::Tab => self.switch_page((self.current + 1) % self.pages.len()),
@@ -2018,6 +2040,113 @@ mod tests {
             let loaded = crate::core::settings::load_settings().unwrap();
             assert_eq!(loaded.port, 9999, "on_enter 同步后 Ctrl+S 应落盘新值");
         });
+    }
+
+    /// 进入设置页编辑模式后 Esc 退出编辑模式而非退出程序（P0-1 回归）。
+    /// 全链路走 app.handle_key：Down×13 聚焦 dns.listen（Text，index 13）、
+    /// Enter 进编辑、输入 x、Esc；退出编辑后 x 不再插入，Ctrl+S 落盘验证。
+    #[test]
+    fn esc_in_edit_mode_does_not_quit() {
+        with_settings_dir(|| {
+            let (mut app, _rx) = test_app(24);
+            app.switch_page(5);
+            // Down×13：focused 0 → 13（dns.listen，Text 字段）
+            for _ in 0..13 {
+                assert!(app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).is_none());
+            }
+            // Enter 进入编辑（Enter/Down 不在全局 match，走 _ 兜底到页面）
+            assert!(app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_none());
+            // 编辑模式：x 是输入字符，不触发任何全局键
+            assert!(app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)).is_none());
+            // Esc 必须退出编辑模式而非退出程序
+            assert!(!matches!(
+                app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                Some(KeyAction::Quit)
+            ));
+            assert_eq!(app.current, 5, "Esc 不应切页");
+            assert!(!app.quit, "Esc 不应退出程序");
+            // 已退出编辑：再按 x 不再插入；Ctrl+S（经 app.handle_key）落盘验证
+            // 值只含编辑期插入的一个 x（"0.0.0.0:1053x"）
+            assert!(app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)).is_none());
+            assert!(app
+                .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                .is_none());
+            let loaded = crate::core::settings::load_settings().unwrap();
+            assert_eq!(
+                loaded.dns.listen, "0.0.0.0:1053x",
+                "Esc 后 x 不应再插入"
+            );
+        });
+    }
+
+    /// 设置页（非编辑态）Tab/←→ 是字段操作而非切页（P0-1 回归）。
+    /// 路由断言：四个键都留在设置页；行为断言：Left 经页面循环 mode 下拉
+    /// （rule → direct），Ctrl+S 落盘可见（页面级逻辑另有 settings.rs 单测）。
+    #[test]
+    fn arrows_tab_do_not_switch_page_in_settings() {
+        with_settings_dir(|| {
+            let (mut app, _rx) = test_app(24);
+            app.switch_page(5);
+            for code in [KeyCode::Left, KeyCode::Right, KeyCode::Tab, KeyCode::BackTab] {
+                assert!(app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)).is_none());
+                assert_eq!(app.current, 5, "{code:?} 在设置页不应切页");
+            }
+            // Tab/BackTab 往返后焦点回到 mode；Left 循环下拉 rule → direct
+            assert!(app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)).is_none());
+            assert_eq!(app.current, 5);
+            assert!(app
+                .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+                .is_none());
+            let loaded = crate::core::settings::load_settings().unwrap();
+            assert_eq!(loaded.mode, "direct", "Left 应循环 mode 下拉而非切页");
+        });
+    }
+
+    /// 编辑 Number 字段时输入数字不切页（P0-1 回归）：
+    /// port（index 3）编辑中输入 '5' 保持当前页、不退出。
+    #[test]
+    fn digits_typed_in_edit_mode_do_not_switch() {
+        let (mut app, _rx) = test_app(24);
+        app.switch_page(5);
+        // Down×3：focused 0 → 3（port，Number 字段）
+        for _ in 0..3 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!matches!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE)),
+            Some(KeyAction::Quit)
+        ));
+        assert_eq!(app.current, 5, "编辑模式输入数字不应切页");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    }
+
+    /// 编辑 Text 字段时输入 'q' 不退出程序（P0-1 回归）：
+    /// nameserver（index 16，Text）编辑中输入 'q' 保持运行（dns-query 可完整输入）。
+    #[test]
+    fn q_typed_in_edit_mode_does_not_quit() {
+        let (mut app, _rx) = test_app(24);
+        app.switch_page(5);
+        // Down×16：focused 0 → 16（dns.nameserver，Text 字段）
+        for _ in 0..16 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!matches!(
+            app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            Some(KeyAction::Quit)
+        ));
+        assert_eq!(app.current, 5, "编辑模式输入 q 不应切页");
+        assert!(!app.quit, "编辑模式输入 q 不应退出程序");
+    }
+
+    /// 状态行焦点字段提示（P2-2，spec §2）：设置页状态行渲染「当前: mode」。
+    #[test]
+    fn settings_status_line_shows_focused_field() {
+        let (mut app, _rx) = test_app_with_width(120, 24);
+        app.switch_page(5);
+        let text = buffer_text(&mut app);
+        assert!(text.contains("当前:mode"), "状态行应含焦点字段提示: {text}");
     }
 
     /// 日志页 handle_key('e') 发 SetLogLevel 命令并循环级别

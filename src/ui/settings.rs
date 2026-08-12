@@ -366,11 +366,21 @@ impl Page for SettingsPage {
         self.popup.is_some()
     }
 
+    /// 编辑模式接管全局键：输入任意字符（数字/字母/符号）不会触发
+    /// 全局的 q 退出、数字切页、? 帮助、Tab 切页等。
+    fn consumes_global_keys(&self) -> bool {
+        self.editing
+    }
+
     fn on_enter(&mut self, st: &AppState) {
         self.sync_from_settings(st);
     }
 
     fn handle_key(&mut self, key: KeyEvent, st: &mut AppState) -> Option<UiCommand> {
+        // 未同步（未 on_enter）时无可操作字段：直接返回，防止越界 panic
+        if self.fields.is_empty() {
+            return None;
+        }
         // 错误弹窗优先（关闭后回到表单，内容保留）
         if let Some(mut popup) = self.popup.take() {
             if !popup.handle_key(key) {
@@ -395,7 +405,14 @@ impl Page for SettingsPage {
                 KeyCode::Right => self.move_cursor(1),
                 KeyCode::Home => self.cursor[self.focused] = 0,
                 KeyCode::End => self.cursor[self.focused] = self.fields[self.focused].value.len(),
-                KeyCode::Char(c) => self.insert_char(c),
+                KeyCode::Char(c) => {
+                    // Number 字段过滤非数字（与 FormPopup 对齐）：
+                    // 避免 "abc" 混入后再校验失败，输入期即拦截
+                    let is_number = matches!(self.fields[self.focused].kind, FieldKind::Number);
+                    if !is_number || c.is_ascii_digit() {
+                        self.insert_char(c);
+                    }
+                }
                 _ => {}
             }
             return None;
@@ -427,12 +444,19 @@ impl Page for SettingsPage {
     fn render(&mut self, f: &mut Frame, area: Rect, _st: &AppState) {
         let [body, status] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-        // 状态行：未保存标记 + 按键提示
+        // 状态行：未保存标记 + 按键提示 + 焦点字段提示（spec §2）
         let dirty = self.dirty();
+        let hint = "↑↓/Tab 移动 · ←→ 下拉 · Enter 编辑(secret 重新生成) · Ctrl+S 保存 · Ctrl+A 保存并应用";
+        let focus = self
+            .fields
+            .get(self.focused)
+            .map(|f| format!(" · 当前: {}", f.label))
+            .unwrap_or_default();
         let status_text = format!(
-            "{}{}",
+            "{}{}{}",
             if dirty { "[未保存] " } else { "" },
-            "↑↓/Tab 移动 · ←→ 下拉 · Enter 编辑(secret 重新生成) · Ctrl+S 保存 · Ctrl+A 保存并应用"
+            hint,
+            focus
         );
         f.render_widget(
             Paragraph::new(Span::styled(
@@ -879,5 +903,45 @@ mod tests {
         press(&mut p, &mut st, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(p.fields[13].value, "0.0.0.0:1053:15");
         assert!(!p.editing, "Esc 退出编辑模式");
+    }
+
+    /// Number 字段编辑模式过滤非数字字符（与 FormPopup 对齐，P2-1）。
+    #[test]
+    fn number_field_edit_filters_non_digits() {
+        let mut st = test_state();
+        let mut p = page_with_state(&st);
+        p.focused = 3; // port
+        press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(p.fields[3].value, "7890", "非数字不应插入");
+        press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE));
+        assert_eq!(p.fields[3].value, "7890", "符号也不应插入");
+        press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+        assert_eq!(p.fields[3].value, "78905", "数字应插入");
+        // Text 字段不受限（数字字母均可）
+        press(&mut p, &mut st, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        p.focused = 13;
+        press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(p.fields[13].value, "0.0.0.0:1053a", "Text 字段任意字符可插入");
+    }
+
+    /// 未同步（fields 为空，未 on_enter）时 handle_key 安全返回 None（P3 守卫）。
+    #[test]
+    fn handle_key_without_sync_is_noop() {
+        let mut st = test_state();
+        let mut p = SettingsPage::new(); // 未 on_enter：fields 为空
+        assert!(p.fields.is_empty());
+        for key in [
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        ] {
+            assert!(press(&mut p, &mut st, key).is_none(), "{key:?} 应无操作");
+        }
+        assert!(p.fields.is_empty(), "不应产生字段");
     }
 }

@@ -30,6 +30,14 @@ pub trait Page {
         false
     }
 
+    /// 页面是否接管全部按键（全局键 q/Esc/Tab/←→/数字/? 不生效）。
+    /// 设置页编辑模式返回 true：此时除 Ctrl-C 外所有按键都交给页面，
+    /// 支持输入任意字符（数字不会切页、q/?/Esc 不会退出/弹帮助）。
+    /// 默认 false；主循环在 popup_open 之后、全局键分发之前检查。
+    fn consumes_global_keys(&self) -> bool {
+        false
+    }
+
     /// 切页进入时的回调（默认无操作）。设置页用它从 st.settings 重新同步字段。
     fn on_enter(&mut self, _st: &AppState) {}
 }

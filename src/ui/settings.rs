@@ -226,8 +226,7 @@ impl SettingsPage {
     }
 
     /// 从 st.settings 重新同步字段。有未保存编辑时保留（不覆盖）。
-    /// （Page::on_enter 默认方法在 Task 4 加入 trait，此前为固有方法。）
-    pub fn on_enter(&mut self, st: &AppState) {
+    fn sync_from_settings(&mut self, st: &AppState) {
         if self.dirty() {
             return;
         }
@@ -365,6 +364,10 @@ impl SettingsPage {
 impl Page for SettingsPage {
     fn popup_open(&self) -> bool {
         self.popup.is_some()
+    }
+
+    fn on_enter(&mut self, st: &AppState) {
+        self.sync_from_settings(st);
     }
 
     fn handle_key(&mut self, key: KeyEvent, st: &mut AppState) -> Option<UiCommand> {

@@ -29,4 +29,7 @@ pub trait Page {
     fn popup_open(&self) -> bool {
         false
     }
+
+    /// 切页进入时的回调（默认无操作）。设置页用它从 st.settings 重新同步字段。
+    fn on_enter(&mut self, _st: &AppState) {}
 }

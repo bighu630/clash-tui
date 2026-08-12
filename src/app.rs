@@ -191,7 +191,7 @@ enum KeyAction {
     Interactive(InteractiveTask),
 }
 
-const TABS: [&str; 5] = ["仪表盘", "订阅", "规则组", "规则", "日志"];
+const TABS: [&str; 6] = ["仪表盘", "订阅", "规则组", "规则", "日志", "设置"];
 
 const TRAFFIC_HISTORY: usize = 120;
 
@@ -238,7 +238,7 @@ fn notice_deadline<'a>(notices: impl IntoIterator<Item = &'a (Instant, String)>)
 const HELP_LINES: &[&str] = &[
     "全局按键:",
     "  q / Ctrl-C / Esc   退出",
-    "  Tab / ← → / 1-5    切换页面",
+    "  Tab / ← → / 1-6    切换页面",
     "  ?                  显示本帮助",
     "",
     "仪表盘:",
@@ -246,7 +246,7 @@ const HELP_LINES: &[&str] = &[
     "  t                  开关 TUN（热切换）",
     "  6                  开关 IPv6",
     "  r                  刷新出口 IP",
-    "  s                  网络设置（保存后自动合并并应用）",
+    "  s                  跳转设置页",
     "  i                  安装提权组件（首次启动拒绝后的重试入口）",
     "",
     "订阅管理:",
@@ -271,6 +271,13 @@ const HELP_LINES: &[&str] = &[
     "  ↑ / ↓ / PgUp / PgDn 回溯日志（暂停跟随）",
     "  f / End             恢复跟随底部",
     "  c                  清空日志",
+    "",
+    "设置:",
+    "  ↑↓ / Tab          切换字段",
+    "  ←→                切换下拉选项",
+    "  Enter             编辑字段（Esc 退出；secret 字段为重新生成密钥）",
+    "  Ctrl+S            仅保存（写 settings.toml，不重启）",
+    "  Ctrl+A            保存并应用（合并 → mihomo -t 校验 → 提权重启）",
 ];
 
 struct App<B: Backend> {
@@ -395,11 +402,16 @@ where
         Ok(frame)
     }
 
-    /// 切页；进入规则组页（index 2）时刷新运行时策略组。
+    /// 切页；进入规则组页（index 2）时刷新运行时策略组；
+    /// 进入设置页（index 5）时同步字段（页面内部 dirty 时保留编辑）。
     fn switch_page(&mut self, idx: usize) {
         self.current = idx;
         if idx == 2 {
             let _ = self.cmd_tx.send(UiCommand::RefreshGroups);
+        }
+        if idx == 5 {
+            let st = &self.state;
+            self.pages[idx].on_enter(st);
         }
     }
 
@@ -453,9 +465,11 @@ where
             KeyCode::Left => {
                 self.switch_page((self.current + self.pages.len() - 1) % self.pages.len());
             }
-            KeyCode::Char(c) if ('1'..='5').contains(&c) => {
+            KeyCode::Char(c) if ('1'..='6').contains(&c) => {
                 self.switch_page(c.to_digit(10).unwrap_or(1) as usize - 1);
             }
+            // s：全局跳转设置页（设置页内不拦截——s 是文本字段输入字符）
+            KeyCode::Char('s') if self.current != 5 => self.switch_page(5),
             KeyCode::Char('?') => {
                 self.help_popup = Some(MessagePopup::new(
                     "帮助".into(),
@@ -1047,7 +1061,13 @@ fn page_hints(current: usize) -> Vec<(String, String)> {
             ("f".into(), "跟随".into()),
             ("↑↓".into(), "滚动".into()),
         ],
-        // 兜底：current 实际恒在 0..=4（由 pages.len() 决定），此处仅满足穷尽性
+        5 => vec![
+            ("Ctrl+S".into(), "保存".into()),
+            ("Ctrl+A".into(), "应用".into()),
+            ("Enter".into(), "编辑".into()),
+            ("↑↓".into(), "移动".into()),
+        ],
+        // 兜底：current 实际恒在 0..=5（由 pages.len() 决定），此处仅满足穷尽性
         _ => vec![],
     };
     hints.push(("Tab".into(), "切页".into()));
@@ -1284,6 +1304,7 @@ pub async fn run() -> Result<(), BoxError> {
         Box::new(GroupsPage::new()),
         Box::new(RulesPage::new()),
         Box::new(crate::ui::logs::LogsPage::new()),
+        Box::new(crate::ui::settings::SettingsPage::new()),
     ];
 
     let mut app = App {
@@ -1334,6 +1355,7 @@ pub async fn run() -> Result<(), BoxError> {
 mod tests {
     use super::*;
     use crate::core::models::UserGroup;
+    use crate::core::settings::with_settings_dir;
     use ratatui::backend::TestBackend;
 
     /// 底栏行计算纯函数：任意终端高度下提示行与通知行数都不越界。
@@ -1500,6 +1522,7 @@ mod tests {
                 Box::new(GroupsPage::new()),
                 Box::new(RulesPage::new()),
                 Box::new(crate::ui::logs::LogsPage::new()),
+                Box::new(crate::ui::settings::SettingsPage::new()),
             ],
             current: 0,
             client,
@@ -1953,9 +1976,48 @@ mod tests {
     #[test]
     fn tab_key_5_switches_to_logs_page() {
         let (mut app, _rx) = test_app(24);
-        assert_eq!(app.pages.len(), 5);
+        assert_eq!(app.pages.len(), 6);
         let _ = app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
         assert_eq!(app.current, 4);
+    }
+
+    /// 数字键 6 切到设置页（index 5）。
+    #[test]
+    fn tab_key_6_switches_to_settings_page() {
+        let (mut app, _rx) = test_app(24);
+        assert_eq!(app.pages.len(), 6, "应挂载 6 个页面");
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE));
+        assert_eq!(app.current, 5);
+    }
+
+    /// s 全局跳转设置页；已在设置页时按 s 不切走（s 供字段输入）。
+    #[test]
+    fn s_key_switches_to_settings_page() {
+        let (mut app, _rx) = test_app(24);
+        assert_eq!(app.current, 0);
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(app.current, 5, "s 应全局跳转设置页");
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(app.current, 5, "设置页内 s 不应切走");
+    }
+
+    /// switch_page(5) 触发 on_enter：设置页字段从 st.settings 同步。
+    /// 验证方式：先改 st.settings，切页后 Ctrl+S 落盘的应是新值。
+    #[test]
+    fn switch_page_syncs_settings_page_fields() {
+        with_settings_dir(|| {
+            let (mut app, _rx) = test_app(24);
+            app.state.settings.port = 9999;
+            app.switch_page(5);
+            // 页面字段应已同步为 9999：Ctrl+S 直接落盘
+            let cmd = app.pages[5].handle_key(
+                KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                &mut app.state,
+            );
+            assert!(cmd.is_none(), "仅保存不应返回命令");
+            let loaded = crate::core::settings::load_settings().unwrap();
+            assert_eq!(loaded.port, 9999, "on_enter 同步后 Ctrl+S 应落盘新值");
+        });
     }
 
     /// 日志页 handle_key('e') 发 SetLogLevel 命令并循环级别

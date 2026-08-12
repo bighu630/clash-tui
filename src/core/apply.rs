@@ -222,48 +222,63 @@ fn classify_sudo_failure(stderr: &str) -> SudoFailureKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::settings::with_settings_dir;
 
-    #[tokio::test]
-    async fn validate_ok_minimal_config() {
-        // 本机已装 mihomo（计划验收环境）
-        validate_config("port: 7890\n").await.unwrap();
+    /// 依赖 config_dir（MIHOMO_TUI_SETTINGS_DIR）的三个用例与 settings/dashboard
+    /// 测试共用 SETTINGS_DIR_LOCK（with_settings_dir）串行执行，消除 env 并行读写
+    /// 竞态。with_settings_dir 为同步闭包，内部以独立 Runtime block_on 驱动异步体。
+    #[test]
+    fn validate_ok_minimal_config() {
+        with_settings_dir(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            // 本机已装 mihomo（计划验收环境）
+            rt.block_on(validate_config("port: 7890\n")).unwrap();
+        });
     }
 
-    #[tokio::test]
-    async fn validate_bad_yaml_fails_with_stderr() {
-        let e = validate_config("port: 7890\nproxies: [\n").await.unwrap_err();
-        match e {
-            ApplyError::ValidateFailed { stderr } => {
-                assert!(!stderr.is_empty(), "mihomo 报错应原样透出");
+    #[test]
+    fn validate_bad_yaml_fails_with_stderr() {
+        with_settings_dir(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let e = rt
+                .block_on(validate_config("port: 7890\nproxies: [\n"))
+                .unwrap_err();
+            match e {
+                ApplyError::ValidateFailed { stderr } => {
+                    assert!(!stderr.is_empty(), "mihomo 报错应原样透出");
+                }
+                other => panic!("期望 ValidateFailed，得到 {other:?}"),
             }
-            other => panic!("期望 ValidateFailed，得到 {other:?}"),
-        }
+        });
     }
 
-    #[tokio::test]
-    async fn apply_non_interactive_password_or_validation_failure() {
+    #[test]
+    fn apply_non_interactive_password_or_validation_failure() {
         // 环境自适应且无副作用：无效 YAML 在脚本内 mihomo -t 预校验阶段即失败，
         // 不会替换 /etc/mihomo/config.yaml；未装脚本/sudo 需密码/免密/
         // 用户无 sudo 权限（CI/容器）等环境均覆盖。
-        let e = apply_config("bad: [\n", true).await.unwrap_err();
-        match &e {
-            ApplyError::SudoNeedsPassword
-            | ApplyError::SudoNotAvailable
-            | ApplyError::NotInSudoers
-            | ApplyError::CommandFailed { .. } => {}
-            other => panic!("意外错误: {other:?}"),
-        }
-        // 脚本已安装时，CommandFailed 必为脚本内 mihomo -t 校验失败（stderr 透出），
-        // 证明失败发生在替换配置之前，无配置替换副作用。
-        if let ApplyError::CommandFailed { stderr, .. } = &e {
-            if is_apply_script_installed().await {
-                let s = stderr.to_lowercase();
-                assert!(
-                    s.contains("test failed") || s.contains("validation"),
-                    "期望脚本校验失败输出，实际 stderr: {stderr}"
-                );
+        with_settings_dir(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let e = rt.block_on(apply_config("bad: [\n", true)).unwrap_err();
+            match &e {
+                ApplyError::SudoNeedsPassword
+                | ApplyError::SudoNotAvailable
+                | ApplyError::NotInSudoers
+                | ApplyError::CommandFailed { .. } => {}
+                other => panic!("意外错误: {other:?}"),
             }
-        }
+            // 脚本已安装时，CommandFailed 必为脚本内 mihomo -t 校验失败（stderr 透出），
+            // 证明失败发生在替换配置之前，无配置替换副作用。
+            if let ApplyError::CommandFailed { stderr, .. } = &e {
+                if rt.block_on(is_apply_script_installed()) {
+                    let s = stderr.to_lowercase();
+                    assert!(
+                        s.contains("test failed") || s.contains("validation"),
+                        "期望脚本校验失败输出，实际 stderr: {stderr}"
+                    );
+                }
+            }
+        });
     }
 
     /// 失败分类规则：需密码 / 不在 sudoers / 其他（中英文 locale）。

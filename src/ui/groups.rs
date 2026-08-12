@@ -544,6 +544,7 @@ mod tests {
             exit_ip: None,
             proxy_groups: groups,
             group_delays: HashMap::new(),
+            logs: VecDeque::new(),
             notices: VecDeque::new(),
         }
     }

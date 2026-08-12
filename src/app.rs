@@ -17,7 +17,10 @@ use ratatui::{CompletedFrame, Terminal};
 use tokio::sync::mpsc;
 
 use crate::core::apply::{apply_config, validate_config, ApplyOutcome};
-use crate::core::client::{Client, ConnInfo, ConnSnapshot, GroupInfo, MemoryFrame, RuntimeConfig, TrafficFrame};
+use crate::core::client::{
+    Client, ConnInfo, ConnSnapshot, GroupInfo, LogEntry, LogLevel, MemoryFrame, RuntimeConfig,
+    TrafficFrame,
+};
 use crate::core::client::GROUP_DELAY_TIMEOUT_MS;
 use crate::core::exit_ip::{self, ExitInfo, ProxyPorts};
 use crate::core::models::{NetworkSettings, Overrides, Subscription, SubscriptionCache};
@@ -54,7 +57,10 @@ pub struct AppState {
     /// 整组延迟测试结果缓存（组名 → 节点延迟；弹窗内测速静默模式也写入，
     /// 供节点选择弹窗按延迟排序/展示延迟）
     pub group_delays: HashMap<String, Vec<(String, u16)>>,
-    pub notices: VecDeque<String>,
+    /// mihomo 日志环形缓冲（logs 后台任务填充，日志页只读展示）。
+    pub logs: VecDeque<LogEntry>,
+    /// 通知（带到达时刻）。整组共享截止时间（notice_deadline），到期整组同消。
+    pub notices: VecDeque<(Instant, String)>,
 }
 
 impl AppState {
@@ -63,30 +69,30 @@ impl AppState {
         let settings = match load_settings() {
             Ok(s) => s,
             Err(e) => {
-                notices.push_back(format!("[✗] 加载设置失败: {e}"));
+                notices.push_back((Instant::now(), format!("[✗] 加载设置失败: {e}")));
                 NetworkSettings::default()
             }
         };
         let subs = match load_subscriptions() {
             Ok(s) => s,
             Err(e) => {
-                notices.push_back(format!("[✗] 加载订阅失败: {e}"));
+                notices.push_back((Instant::now(), format!("[✗] 加载订阅失败: {e}")));
                 Vec::new()
             }
         };
         let mut overrides = match load_overrides() {
             Ok(o) => o,
             Err(e) => {
-                notices.push_back(format!("[✗] 加载规则覆盖失败: {e}"));
+                notices.push_back((Instant::now(), format!("[✗] 加载规则覆盖失败: {e}")));
                 Overrides::default()
             }
         };
         // 旧版自定义规则组数据迁移（方案 A：清空 + 一次提示）
         if let Some(msg) = migrate_legacy_groups(&mut overrides) {
             if let Err(e) = save_overrides(&overrides) {
-                notices.push_back(format!("[✗] 旧数据清理落盘失败: {e}"));
+                notices.push_back((Instant::now(), format!("[✗] 旧数据清理落盘失败: {e}")));
             }
-            notices.push_back(msg);
+            notices.push_back((Instant::now(), msg));
         }
         Self {
             settings,
@@ -101,13 +107,14 @@ impl AppState {
             exit_ip: None,
             proxy_groups: Vec::new(),
             group_delays: HashMap::new(),
+            logs: VecDeque::new(),
             notices,
         }
     }
 
-    /// 追加通知，保留最近 5 条。
+    /// 追加通知（记录到达时刻），保留最近 5 条。
     pub fn notice(&mut self, msg: String) {
-        self.notices.push_back(msg);
+        self.notices.push_back((Instant::now(), msg));
         while self.notices.len() > 5 {
             self.notices.pop_front();
         }
@@ -135,6 +142,8 @@ pub enum UiCommand {
     /// 整组延迟测试（GET /group/{name}/delay）；silent=true 为弹窗内测速
     /// （结果只进 AppState.group_delays 供弹窗展示/排序，不弹结果弹窗）
     TestGroupDelay { group: String, silent: bool },
+    /// 日志页切换显示级别：主循环转发给 logs 后台任务触发 ?level= 重连。
+    SetLogLevel(LogLevel),
 }
 
 /// 后台任务 → 主循环的事件。
@@ -160,6 +169,8 @@ pub enum UiEvent {
         silent: bool,
         result: Result<Vec<(String, u16)>, String>,
     },
+    /// logs 后台任务推送的单条日志。
+    LogLine(LogEntry),
 }
 
 /// traffic 后台任务发往主循环的消息。
@@ -180,7 +191,7 @@ enum KeyAction {
     Interactive(InteractiveTask),
 }
 
-const TABS: [&str; 4] = ["仪表盘", "订阅", "规则组", "规则"];
+const TABS: [&str; 5] = ["仪表盘", "订阅", "规则组", "规则", "日志"];
 
 const TRAFFIC_HISTORY: usize = 120;
 
@@ -189,14 +200,45 @@ const CONNECTIONS_KEEP: usize = 200;
 /// /connections 轮询间隔。
 const CONNECTIONS_POLL: Duration = Duration::from_secs(3);
 
+/// 日志保留上限（环形缓冲，超出淘汰最旧）。
+const LOG_HISTORY: usize = 1000;
+
 /// API 状态通知去抖窗口：同向状态变化在此窗口内不重复入列通知
 /// （traffic 流断连与 5s 轮询成功竞态会造成高频翻转刷屏）。
 const API_NOTICE_DEBOUNCE: Duration = Duration::from_secs(3);
 
+/// 通知类型时长：`[✗]`/`[!]` 错误警告 10s，其余（成功/普通）5s。
+const NOTICE_OK_TTL: Duration = Duration::from_secs(5);
+const NOTICE_ERR_TTL: Duration = Duration::from_secs(10);
+
+/// 单条通知的类型时长。
+fn notice_ttl(text: &str) -> Duration {
+    if text.starts_with("[✗]") || text.starts_with("[!]") {
+        NOTICE_ERR_TTL
+    } else {
+        NOTICE_OK_TTL
+    }
+}
+
+/// 整组通知截止时间：组内所有 `到达时刻 + 类型时长` 的最大值
+/// （锚定"时间最长的一条"，不管新旧）；空组返回 None。
+/// 调用方以 `deadline > now` 判定整组是否可见，到期整组同时消失。
+/// 入参为通知引用迭代器（&[(Instant, String)] / &VecDeque 均可）。
+fn notice_deadline<'a>(notices: impl IntoIterator<Item = &'a (Instant, String)>) -> Option<Instant> {
+    notices
+        .into_iter()
+        .map(|(at, text)| {
+            // 1.88 无 Instant::saturating_add：checked_add 溢出（实际不可能）时
+            // 回退到 at 本身（立即到期），不 panic
+            (*at).checked_add(notice_ttl(text)).unwrap_or(*at)
+        })
+        .max()
+}
+
 const HELP_LINES: &[&str] = &[
     "全局按键:",
     "  q / Ctrl-C / Esc   退出",
-    "  Tab / ← → / 1-4    切换页面",
+    "  Tab / ← → / 1-5    切换页面",
     "  ?                  显示本帮助",
     "",
     "仪表盘:",
@@ -223,6 +265,12 @@ const HELP_LINES: &[&str] = &[
     "  Enter              编辑规则",
     "  K / J              上移 / 下移",
     "  d                  删除规则",
+    "",
+    "日志:",
+    "  e                  切换级别 (error → warning → info → debug)",
+    "  ↑ / ↓ / PgUp / PgDn 回溯日志（暂停跟随）",
+    "  f / End             恢复跟随底部",
+    "  c                  清空日志",
 ];
 
 struct App<B: Backend> {
@@ -235,6 +283,8 @@ struct App<B: Backend> {
     cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     sudo_tx: mpsc::UnboundedSender<String>,
     exit_trigger: mpsc::UnboundedSender<()>,
+    /// 日志级别切换通道（spawn_command → spawn_logs_task）。
+    log_level_tx: mpsc::UnboundedSender<LogLevel>,
     /// 代理端口快照（ApplyDone 成功后更新并触发重测）
     exit_ports: Arc<Mutex<ProxyPorts>>,
     /// 需要用户确认后执行的交互任务（sudo 密码/首次安装）
@@ -260,14 +310,17 @@ where
     fn draw(&mut self) -> Result<CompletedFrame<'_>, BoxError> {
         let tabs: Vec<String> = TABS.iter().map(|s| s.to_string()).collect();
         let current = self.current;
-        let notices: Vec<(String, bool)> = self
-            .state
-            .notices
-            .iter()
-            .rev()
-            .take(3)
-            .map(|n| (n.clone(), n.starts_with("[✓]")))
-            .collect();
+        let now = Instant::now();
+        // 整组共享截止时间：到期整组同时清除（避免一条条过期触发多次重绘）
+        let notices_visible = notice_deadline(&self.state.notices).is_some_and(|d| d > now);
+        if !notices_visible {
+            self.state.notices.clear();
+        }
+        let visible_notice_rows = if notices_visible {
+            self.state.notices.len().min(3)
+        } else {
+            0
+        };
         let hints = page_hints(current);
 
         let frame = self.terminal.draw(|f| {
@@ -275,7 +328,7 @@ where
             let [top, middle, bottom] = Layout::vertical([
                 Constraint::Length(3),
                 Constraint::Min(1),
-                Constraint::Length(4),
+                Constraint::Length(1 + visible_notice_rows as u16),
             ])
             .areas(area);
 
@@ -310,8 +363,8 @@ where
             // 通知最多占到底栏高度-1 行（最后一行是按键提示）；终端过小时直接截断，
             // 避免 y 超出 buffer 导致 ratatui Buffer::index_of panic
             let (notice_rows, hint_y) = bottom_bar_rows(bottom, area.height);
-            for (i, (text, ok)) in notices.iter().take(notice_rows as usize).enumerate() {
-                let style = if *ok {
+            for (i, (_, text)) in st.notices.iter().rev().take(notice_rows as usize).enumerate() {
+                let style = if text.starts_with("[✓]") {
                     Style::default().fg(Color::Green)
                 } else if text.starts_with("[!]") {
                     Style::default().fg(Color::Yellow)
@@ -400,7 +453,7 @@ where
             KeyCode::Left => {
                 self.switch_page((self.current + self.pages.len() - 1) % self.pages.len());
             }
-            KeyCode::Char(c) if ('1'..='4').contains(&c) => {
+            KeyCode::Char(c) if ('1'..='5').contains(&c) => {
                 self.switch_page(c.to_digit(10).unwrap_or(1) as usize - 1);
             }
             KeyCode::Char('?') => {
@@ -425,6 +478,7 @@ where
         mut traffic_rx: mpsc::UnboundedReceiver<BgMsg>,
         mut memory_rx: mpsc::UnboundedReceiver<MemoryFrame>,
         mut conns_rx: mpsc::UnboundedReceiver<ConnSnapshot>,
+        mut logs_rx: mpsc::UnboundedReceiver<LogEntry>,
         mut ui_rx: mpsc::UnboundedReceiver<UiEvent>,
         mut sudo_rx: mpsc::UnboundedReceiver<String>,
     ) -> Result<(), BoxError> {
@@ -439,6 +493,7 @@ where
                 Bg(BgMsg),
                 Mem(MemoryFrame),
                 Conns(ConnSnapshot),
+                Log(LogEntry),
                 Ui(UiEvent),
                 Cmd(UiCommand),
                 Sudo(String),
@@ -455,6 +510,7 @@ where
                 msg = traffic_rx.recv() => match msg { Some(m) => Act::Bg(m), None => continue },
                 msg = memory_rx.recv() => match msg { Some(m) => Act::Mem(m), None => continue },
                 msg = conns_rx.recv() => match msg { Some(m) => Act::Conns(m), None => continue },
+                msg = logs_rx.recv() => match msg { Some(m) => Act::Log(m), None => continue },
                 ev = ui_rx.recv() => match ev { Some(e) => Act::Ui(e), None => continue },
                 cmd = self.cmd_rx.recv() => match cmd { Some(c) => Act::Cmd(c), None => continue },
                 yaml = sudo_rx.recv() => match yaml { Some(y) => Act::Sudo(y), None => continue },
@@ -484,6 +540,7 @@ where
                 Act::Bg(msg) => self.on_bg_msg(msg),
                 Act::Mem(frame) => self.on_memory(frame),
                 Act::Conns(snap) => self.on_conns(snap),
+                Act::Log(entry) => self.on_log(entry),
                 Act::Ui(ev) => self.on_ui_event(ev),
                 Act::Cmd(cmd) => self.spawn_command(cmd),
                 Act::Sudo(yaml) => {
@@ -550,6 +607,13 @@ where
             self.state.mem_history.pop_front();
         }
         self.state.mem_history.push_back(frame.inuse);
+    }
+
+    fn on_log(&mut self, entry: LogEntry) {
+        if self.state.logs.len() >= LOG_HISTORY {
+            self.state.logs.pop_front();
+        }
+        self.state.logs.push_back(entry);
     }
 
     /// 连接快照 → 排序 → 截断上限 → 替换状态。
@@ -732,6 +796,7 @@ where
                 }
                 Err(e) => self.popup_error("延迟测试失败", e),
             },
+            UiEvent::LogLine(entry) => self.on_log(entry),
         }
     }
 
@@ -854,6 +919,9 @@ where
                     InteractiveTask::Install,
                 ));
             }
+            UiCommand::SetLogLevel(level) => {
+                let _ = self.log_level_tx.send(level);
+            }
         }
     }
 
@@ -967,12 +1035,20 @@ fn page_hints(current: usize) -> Vec<(String, String)> {
             ("r".into(), "测速".into()),
             ("R".into(), "刷新".into()),
         ],
-        _ => vec![
+        3 => vec![
             ("n".into(), "新建".into()),
             ("Enter".into(), "编辑".into()),
             ("K/J".into(), "移动".into()),
             ("d".into(), "删除".into()),
         ],
+        4 => vec![
+            ("e".into(), "级别".into()),
+            ("c".into(), "清空".into()),
+            ("f".into(), "跟随".into()),
+            ("↑↓".into(), "滚动".into()),
+        ],
+        // 兜底：current 实际恒在 0..=4（由 pages.len() 决定），此处仅满足穷尽性
+        _ => vec![],
     };
     hints.push(("Tab".into(), "切页".into()));
     hints.push(("?".into(), "帮助".into()));
@@ -1074,6 +1150,61 @@ fn spawn_memory_task(client: Arc<Client>, tx: mpsc::UnboundedSender<MemoryFrame>
     });
 }
 
+/// logs 后台任务：流式拉取 /logs?level=；错误/EOF 路径 sleep 2s 重连；
+/// 级别切换（level_rx）**立即**以新级别重连（不经过重连等待）。
+fn spawn_logs_task(
+    client: Arc<Client>,
+    mut level_rx: mpsc::UnboundedReceiver<LogLevel>,
+    tx: mpsc::UnboundedSender<LogEntry>,
+) {
+    tokio::spawn(async move {
+        let mut level = LogLevel::Info;
+        // 非零时表示需要重连等待；等待期间收到级别变化立即重连
+        let mut retry_delay = Duration::ZERO;
+        loop {
+            if !retry_delay.is_zero() {
+                tokio::select! {
+                    _ = tokio::time::sleep(retry_delay) => {}
+                    new_level = level_rx.recv() => match new_level {
+                        Some(l) => level = l,
+                        None => return,
+                    },
+                }
+            }
+            match client.log_stream(level).await {
+                Ok(mut stream) => {
+                    retry_delay = Duration::ZERO;
+                    loop {
+                        tokio::select! {
+                            new_level = level_rx.recv() => match new_level {
+                                Some(l) => {
+                                    level = l;
+                                    break; // 立即以新级别重连
+                                }
+                                None => return,
+                            },
+                            item = stream.next() => match item {
+                                Some(Ok(entry)) => {
+                                    if tx.send(entry).is_err() {
+                                        return;
+                                    }
+                                }
+                                Some(Err(_)) | None => {
+                                    retry_delay = Duration::from_secs(2);
+                                    break;
+                                }
+                            },
+                        }
+                    }
+                }
+                Err(_) => {
+                    retry_delay = Duration::from_secs(2);
+                }
+            }
+        }
+    });
+}
+
 /// connections 后台任务：每 3s 轮询 /connections 快照；失败静默跳过
 /// （下次轮询重试，保留上一次成功数据；API 状态联动由 traffic 任务负责）。
 fn spawn_connections_task(client: Arc<Client>, tx: mpsc::UnboundedSender<ConnSnapshot>) {
@@ -1131,6 +1262,8 @@ pub async fn run() -> Result<(), BoxError> {
     let (traffic_tx, traffic_rx) = mpsc::unbounded_channel();
     let (memory_tx, memory_rx) = mpsc::unbounded_channel();
     let (conns_tx, conns_rx) = mpsc::unbounded_channel();
+    let (log_tx, log_rx) = mpsc::unbounded_channel();
+    let (log_level_tx, log_level_rx) = mpsc::unbounded_channel();
     let (sudo_tx, sudo_rx) = mpsc::unbounded_channel();
     let (exit_trigger, trigger_rx) = mpsc::unbounded_channel();
     let exit_ports = Arc::new(Mutex::new(ProxyPorts::from_settings(&state.settings)));
@@ -1138,6 +1271,7 @@ pub async fn run() -> Result<(), BoxError> {
     spawn_traffic_task(client.clone(), traffic_tx);
     spawn_memory_task(client.clone(), memory_tx);
     spawn_connections_task(client.clone(), conns_tx);
+    spawn_logs_task(client.clone(), log_level_rx, log_tx);
     spawn_exit_ip_task(exit_ports.clone(), trigger_rx, ui_tx.clone());
 
     let backend = CrosstermBackend::new(io::stdout());
@@ -1149,6 +1283,7 @@ pub async fn run() -> Result<(), BoxError> {
         Box::new(SubscriptionsPage::new()),
         Box::new(GroupsPage::new()),
         Box::new(RulesPage::new()),
+        Box::new(crate::ui::logs::LogsPage::new()),
     ];
 
     let mut app = App {
@@ -1161,6 +1296,7 @@ pub async fn run() -> Result<(), BoxError> {
         cmd_rx,
         sudo_tx,
         exit_trigger,
+        log_level_tx,
         exit_ports,
         pending_confirm: None,
         help_popup: None,
@@ -1187,7 +1323,9 @@ pub async fn run() -> Result<(), BoxError> {
             InteractiveTask::Install,
         ));
     }
-    let result = app.run_loop(traffic_rx, memory_rx, conns_rx, ui_rx, sudo_rx).await;
+    let result = app
+        .run_loop(traffic_rx, memory_rx, conns_rx, log_rx, ui_rx, sudo_rx)
+        .await;
     let _ = app.terminal.show_cursor();
     result
 }
@@ -1199,30 +1337,33 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     /// 底栏行计算纯函数：任意终端高度下提示行与通知行数都不越界。
-    /// 回归：h=1/2 时 bottom.height=0，此前 hint_y=bottom.y 越出 buffer 顶。
+    /// 回归：h=1/2 时 bottom.height=0，此前 hint_y=bottom.y 越出 buffer 顶；
+    /// 动态底栏：可见通知 0..=3 行（通知 + 提示）全扫。
     #[test]
     fn bottom_bar_rows_always_in_bounds() {
-        for h in 0..=30u16 {
-            let area = Rect::new(0, 0, 30, h);
-            let [_, _, bottom] = Layout::vertical([
-                Constraint::Length(3),
-                Constraint::Min(1),
-                Constraint::Length(4),
-            ])
-            .areas(area);
-            let (notice_rows, hint_y) = bottom_bar_rows(bottom, h);
-            assert!(notice_rows <= h, "h={h}: notice_rows {notice_rows} > 高度");
-            match hint_y {
-                Some(y) => {
-                    assert!(y < h, "h={h}: hint_y {y} >= 高度");
-                    assert!(y >= bottom.y, "h={h}: hint_y {y} < bottom.y {}", bottom.y);
-                    assert_eq!(
-                        y - bottom.y,
-                        notice_rows,
-                        "h={h}: 通知行数应等于 hint_y - bottom.y"
-                    );
+        for n in 0..=3u16 {
+            for h in 0..=30u16 {
+                let area = Rect::new(0, 0, 30, h);
+                let [_, _, bottom] = Layout::vertical([
+                    Constraint::Length(3),
+                    Constraint::Min(1),
+                    Constraint::Length(1 + n),
+                ])
+                .areas(area);
+                let (notice_rows, hint_y) = bottom_bar_rows(bottom, h);
+                assert!(notice_rows <= h, "n={n} h={h}: notice_rows {notice_rows} > 高度");
+                match hint_y {
+                    Some(y) => {
+                        assert!(y < h, "n={n} h={h}: hint_y {y} >= 高度");
+                        assert!(y >= bottom.y, "n={n} h={h}: hint_y {y} < bottom.y {}", bottom.y);
+                        assert_eq!(
+                            y - bottom.y,
+                            notice_rows,
+                            "n={n} h={h}: 通知行数应等于 hint_y - bottom.y"
+                        );
+                    }
+                    None => assert_eq!(notice_rows, 0, "n={n} h={h}: 无提示行时通知也应为 0"),
                 }
-                None => assert_eq!(notice_rows, 0, "h={h}: 无提示行时通知也应为 0"),
             }
         }
     }
@@ -1341,12 +1482,14 @@ mod tests {
             exit_ip: None,
             proxy_groups: Vec::new(),
             group_delays: HashMap::new(),
+            logs: VecDeque::new(),
             notices: VecDeque::new(),
         };
         let (ui_tx, _) = mpsc::unbounded_channel();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (sudo_tx, _) = mpsc::unbounded_channel();
         let (exit_trigger, _) = mpsc::unbounded_channel();
+        let (log_level_tx, _) = mpsc::unbounded_channel();
         let client = Arc::new(Client::new(&state.settings));
         let exit_ports = Arc::new(Mutex::new(ProxyPorts::from_settings(&state.settings)));
         let mut app = App {
@@ -1356,6 +1499,7 @@ mod tests {
                 Box::new(SubscriptionsPage::new()),
                 Box::new(GroupsPage::new()),
                 Box::new(RulesPage::new()),
+                Box::new(crate::ui::logs::LogsPage::new()),
             ],
             current: 0,
             client,
@@ -1364,6 +1508,7 @@ mod tests {
             cmd_rx,
             sudo_tx,
             exit_trigger,
+            log_level_tx,
             exit_ports,
             pending_confirm: None,
             help_popup: None,
@@ -1392,7 +1537,7 @@ mod tests {
             app.state
                 .notices
                 .iter()
-                .any(|n| n.contains("[✓] 已切换TUN并已保存")),
+                .any(|(_, t)| t.contains("[✓] 已切换TUN并已保存")),
             "应通知成功并保存: {:?}",
             app.state.notices
         );
@@ -1412,7 +1557,7 @@ mod tests {
             app.state
                 .notices
                 .iter()
-                .any(|n| n.contains("已切换TUN") && n.contains("未能保存")),
+                .any(|(_, t)| t.contains("已切换TUN") && t.contains("未能保存")),
             "应通知已切换但未能保存: {:?}",
             app.state.notices
         );
@@ -1503,7 +1648,7 @@ mod tests {
             None
         );
         assert!(
-            app.state.notices.iter().any(|n| n.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
+            app.state.notices.iter().any(|(_, t)| t.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
             "应通知恢复: {:?}",
             app.state.notices
         );
@@ -1514,7 +1659,7 @@ mod tests {
             Some("5.6.7.8")
         );
         assert!(
-            !app.state.notices.iter().any(|n| n.contains("5.6.7.8")),
+            !app.state.notices.iter().any(|(_, t)| t.contains("5.6.7.8")),
             "无失败历史时不应再通知恢复: {:?}",
             app.state.notices
         );
@@ -1540,7 +1685,7 @@ mod tests {
         );
         assert!(!app.exit_ip_was_error, "恢复后应清除失败标记");
         assert!(
-            app.state.notices.iter().any(|n| n.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
+            app.state.notices.iter().any(|(_, t)| t.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
             "应通知恢复: {:?}",
             app.state.notices
         );
@@ -1559,7 +1704,7 @@ mod tests {
             app.state
                 .notices
                 .iter()
-                .any(|n| n.contains("[✓] 出口 IP 恢复: 43.243.192.97「中国香港」")),
+                .any(|n| n.1.contains("[✓] 出口 IP 恢复: 43.243.192.97「中国香港」")),
             "应通知恢复且带国家: {:?}",
             app.state.notices
         );
@@ -1609,7 +1754,7 @@ mod tests {
             result: Ok(()),
         });
         assert!(
-            app.state.notices.iter().any(|n| n.contains("已切换「手动选择」→「节点A」")),
+            app.state.notices.iter().any(|n| n.1.contains("已切换「手动选择」→「节点A」")),
             "应通知切换成功: {:?}",
             app.state.notices
         );
@@ -1661,7 +1806,7 @@ mod tests {
         assert!(app.result_popup.is_none(), "静默测速不应弹结果弹窗");
         assert_eq!(app.state.group_delays.get("手动选择"), Some(&list), "结果应入缓存");
         assert!(
-            app.state.notices.iter().any(|n| n.contains("延迟测试完成")),
+            app.state.notices.iter().any(|n| n.1.contains("延迟测试完成")),
             "应有完成通知: {:?}",
             app.state.notices
         );
@@ -1739,6 +1884,120 @@ mod tests {
         sort_connections(&mut conns);
         let ids: Vec<&str> = conns.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec!["dup-1", "dup-2", "dup-3"]);
+    }
+
+    /// 组截止时间 = 组内「到达+时长」最大的一条（锚定时间最长，不管新旧）。
+    #[test]
+    fn notice_deadline_anchors_longest() {
+        let now = Instant::now();
+        // 仅成功通知：5s
+        let d = notice_deadline(&[(now, "[✓] a".to_string())]).unwrap();
+        assert_eq!(d, now + NOTICE_OK_TTL);
+        // 错误通知：10s
+        let d = notice_deadline(&[(now, "[✗] a".to_string())]).unwrap();
+        assert_eq!(d, now + NOTICE_ERR_TTL);
+        // 旧成功 + 新错误：锚定新错误的 10s
+        let old = now - Duration::from_secs(3);
+        let d = notice_deadline(&[
+            (old, "[✓] old".to_string()),
+            (now, "[✗] new".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(d, now + NOTICE_ERR_TTL);
+        // 旧错误 + 新成功：仍锚定错误（到达早，但时长最长）
+        let old_err = now - Duration::from_secs(2);
+        let d = notice_deadline(&[
+            (old_err, "[✗] old".to_string()),
+            (now, "[✓] new".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(d, old_err + NOTICE_ERR_TTL);
+        // 空组：None
+        assert_eq!(notice_deadline(&[]), None);
+    }
+
+    /// 过期整组在 draw 时同时清除（不留半组）。
+    #[test]
+    fn expired_notices_cleared_on_draw() {
+        let (mut app, _rx) = test_app(24);
+        app.state.notices.push_back((
+            Instant::now() - Duration::from_secs(60),
+            "[✓] 旧通知".to_string(),
+        ));
+        app.state.notices.push_back((
+            Instant::now() - Duration::from_secs(60),
+            "[✗] 更旧".to_string(),
+        ));
+        let _ = app.draw().expect("draw 不应失败");
+        assert!(app.state.notices.is_empty(), "过期整组应被清除");
+    }
+
+    /// 无通知时底栏收成 1 行（仅按键提示）；有通知时通知文本可见。
+    #[test]
+    fn bottom_bar_collapses_without_notices() {
+        let (mut app, _rx) = test_app(24);
+        let frame = app.draw().expect("draw 不应失败");
+        let cell = frame.buffer.cell((0, 23)).expect("提示行应在最后一行");
+        assert!(
+            cell.symbol().starts_with('['),
+            "无通知时最后一行应为按键提示: {:?}",
+            cell.symbol()
+        );
+        // 有通知：通知文本渲染可见
+        app.state.notice("[✓] 测试通知".to_string());
+        let text = buffer_text(&mut app);
+        assert!(text.contains("测试通知"), "通知应可见: {text}");
+    }
+
+    /// 数字键 5 切到日志页（index 4）。
+    #[test]
+    fn tab_key_5_switches_to_logs_page() {
+        let (mut app, _rx) = test_app(24);
+        assert_eq!(app.pages.len(), 5);
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+        assert_eq!(app.current, 4);
+    }
+
+    /// 日志页 handle_key('e') 发 SetLogLevel 命令并循环级别
+    /// （Info.next()=Debug，见 client.rs log_level_cycle_and_str 固定的循环契约）。
+    #[test]
+    fn logs_page_e_key_cycles_level() {
+        let (mut app, _rx) = test_app(24);
+        app.current = 4;
+        let cmd = app.pages[4].handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            &mut app.state,
+        );
+        assert!(matches!(cmd, Some(UiCommand::SetLogLevel(LogLevel::Debug))));
+    }
+
+    /// 日志环形缓冲：超过 LOG_HISTORY 淘汰最旧。
+    #[test]
+    fn logs_push_truncates_at_cap() {
+        let (mut app, _rx) = test_app(24);
+        for i in 0..(LOG_HISTORY + 100) {
+            app.on_log(LogEntry {
+                time: None,
+                level: LogLevel::Info,
+                message: format!("m{i}"),
+            });
+        }
+        assert_eq!(app.state.logs.len(), LOG_HISTORY);
+        assert_eq!(app.state.logs.front().unwrap().message, "m100");
+        assert_eq!(
+            app.state.logs.back().unwrap().message,
+            format!("m{}", LOG_HISTORY + 99)
+        );
+    }
+
+    /// SetLogLevel 命令转发到 logs 后台任务通道。
+    #[test]
+    fn set_log_level_forwards_to_task_channel() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (mut app, _rx) = test_app(24);
+        app.log_level_tx = tx;
+        app.spawn_command(UiCommand::SetLogLevel(LogLevel::Debug));
+        assert_eq!(rx.try_recv(), Ok(LogLevel::Debug));
     }
 
     /// on_conns：快照替换 + 上限截断 200。

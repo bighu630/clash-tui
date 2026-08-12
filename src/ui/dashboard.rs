@@ -575,6 +575,7 @@ mod tests {
             exit_ip: None,
             proxy_groups: Vec::new(),
             group_delays: HashMap::new(),
+            logs: VecDeque::new(),
             notices: VecDeque::new(),
         }
     }

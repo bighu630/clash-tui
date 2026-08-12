@@ -3,6 +3,7 @@
 
 pub mod dashboard;
 pub mod groups;
+pub mod logs;
 pub mod rules;
 pub mod subscriptions;
 pub mod widgets;
@@ -22,7 +23,7 @@ pub trait Page {
     /// 渲染页面内容（含页面内部弹窗，弹窗最后绘制）。
     fn render(&mut self, f: &mut Frame, area: Rect, st: &AppState);
     /// 页面内部是否有弹窗打开。主循环据此在弹窗打开时把按键全部交给页面
-    /// （全局键 q/Esc/Tab/←→/1-4/? 不生效），避免误触退出/切页。
+    /// （全局键 q/Esc/Tab/←→/1-5/? 不生效），避免误触退出/切页。
     /// 默认 false；有内部弹窗的页面必须实现。
     fn popup_open(&self) -> bool {
         false

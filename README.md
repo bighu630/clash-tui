@@ -180,7 +180,7 @@ cargo build --release
 ./target/release/mihomo-tui
 ```
 
-首次启动会自动检测提权组件（`/usr/local/sbin/mihomo-apply` 可执行 + `/etc/sudoers.d/99-mihomo` 存在），
+首次启动会自动检测提权组件（`/usr/local/sbin/mihomo-apply` 可执行或本地安装标记 `installed.marker` 存在），
 缺失时弹出确认框。确认后 TUI 退出 raw 模式、恢复终端，进入**交互式 sudo**（输入密码），自动完成：
 
 1. 校验 mihomo 二进制与 systemd 单元

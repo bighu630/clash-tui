@@ -279,7 +279,7 @@ mod tests {
             NeedsPassword
         ));
         assert!(matches!(
-            classify_sudo_failure("ivhu is not in the sudoers file. This incident will be reported."),
+            classify_sudo_failure("alice is not in the sudoers file. This incident will be reported."),
             NotInSudoers
         ));
         assert!(matches!(

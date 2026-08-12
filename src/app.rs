@@ -273,9 +273,9 @@ const HELP_LINES: &[&str] = &[
     "  c                  清空日志",
     "",
     "设置:",
-    "  ↑↓ / Tab          切换字段",
-    "  ←→                切换下拉选项",
-    "  Enter             编辑字段（Esc 退出；secret 字段为重新生成密钥）",
+    "  ↑↓                移动字段",
+    "  Enter             编辑文本/数字 · 循环下拉 · secret 重新生成",
+    "  编辑态: ←→ 移动光标, Esc 退出（Tab/←→/1-6 同全局切页）",
     "  Ctrl+S            仅保存（写 settings.toml，不重启）",
     "  Ctrl+A            保存并应用（合并 → mihomo -t 校验 → 提权重启）",
 ];
@@ -463,20 +463,6 @@ where
             }
             return None;
         }
-        // 设置页（非编辑态）：Tab/←→ 是字段操作而非切页（spec §2：Tab 移动选中行、←→ 循环下拉）
-        if self.current == 5 {
-            match key.code {
-                KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
-                    let page = &mut self.pages[5];
-                    if let Some(cmd) = page.handle_key(key, &mut self.state) {
-                        let _ = self.cmd_tx.send(cmd);
-                    }
-                    return None;
-                }
-                _ => {}
-            }
-        }
-
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Some(KeyAction::Quit),
             KeyCode::Tab => self.switch_page((self.current + 1) % self.pages.len()),
@@ -2079,27 +2065,24 @@ mod tests {
         });
     }
 
-    /// 设置页（非编辑态）Tab/←→ 是字段操作而非切页（P0-1 回归）。
-    /// 路由断言：四个键都留在设置页；行为断言：Left 经页面循环 mode 下拉
-    /// （rule → direct），Ctrl+S 落盘可见（页面级逻辑另有 settings.rs 单测）。
+    /// 设置页导航态 Tab/←→/数字与其他页一致：全局切页（新契约回归，替代旧的
+    /// “设置页拦截切页键做字段操作”行为）。每次切走后重新 switch_page(5) 回设置页。
     #[test]
-    fn arrows_tab_do_not_switch_page_in_settings() {
-        with_settings_dir(|| {
-            let (mut app, _rx) = test_app(24);
-            app.switch_page(5);
-            for code in [KeyCode::Left, KeyCode::Right, KeyCode::Tab, KeyCode::BackTab] {
-                assert!(app.handle_key(KeyEvent::new(code, KeyModifiers::NONE)).is_none());
-                assert_eq!(app.current, 5, "{code:?} 在设置页不应切页");
-            }
-            // Tab/BackTab 往返后焦点回到 mode；Left 循环下拉 rule → direct
-            assert!(app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)).is_none());
-            assert_eq!(app.current, 5);
-            assert!(app
-                .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
-                .is_none());
-            let loaded = crate::core::settings::load_settings().unwrap();
-            assert_eq!(loaded.mode, "direct", "Left 应循环 mode 下拉而非切页");
-        });
+    fn tab_arrows_digits_switch_page_from_settings() {
+        let (mut app, _rx) = test_app(24);
+        app.switch_page(5);
+        assert_eq!(app.current, 5);
+        // Tab：设置页 → 仪表盘（index 0）
+        assert!(app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).is_none());
+        assert_eq!(app.current, 0, "设置页导航态 Tab 应全局切页");
+        // 回到设置页，Left：→ 日志（index 4）
+        app.switch_page(5);
+        assert!(app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)).is_none());
+        assert_eq!(app.current, 4, "设置页导航态 Left 应全局切页");
+        // 回到设置页，'3'：→ 规则组（index 2）
+        app.switch_page(5);
+        assert!(app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)).is_none());
+        assert_eq!(app.current, 2, "设置页导航态数字键应全局切页");
     }
 
     /// 编辑 Number 字段时输入数字不切页（P0-1 回归）：
@@ -2147,6 +2130,20 @@ mod tests {
         app.switch_page(5);
         let text = buffer_text(&mut app);
         assert!(text.contains("当前:mode"), "状态行应含焦点字段提示: {text}");
+    }
+
+    /// 状态行编辑态「编辑中」标记（新契约）：Enter 进编辑后状态行渲染 [编辑中]。
+    #[test]
+    fn settings_status_line_shows_editing_marker() {
+        let (mut app, _rx) = test_app_with_width(120, 24);
+        app.switch_page(5);
+        assert!(!buffer_text(&mut app).contains("编辑中"), "导航态不应显示编辑中");
+        // Down×3 聚焦 port（Text/Number 字段）再 Enter 进编辑态
+        for _ in 0..3 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(buffer_text(&mut app).contains("编辑中"), "编辑态状态行应含 [编辑中] 标记");
     }
 
     /// 日志页 handle_key('e') 发 SetLogLevel 命令并循环级别

@@ -418,19 +418,17 @@ impl Page for SettingsPage {
             return None;
         }
         match key.code {
-            KeyCode::Up | KeyCode::BackTab => self.focus_move(-1),
-            KeyCode::Down | KeyCode::Tab => self.focus_move(1),
+            KeyCode::Up => self.focus_move(-1),
+            KeyCode::Down => self.focus_move(1),
             KeyCode::Home => self.focused = 0,
             KeyCode::End => self.focused = FIELD_COUNT - 1,
-            KeyCode::Left => self.cycle_dropdown(-1),
-            KeyCode::Right => self.cycle_dropdown(1),
             KeyCode::Enter => match &self.fields[self.focused].kind {
                 FieldKind::ReadOnly => {
                     // secret：重新生成（32 hex）
                     self.fields[self.focused].value = generate_secret();
                     self.cursor[self.focused] = self.fields[self.focused].value.len();
                 }
-                FieldKind::Dropdown(_) => {}
+                FieldKind::Dropdown(_) => self.cycle_dropdown(1),
                 _ => {
                     self.editing = true;
                     self.cursor[self.focused] = self.fields[self.focused].value.len();
@@ -444,24 +442,32 @@ impl Page for SettingsPage {
     fn render(&mut self, f: &mut Frame, area: Rect, _st: &AppState) {
         let [body, status] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-        // 状态行：未保存标记 + 按键提示 + 焦点字段提示（spec §2）
+        // 状态行：未保存标记 + 编辑中标记 + 按键提示 + 焦点字段提示
         let dirty = self.dirty();
-        let hint = "↑↓/Tab 移动 · ←→ 下拉 · Enter 编辑(secret 重新生成) · Ctrl+S 保存 · Ctrl+A 保存并应用";
+        let hint = "↑↓ 移动 · Enter 编辑/循环 · Ctrl+S 保存 · Ctrl+A 保存并应用";
         let focus = self
             .fields
             .get(self.focused)
             .map(|f| format!(" · 当前: {}", f.label))
             .unwrap_or_default();
         let status_text = format!(
-            "{}{}{}",
+            "{}{}{}{}",
             if dirty { "[未保存] " } else { "" },
+            if self.editing { "[编辑中] " } else { "" },
             hint,
             focus
         );
+        let status_fg = if dirty {
+            Color::Yellow
+        } else if self.editing {
+            Color::Cyan
+        } else {
+            Color::DarkGray
+        };
         f.render_widget(
             Paragraph::new(Span::styled(
                 status_text,
-                Style::default().fg(if dirty { Color::Yellow } else { Color::DarkGray }),
+                Style::default().fg(status_fg),
             )),
             status,
         );
@@ -871,19 +877,19 @@ mod tests {
         });
     }
 
-    /// 下拉循环：←/→ 切换，Tab 移动跳过标题。
+    /// 下拉循环：Enter 循环选项，↓ 移动选中行（Tab/←→ 让位给全局切页）。
     #[test]
     fn dropdown_cycle_and_navigation() {
         let mut st = test_state();
         let mut p = page_with_state(&st);
         assert_eq!(p.focused, 0);
-        // mode → global → direct
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        // mode → global → direct（Enter 循环）
+        press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(p.fields[0].value, "global");
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(p.fields[0].value, "direct");
-        // Tab 走到下一个字段
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        // ↓ 走到下一个字段
+        press(&mut p, &mut st, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         assert_eq!(p.focused, 1);
     }
 

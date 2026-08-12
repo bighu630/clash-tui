@@ -113,15 +113,16 @@ Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订�
 │ dns.enable: ◀ 是 ▶   dns.listen: 0.0.0.0:1053                              │
 │ ...（其余区块与字段：DNS 8 项 / 其他 2 项，共 22 个字段）                  │
 └────────────────────────────────────────────────────────────────────────────┘
-[未保存] ↑↓/Tab 移动 · ←→ 下拉 · Enter 编辑(secret 重新生成) · Ctrl+S 保存 · Ctrl+A 保存并应用
+[未保存][编辑中] ↑↓ 移动 · Enter 编辑/循环 · Ctrl+S 保存 · Ctrl+A 保存并应用
 ```
 
 - 区块：网络（mode/ipv6/allow-lan）、端口（port/socks-port/mixed-port）、日志（log-level）、
   TUN（enable/stack/auto-route/mtu/dns-hijack）、DNS（enable/listen/enhanced-mode/
   fake-ip-range/nameserver/default-nameserver/fallback/fake-ip-filter）、其他
   （external-controller/secret）——共 22 个字段，即 settings.toml 全部可配置项
-- `↑↓`/`Tab` 移动字段，`←→` 循环下拉，`Enter` 编辑文本/数字字段（`Esc` 退出；
-  secret 只读字段上按 `Enter` 重新生成 32 位密钥）
+- `↑↓` 移动字段，`Enter` 编辑文本/数字字段（`Esc` 退出编辑；编辑态内 `←→` 移动光标）、
+  下拉字段上按 `Enter` 循环选项、secret 只读字段上按 `Enter` 重新生成 32 位密钥；
+  `Tab`/`←→`/`1`-`6` 与其他页一样切换页面
 - `Ctrl+S` 仅保存 settings.toml（不重启不断网）；`Ctrl+A` 保存并应用——合并生成
   config.yaml → `mihomo -t` 校验 → 提权重启。校验失败弹窗提示并保留已填内容
 - 与仪表盘热切的关系：仪表盘 `m`/`t`/`6` 是运行时立即生效（同时写回 settings.toml）；
@@ -327,7 +328,7 @@ WantedBy=multi-user.target
 
 **日志页**：`e` / `c` / `f` / `End` / `↑↓` / `PgUp` / `PgDn` —— 切换级别 / 清空 / 恢复跟随 / 滚动回溯
 
-**设置页**：`↑↓` / `Tab` 移动字段 · `←→` 下拉选项 · `Enter` 编辑（secret 只读字段上为重新生成密钥）· `Esc` 退出编辑 · `Ctrl+S` 仅保存 · `Ctrl+A` 保存并应用
+**设置页**：`↑↓` 移动字段 · `Enter` 编辑文本/数字（`Esc` 退出；编辑态内 `←→` 移动光标）/ 循环下拉选项 / secret 上重新生成密钥 · `Ctrl+S` 仅保存 · `Ctrl+A` 保存并应用
 
 弹窗通用：
 

@@ -250,7 +250,7 @@ fn next_mode(current: &str) -> &'static str {
     }
 }
 
-/// 顶栏状态行：`模式: rule [m] | TUN: on [t] | IPv6: on [6] | 出口IP: x [r] | API: 已连接`
+/// 顶栏状态行：`模式: rule [m] | TUN: on [t] | IPv6: on [6] | 出口IP: x「国家」 [r] | API: 已连接`
 fn render_status(f: &mut Frame, area: Rect, st: &AppState) {
     let mode = if st.runtime.mode.is_empty() {
         st.settings.mode.as_str()
@@ -259,7 +259,8 @@ fn render_status(f: &mut Frame, area: Rect, st: &AppState) {
     };
     let tun = if st.runtime.tun_enable { "开" } else { "关" };
     let ipv6 = if st.runtime.ipv6 { "开" } else { "关" };
-    let ip = st.exit_ip.as_deref().unwrap_or("未知");
+    let ip = st.exit_ip.as_ref().map(|e| e.ip.as_str()).unwrap_or("未知");
+    let country = st.exit_ip.as_ref().and_then(|e| e.country.as_deref());
     let (api_text, api_color) = if st.api_ok {
         ("已连接", Color::Green)
     } else {
@@ -277,6 +278,12 @@ fn render_status(f: &mut Frame, area: Rect, st: &AppState) {
         Span::raw(" [6]  "),
         Span::raw("出口IP: "),
         Span::styled(ip, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        // 国家段：有国家 → 「中国香港」；无国家信息（IP 正常）→ 「未知」；IP 也未获取 → 不显示
+        Span::raw(match (country, st.exit_ip.is_some()) {
+            (Some(c), _) => format!("「{c}」"),
+            (None, true) => "「未知」".to_string(),
+            (None, false) => String::new(),
+        }),
         Span::raw(" [r]  "),
         Span::raw("API: "),
         Span::styled(api_text, Style::default().fg(api_color).add_modifier(Modifier::BOLD)),
@@ -543,6 +550,7 @@ mod tests {
     }
 
     use crate::core::client::RuntimeConfig;
+    use crate::core::exit_ip::ExitInfo;
     use crate::core::models::Overrides;
     use crate::core::settings::{load_settings, settings_path, with_settings_dir};
     use crossterm::event::KeyModifiers;
@@ -674,5 +682,49 @@ mod tests {
             // 关键不变量：保存失败时 st.settings 不应更新——内存与磁盘一致，仍为旧值
             assert!(!st.settings.tun.enable, "保存失败时 st.settings 不应更新");
         });
+    }
+
+    // ---- 出口 IP 国家展示 ----------------
+
+    /// 状态栏出口 IP 段：状态字段到展示值的映射（国家存在 → 「国家」；
+    /// IP 正常但无国家 → 「未知」；IP 未获取 → 不显示国家段）。
+    /// render_status 为纯渲染函数（Span 构造内联），此处验证字段读取路径。
+    #[test]
+    fn render_status_shows_ip_and_country() {
+        let mut st = test_state();
+        st.exit_ip = Some(ExitInfo {
+            ip: "43.243.192.97".into(),
+            country: Some("中国香港".into()),
+        });
+        assert_eq!(
+            st.exit_ip.as_ref().map(|e| e.ip.as_str()),
+            Some("43.243.192.97")
+        );
+        assert_eq!(
+            st.exit_ip.as_ref().and_then(|e| e.country.as_deref()),
+            Some("中国香港")
+        );
+    }
+
+    #[test]
+    fn render_status_ip_without_country_is_unknown() {
+        // IP 正常但无国家信息：状态栏国家段应显示「未知」
+        let mut st = test_state();
+        st.exit_ip = Some(ExitInfo { ip: "1.2.3.4".into(), country: None });
+        assert_eq!(
+            st.exit_ip.as_ref().map(|e| e.ip.as_str()),
+            Some("1.2.3.4")
+        );
+        assert_eq!(
+            st.exit_ip.as_ref().and_then(|e| e.country.as_deref()),
+            None
+        );
+    }
+
+    #[test]
+    fn render_status_no_exit_ip_keeps_unknown_ip() {
+        // 未获取到出口 IP（exit_ip 为 None）：IP 显示「未知」，不显示国家段
+        let st = test_state();
+        assert!(st.exit_ip.is_none());
     }
 }

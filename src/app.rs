@@ -96,8 +96,13 @@ impl AppState {
 }
 
 /// 页面 → 主循环的异步操作请求。
+/// PatchConfigs 携带双写结果：saved=settings.toml 是否已持久化，label=开关名。
 pub enum UiCommand {
-    PatchConfigs(serde_json::Value),
+    PatchConfigs {
+        patch: serde_json::Value,
+        saved: bool,
+        label: String,
+    },
     ApplyConfig(String),
     FetchSubscription(usize),
     FetchExitIp,
@@ -106,8 +111,13 @@ pub enum UiCommand {
 }
 
 /// 后台任务 → 主循环的事件。
+/// PatchDone 透传双写结果：saved/label 决定成功/失败时的用户反馈文案。
 pub enum UiEvent {
-    PatchDone(Result<(), String>),
+    PatchDone {
+        res: Result<(), String>,
+        saved: bool,
+        label: String,
+    },
     ApplyDone(Result<ApplyOutcome, String>),
     SubscriptionFetched(usize, Result<SubscriptionCache, String>),
     ExitIp(Result<String, String>),
@@ -494,9 +504,32 @@ where
 
     fn on_ui_event(&mut self, ev: UiEvent) {
         match ev {
-            UiEvent::PatchDone(res) => match res {
-                Ok(()) => self.state.notice("[✓] 已应用运行时配置".to_string()),
-                Err(e) => self.popup_error("操作失败", e),
+            UiEvent::PatchDone { res, saved, label } => match res {
+                Ok(()) => {
+                    if saved {
+                        self.state.notice(format!("[✓] 已切换{label}并已保存"));
+                    } else {
+                        // 热切成功但持久化失败：必须明确告知，禁止静默部分成功
+                        self.state
+                            .notice(format!("[!] 已切换{label}，但设置未能保存（重启后会丢失）"));
+                    }
+                }
+                Err(e) => {
+                    // 任何一步失败都给用户明确反馈；无论 saved 与否，立即拉一次真实
+                    // 运行态纠正乐观更新（不等 5s 轮询）。
+                    if saved {
+                        self.popup_error(
+                            "操作失败",
+                            format!("「{label}」切换失败: {e}（已保存到配置，下次应用配置时生效）"),
+                        );
+                    } else {
+                        self.popup_error(
+                            "操作失败",
+                            format!("「{label}」切换失败: {e}（且设置未能保存）"),
+                        );
+                    }
+                    let _ = self.cmd_tx.send(UiCommand::ReloadConfigs);
+                }
             },
             UiEvent::ApplyDone(res) => match res {
                 Ok(outcome) => {
@@ -617,7 +650,7 @@ where
     fn spawn_command(&mut self, cmd: UiCommand) {
         let ui_tx = self.ui_tx.clone();
         let client = self.client.clone();        match cmd {
-            UiCommand::PatchConfigs(patch) => {
+            UiCommand::PatchConfigs { patch, saved, label } => {
                 tokio::spawn(async move {
                     let res = tokio::time::timeout(
                         Duration::from_secs(5),
@@ -629,7 +662,7 @@ where
                         Ok(Err(e)) => Err(e.to_string()),
                         Err(_) => Err("请求超时（5s）".to_string()),
                     };
-                    let _ = ui_tx.send(UiEvent::PatchDone(res));
+                    let _ = ui_tx.send(UiEvent::PatchDone { res, saved, label });
                 });
             }
             UiCommand::ApplyConfig(yaml) => {
@@ -1113,6 +1146,105 @@ mod tests {
             quit: false,
             terminal: Terminal::new(TestBackend::new(30, h)).unwrap(),
         }
+    }
+
+    /// PatchDone 成功且已保存：正常成功通知。
+    #[test]
+    fn patch_done_ok_saved_notices_success() {
+        let mut app = test_app(24);
+        app.on_ui_event(UiEvent::PatchDone {
+            res: Ok(()),
+            saved: true,
+            label: "TUN".into(),
+        });
+        assert!(
+            app.state
+                .notices
+                .iter()
+                .any(|n| n.contains("[✓] 已切换TUN并已保存")),
+            "应通知成功并保存: {:?}",
+            app.state.notices
+        );
+    }
+
+    /// PatchDone 成功但设置未保存：必须明确告知「未能保存（重启后会丢失）」，
+    /// 禁止静默部分成功。
+    #[test]
+    fn patch_done_ok_not_saved_notices_warning() {
+        let mut app = test_app(24);
+        app.on_ui_event(UiEvent::PatchDone {
+            res: Ok(()),
+            saved: false,
+            label: "TUN".into(),
+        });
+        assert!(
+            app.state
+                .notices
+                .iter()
+                .any(|n| n.contains("已切换TUN") && n.contains("未能保存")),
+            "应通知已切换但未能保存: {:?}",
+            app.state.notices
+        );
+    }
+
+    /// PatchDone 失败但已保存：错误弹窗提示「已保存到配置，下次应用配置时生效」，
+    /// 并立即 ReloadConfigs 拉取真实运行态纠正乐观更新（不等 5s 轮询）。
+    #[test]
+    fn patch_done_err_saved_shows_popup_and_reloads() {
+        let mut app = test_app(24);
+        app.on_ui_event(UiEvent::PatchDone {
+            res: Err("x".into()),
+            saved: true,
+            label: "TUN".into(),
+        });
+        assert_eq!(app.result_popup.as_ref().unwrap().title(), "操作失败");
+        // 弹窗内容（MessagePopup 字段私有，通过渲染 buffer 重建文本断言）
+        let text = buffer_text(&mut app);
+        assert!(text.contains("已保存到配置"), "弹窗应含已保存提示: {text}");
+        // 换行可能截断短语（如“下次应用配置时生/效）”），断言用不跨行的片段
+        assert!(text.contains("下次应用配置"), "弹窗应含下次应用配置生效提示: {text}");
+        assert!(!text.contains("重启后生效"), "文案不应再误导为裸重启即生效: {text}");
+        // 失败后立即拉真实运行态
+        assert!(
+            matches!(app.cmd_rx.try_recv(), Ok(UiCommand::ReloadConfigs)),
+            "失败后应立即发送 ReloadConfigs"
+        );
+    }
+
+    /// PatchDone 失败且未保存：错误弹窗提示「且设置未能保存」，同样立即 ReloadConfigs。
+    #[test]
+    fn patch_done_err_not_saved_shows_popup_and_reloads() {
+        let mut app = test_app(24);
+        app.on_ui_event(UiEvent::PatchDone {
+            res: Err("x".into()),
+            saved: false,
+            label: "IPv6".into(),
+        });
+        assert_eq!(app.result_popup.as_ref().unwrap().title(), "操作失败");
+        let text = buffer_text(&mut app);
+        assert!(text.contains("且设置未能保存"), "弹窗应含未保存提示: {text}");
+        assert!(
+            matches!(app.cmd_rx.try_recv(), Ok(UiCommand::ReloadConfigs)),
+            "失败后应立即发送 ReloadConfigs"
+        );
+    }
+
+    /// 渲染后从 buffer 重建可见文本（行间不加分隔符、忽略空白）：
+    /// 弹窗内容按宽度换行，行拼接后即可还原原文，用于断言私有字段内容。
+    fn buffer_text(app: &mut App<TestBackend>) -> String {
+        let frame = app.draw().expect("draw 应成功");
+        (0..frame.buffer.area.height)
+            .flat_map(|y| (0..frame.buffer.area.width).map(move |x| {
+                frame
+                    .buffer
+                    .cell((x, y))
+                    .map(|c| c.symbol().to_string())
+                    .unwrap_or_default()
+            }))
+            .collect::<String>()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
     }
 
     /// 出口 IP 失败后恢复：关闭陈旧错误弹窗 + 通知恢复；再次成功（无失败历史）

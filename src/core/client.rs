@@ -505,6 +505,41 @@ mod tests {
         );
     }
 
+    /// PATCH 失败分支：假服务器只接受一个连接并对 PATCH /configs 恒返 500，
+    /// 断言 patch_configs 返回 Err(Status(500))（app 层依赖此错误做失败反馈）。
+    #[tokio::test]
+    async fn patch_configs_http_500_returns_status_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            let mut headers_end = false;
+            while !headers_end {
+                match sock.read(&mut tmp).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            headers_end = true;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = sock
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        });
+        let e = client_on(port)
+            .patch_configs(serde_json::json!({"mode": "direct"}))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, ApiError::Status(500)), "期望 Status(500)，实际: {e}");
+    }
+
     #[tokio::test]
     async fn traffic_stream_frames() {
         let (port, _rx) = spawn_api_server().await;

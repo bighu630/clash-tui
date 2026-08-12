@@ -48,6 +48,9 @@ impl DashboardPage {
         s.dns.nameserver = split_csv(&v[10]);
 
         save_settings(&s).map_err(|e| format!("保存设置失败: {e}"))?;
+        // 磁盘已落盘新值：立即同步 st.settings（clone 保留局部 s 供 merge 使用），
+        // 关闭「保存成功但 merge 失败时内存与磁盘分叉」窗口。
+        st.settings = s.clone();
 
         let active = st.subs.iter().find(|sub| sub.active);
         let out = merge(MergeContext {
@@ -59,8 +62,44 @@ impl DashboardPage {
         if !out.warnings.is_empty() {
             st.notice(format!("[!] 合并警告: {}", out.warnings.join("；")));
         }
-        st.settings = s;
         Ok(UiCommand::ApplyConfig(out.config))
+    }
+    /// 开关双写：先持久化 settings.toml，再返回 PATCH 热切命令。
+    /// 保存失败不放弃热切（仍返回 PATCH），但必须弹「保存失败」明确告知；
+    /// 保存成功则把新设置写回 st.settings——保证 merger（merge 读 ctx.settings
+    /// 生成 config.yaml）在任何后续结构性变更（订阅更新/切换 → 重启）中
+    /// 永远读到最新持久化值，开关状态不丢失。
+    fn toggle_double_write(
+        &mut self,
+        st: &mut AppState,
+        label: &str,
+        apply: impl FnOnce(&mut NetworkSettings),
+        patch: serde_json::Value,
+    ) -> UiCommand {
+        let mut s = st.settings.clone();
+        apply(&mut s);
+        match save_settings(&s) {
+            Ok(()) => {
+                // 关键：st.settings 必须同步为已保存值（merger 读取它的字段）。
+                st.settings = s;
+                UiCommand::PatchConfigs {
+                    patch,
+                    saved: true,
+                    label: label.to_string(),
+                }
+            }
+            Err(e) => {
+                self.popup = Some(DashPopup::Msg(MessagePopup::new(
+                    "保存失败".into(),
+                    vec![format!("「{label}」将尝试热切换，但设置保存失败：{e}（重启后会丢失）")],
+                )));
+                UiCommand::PatchConfigs {
+                    patch,
+                    saved: false,
+                    label: label.to_string(),
+                }
+            }
+        }
     }
 }
 
@@ -93,25 +132,36 @@ impl Page for DashboardPage {
             None => match key.code {
                 // 模式循环 rule → global → direct
                 KeyCode::Char('m') => {
-                    let next = match st.runtime.mode.as_str() {
-                        "global" => "direct",
-                        "direct" => "rule",
-                        _ => "global",
-                    };
+                    let next = next_mode(&st.runtime.mode);
                     st.runtime.mode = next.to_string();
-                    return Some(UiCommand::PatchConfigs(serde_json::json!({"mode": next})));
+                    return Some(self.toggle_double_write(
+                        st,
+                        "模式",
+                        |s| s.mode = next.to_string(),
+                        serde_json::json!({"mode": next}),
+                    ));
                 }
                 // TUN 热切
                 KeyCode::Char('t') => {
                     let enable = !st.runtime.tun_enable;
                     st.runtime.tun_enable = enable;
-                    return Some(UiCommand::PatchConfigs(serde_json::json!({"tun": {"enable": enable}})));
+                    return Some(self.toggle_double_write(
+                        st,
+                        "TUN",
+                        |s| s.tun.enable = enable,
+                        serde_json::json!({"tun": {"enable": enable}}),
+                    ));
                 }
                 // IPv6 热切
                 KeyCode::Char('6') => {
                     let enable = !st.runtime.ipv6;
                     st.runtime.ipv6 = enable;
-                    return Some(UiCommand::PatchConfigs(serde_json::json!({"ipv6": enable})));
+                    return Some(self.toggle_double_write(
+                        st,
+                        "IPv6",
+                        |s| s.ipv6 = enable,
+                        serde_json::json!({"ipv6": enable}),
+                    ));
                 }
                 // 手动刷新出口 IP
                 KeyCode::Char('r') => return Some(UiCommand::FetchExitIp),
@@ -175,6 +225,15 @@ fn settings_form(s: &NetworkSettings) -> FormPopup {
             FormField { label: "dns.nameserver".into(), value: s.dns.nameserver.join(","), kind: FieldKind::Text },
         ],
     )
+}
+
+/// 模式循环 rule → global → direct → rule（非 global/direct 一律 → "global"）。
+fn next_mode(current: &str) -> &'static str {
+    match current {
+        "global" => "direct",
+        "direct" => "rule",
+        _ => "global",
+    }
 }
 
 /// 顶栏状态行：`模式: rule [m] | TUN: on [t] | IPv6: on [6] | 出口IP: x [r] | API: 已连接`
@@ -321,4 +380,139 @@ fn render_totals(f: &mut Frame, area: Rect, st: &AppState) {
         Sparkline::default().data(&mem_data).style(Style::default().fg(Color::Magenta)),
         m2,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::client::RuntimeConfig;
+    use crate::core::models::Overrides;
+    use crate::core::settings::{load_settings, settings_path, with_settings_dir};
+    use crossterm::event::KeyModifiers;
+    use std::collections::VecDeque;
+
+    /// 构造最小 AppState（字段全 pub，参照 app.rs test_app 的构造）。
+    fn test_state() -> AppState {
+        AppState {
+            settings: NetworkSettings::default(),
+            subs: Vec::new(),
+            overrides: Overrides::default(),
+            runtime: RuntimeConfig::default(),
+            api_ok: false,
+            api_confirmed: false,
+            traffic: VecDeque::new(),
+            mem_history: VecDeque::new(),
+            exit_ip: None,
+            notices: VecDeque::new(),
+        }
+    }
+
+    fn press(page: &mut DashboardPage, st: &mut AppState, code: KeyCode) -> UiCommand {
+        page.handle_key(KeyEvent::new(code, KeyModifiers::NONE), st)
+            .expect("开关按键应返回命令")
+    }
+
+    /// 断言返回 PatchConfigs 并解构出 (patch, saved, label)。
+    fn expect_patch(cmd: &UiCommand) -> (&serde_json::Value, bool, &str) {
+        match cmd {
+            UiCommand::PatchConfigs { patch, saved, label } => (patch, *saved, label),
+            _ => panic!("期望 PatchConfigs"),
+        }
+    }
+
+    // ---- next_mode 纯函数 ----
+
+    #[test]
+    fn next_mode_cycles_rule_global_direct() {
+        assert_eq!(next_mode("rule"), "global");
+        assert_eq!(next_mode("global"), "direct");
+        assert_eq!(next_mode("direct"), "rule");
+        // 空串/未知值一律 → global（保留原 match 语义）
+        assert_eq!(next_mode(""), "global");
+        assert_eq!(next_mode("unknown"), "global");
+    }
+
+    // ---- 双写成功：settings.toml 落盘 + 热切 PATCH ----
+
+    #[test]
+    fn toggle_t_persists_settings_and_patches() {
+        with_settings_dir(|| {
+            let mut st = test_state();
+            let mut page = DashboardPage::new();
+            let cmd = press(&mut page, &mut st, KeyCode::Char('t'));
+            let (patch, saved, label) = expect_patch(&cmd);
+            assert_eq!(*patch, serde_json::json!({"tun": {"enable": true}}));
+            assert!(saved, "保存应成功");
+            assert_eq!(label, "TUN");
+            // 内存双通道同步
+            assert!(st.settings.tun.enable, "st.settings 应同步为持久化值");
+            assert!(st.runtime.tun_enable, "运行时乐观更新");
+            // 磁盘：重新加载确认落盘
+            let back = load_settings().expect("应能重新加载");
+            assert!(back.tun.enable, "磁盘 settings.toml 应已更新");
+        });
+    }
+
+    #[test]
+    fn toggle_6_persists_settings_and_patches() {
+        with_settings_dir(|| {
+            let mut st = test_state();
+            let mut page = DashboardPage::new();
+            let cmd = press(&mut page, &mut st, KeyCode::Char('6'));
+            let (patch, saved, label) = expect_patch(&cmd);
+            assert_eq!(*patch, serde_json::json!({"ipv6": true}));
+            assert!(saved, "保存应成功");
+            assert_eq!(label, "IPv6");
+            assert!(st.settings.ipv6, "st.settings 应同步为持久化值");
+            assert!(st.runtime.ipv6, "运行时乐观更新");
+            let back = load_settings().expect("应能重新加载");
+            assert!(back.ipv6, "磁盘 settings.toml 应已更新");
+        });
+    }
+
+    #[test]
+    fn toggle_m_persists_settings_and_patches() {
+        with_settings_dir(|| {
+            let mut st = test_state();
+            st.runtime.mode = "global".into(); // 期望循环到 direct
+            let mut page = DashboardPage::new();
+            let cmd = press(&mut page, &mut st, KeyCode::Char('m'));
+            let (patch, saved, label) = expect_patch(&cmd);
+            assert_eq!(*patch, serde_json::json!({"mode": "direct"}));
+            assert!(saved, "保存应成功");
+            assert_eq!(label, "模式");
+            assert_eq!(st.settings.mode, "direct", "st.settings 应同步为持久化值");
+            assert_eq!(st.runtime.mode, "direct", "运行时乐观更新");
+            let back = load_settings().expect("应能重新加载");
+            assert_eq!(back.mode, "direct", "磁盘 settings.toml 应已更新");
+        });
+    }
+
+    // ---- 保存失败：热切不放弃 + 明确弹窗反馈 ----
+
+    #[test]
+    fn toggle_t_save_failure_still_patches_with_popup() {
+        with_settings_dir(|| {
+            // settings.toml 建成目录 → save_settings 的 rename 必然失败
+            std::fs::create_dir_all(settings_path()).unwrap();
+            let mut st = test_state();
+            let mut page = DashboardPage::new();
+            let cmd = press(&mut page, &mut st, KeyCode::Char('t'));
+            let (patch, saved, label) = expect_patch(&cmd);
+            assert_eq!(*patch, serde_json::json!({"tun": {"enable": true}}));
+            assert!(!saved, "保存失败时 saved 应为 false");
+            assert_eq!(label, "TUN");
+            // 热切不因保存失败而放弃：运行时乐观更新照常
+            assert!(st.runtime.tun_enable, "热切应照常进行");
+            // 明确反馈：弹窗「保存失败」（禁止静默部分成功）
+            match &page.popup {
+                Some(DashPopup::Msg(m)) => assert_eq!(m.title(), "保存失败"),
+                _ => panic!("保存失败时应弹「保存失败」弹窗"),
+            }
+            // 设置确实未持久化：settings.toml 仍是目录（无文件落盘）
+            assert!(!settings_path().is_file(), "失败时不应有文件落盘");
+            // 关键不变量：保存失败时 st.settings 不应更新——内存与磁盘一致，仍为旧值
+            assert!(!st.settings.tun.enable, "保存失败时 st.settings 不应更新");
+        });
+    }
 }

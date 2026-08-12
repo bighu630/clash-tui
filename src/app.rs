@@ -1542,7 +1542,8 @@ mod tests {
         assert_eq!(app.current, 4);
     }
 
-    /// 日志页 handle_key('e') 发 SetLogLevel 命令并循环级别。
+    /// 日志页 handle_key('e') 发 SetLogLevel 命令并循环级别
+    /// （Info.next()=Debug，见 client.rs log_level_cycle_and_str 固定的循环契约）。
     #[test]
     fn logs_page_e_key_cycles_level() {
         let mut app = test_app(24);
@@ -1551,7 +1552,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
             &mut app.state,
         );
-        assert!(matches!(cmd, Some(UiCommand::SetLogLevel(LogLevel::Warning))));
+        assert!(matches!(cmd, Some(UiCommand::SetLogLevel(LogLevel::Debug))));
     }
 
     /// 日志环形缓冲：超过 LOG_HISTORY 淘汰最旧。

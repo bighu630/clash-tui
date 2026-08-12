@@ -70,14 +70,14 @@
 ### core/client.rs
 - 新增模型（serde 反序列化，camelCase 重命名，字段缺失容忍）：
   - `ConnSnapshot { download_total, upload_total, connections: Vec<ConnInfo>, memory }`
-  - `ConnInfo { id, metadata: ConnMeta, upload, download, start: Option<DateTime<Utc>>, chains, rule, rule_payload, dl_speed, ul_speed, is_alive }`（dlSpeed/ulSpeed 可选字段，缺失为 0）
+  - `ConnInfo { id, meta: ConnMeta, upload, download, start: Option<DateTime<Utc>>, chains, rule, rule_payload, dl_speed, ul_speed, is_alive }`（dlSpeed/ulSpeed 可选字段，缺失为 0）
   - `ConnMeta { network, host, sniff_host, remote_destination, destination_ip, destination_port, source_ip, source_port, r#type, process_path }`
 - 新增 `Client::get_connections() -> Result<ConnSnapshot, ApiError>`（GET /connections，Bearer 鉴权，走现有 `request_text`）。
 - 单元测试：完整 JSON 解析、字段缺失容忍、connections 缺失/空、start 格式解析（RFC3339 + RFC3339Nano）。
 
 ### app.rs（AppState + 后台任务 + 事件循环）
 - `AppState` 新增 `connections: Vec<ConnInfo>`（轮询快照直接替换，无需 VecDeque）。
-- 新增 `UiEvent::ConnectionsFetched(Result<ConnSnapshot, String>)` 或独立 channel——**采用与 memory 一致的独立 mpsc channel 模式**（`spawn_connections_task`：每 3s 轮询，失败 sleep 2s 重连；API 状态联动复用 traffic 任务的 Api 信号即可，不额外通知）。
+- 新增 `UiEvent::ConnectionsFetched(Result<ConnSnapshot, String>)` 或独立 channel——**采用与 memory 一致的独立 mpsc channel 模式**（`spawn_connections_task`：每 3s 轮询，失败静默跳过，下个轮询周期自动重试；API 状态联动复用 traffic 任务的 Api 信号即可，不额外通知）。
 - 事件循环 `tokio::select!` 增加 `connections_rx.recv()` 分支；`run_loop` 签名增加参数。
 - 排序（展示前做，存原始顺序亦可）：**按 start 降序（最新在上），start 缺失排末尾；同 start 按 upload+download 降序**。
 - 状态保留上限 200 条（快照替换天然有界，此处仅防御性截断）。
@@ -106,7 +106,7 @@
 
 ## 错误处理
 
-- `get_connections` 失败（网络/HTTP 状态/JSON 解析）：轮询任务 sleep 2s 重试，保留上一次成功数据（列表不闪烁清空）；不产生新通知（API 状态联动由 traffic 任务负责，避免重复通知刷屏——与现有 memory 任务一致）。
+- `get_connections` 失败（网络/HTTP 状态/JSON 解析）：失败静默跳过，下个轮询周期自动重试（固定 3s interval），保留上一次成功数据（列表不闪烁清空）；不产生新通知（API 状态联动由 traffic 任务负责，避免重复通知刷屏——与现有 memory 任务一致）。
 - JSON 单字段缺失容忍为默认值；整个响应解析失败按错误重试。
 
 ## 测试

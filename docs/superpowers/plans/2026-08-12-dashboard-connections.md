@@ -20,7 +20,7 @@
 - Modify: `src/core/client.rs`（在 `MemoryFrame` 定义后追加模型；在 `memory_stream` 方法后追加 `get_connections`；在测试模块追加测试）
 - Test: `src/core/client.rs` 内 `mod tests`
 
-- [ ] **Step 1: 追加连接数据模型**（插在 `MemoryFrame` 定义之后、`ApiError` 之前）
+- [x] **Step 1: 追加连接数据模型**（插在 `MemoryFrame` 定义之后、`ApiError` 之前）
 
 ```rust
 /// 连接快照（GET /connections，camelCase 键）。
@@ -65,7 +65,7 @@ pub struct ConnMeta {
 }
 ```
 
-- [ ] **Step 2: 追加 `FromStr for ConnSnapshot`**（插在 `impl FromStr for MemoryFrame` 之后）
+- [x] **Step 2: 追加 `FromStr for ConnSnapshot`**（插在 `impl FromStr for MemoryFrame` 之后）
 
 遵循现有 Value 解析模式（容忍缺失字段）：
 
@@ -147,7 +147,7 @@ fn parse_conn(c: &serde_json::Value) -> Option<ConnInfo> {
 }
 ```
 
-- [ ] **Step 3: 追加 `Client::get_connections`**（插在 `memory_stream` 方法之后）
+- [x] **Step 3: 追加 `Client::get_connections`**（插在 `memory_stream` 方法之后）
 
 ```rust
     /// GET /connections → 连接快照（全量，一次返回）。
@@ -157,7 +157,7 @@ fn parse_conn(c: &serde_json::Value) -> Option<ConnInfo> {
     }
 ```
 
-- [ ] **Step 4: 单元测试**（追加到现有 `mod tests` 内，`use super::*;` 已含新类型）
+- [x] **Step 4: 单元测试**（追加到现有 `mod tests` 内，`use super::*;` 已含新类型）
 
 ```rust
     // ---------- /connections 解析 ----------
@@ -242,7 +242,7 @@ fn parse_conn(c: &serde_json::Value) -> Option<ConnInfo> {
     }
 ```
 
-- [ ] **Step 5: 假服务器增加 /connections 路由**（在 `spawn_api_server` 内 `"/memory" =>` 分支之后追加，写成与 `/traffic` 分支相同的"直接 write 后 return"风格，不并入底部 `let body` match）
+- [x] **Step 5: 假服务器增加 /connections 路由**（在 `spawn_api_server` 内 `"/memory" =>` 分支之后追加，写成与 `/traffic` 分支相同的"直接 write 后 return"风格，不并入底部 `let body` match）
 
 ```rust
                         "/connections" => {
@@ -260,10 +260,10 @@ fn parse_conn(c: &serde_json::Value) -> Option<ConnInfo> {
                         }
 ```
 
-- [ ] **Step 6: 运行测试并提交**
+- [x] **Step 6: 运行测试并提交**
 
 Run: `cargo test client 2>&1 | tail -5`
-Expected: `test result: ok.` 全部通过（原 174 + 新增 5 个：conn_snapshot_full_json / conn_snapshot_missing_and_empty / conn_start_parsing_variants / get_connections_ok / 以及原有项）
+Expected: `test result: ok.` 全部通过（原 174 + 新增 4 = 178：conn_snapshot_full_json / conn_snapshot_missing_and_empty / conn_start_parsing_variants / get_connections_ok）
 
 ```bash
 git add src/core/client.rs
@@ -280,13 +280,13 @@ git commit -m "feat: client 新增 /connections 快照模型与 get_connections"
 
 前置依赖：Task 1 已完成（`ConnSnapshot`/`ConnInfo` 已在 client.rs 导出，`use crate::core::client::{Client, ConnInfo, MemoryFrame, RuntimeConfig, TrafficFrame};` 需追加 `ConnInfo`——注意 Task 2 只用到 `ConnInfo`，`ConnSnapshot` 仅存在于 channel 类型中，需同样 import）。
 
-- [ ] **Step 1: 更新 import**
+- [x] **Step 1: 更新 import**
 
 ```rust
 use crate::core::client::{Client, ConnInfo, ConnSnapshot, MemoryFrame, RuntimeConfig, TrafficFrame};
 ```
 
-- [ ] **Step 2: AppState 增加 connections 字段**（`mem_history` 字段后追加；`load()` 与测试构造器同步）
+- [x] **Step 2: AppState 增加 connections 字段**（`mem_history` 字段后追加；`load()` 与测试构造器同步）
 
 ```rust
     pub connections: Vec<ConnInfo>,
@@ -294,7 +294,7 @@ use crate::core::client::{Client, ConnInfo, ConnSnapshot, MemoryFrame, RuntimeCo
 
 `load()` 中：`mem_history: VecDeque::new(),` 后加 `connections: Vec::new(),`。
 
-- [ ] **Step 3: 常量**（`TRAFFIC_HISTORY` 后追加）
+- [x] **Step 3: 常量**（`TRAFFIC_HISTORY` 后追加）
 
 ```rust
 /// 连接列表保留上限（快照替换天然有界，此处防御性截断）。
@@ -303,7 +303,7 @@ const CONNECTIONS_KEEP: usize = 200;
 const CONNECTIONS_POLL: Duration = Duration::from_secs(3);
 ```
 
-- [ ] **Step 4: 排序纯函数**（放在 `spawn_traffic_task` 之前的空闲位置，如 `now_rfc3339()` 附近）
+- [x] **Step 4: 排序纯函数**（放在 `spawn_traffic_task` 之前的空闲位置，如 `now_rfc3339()` 附近）
 
 ```rust
 /// 连接排序：最新建立的在前（start 降序），start 缺失排末尾；
@@ -317,7 +317,7 @@ fn sort_connections(conns: &mut [ConnInfo]) {
 }
 ```
 
-- [ ] **Step 5: 轮询后台任务**（`spawn_memory_task` 之后追加）
+- [x] **Step 5: 轮询后台任务**（`spawn_memory_task` 之后追加）
 
 ```rust
 /// connections 后台任务：每 3s 轮询 /connections 快照；失败静默跳过
@@ -337,7 +337,7 @@ fn spawn_connections_task(client: Arc<Client>, tx: mpsc::UnboundedSender<ConnSna
 }
 ```
 
-- [ ] **Step 6: run_loop 接入**（三处修改）
+- [x] **Step 6: run_loop 接入**（三处修改）
 
 (a) 签名追加参数：
 ```rust
@@ -361,7 +361,7 @@ fn spawn_connections_task(client: Arc<Client>, tx: mpsc::UnboundedSender<ConnSna
                 Act::Conns(snap) => self.on_conns(snap),
 ```
 
-- [ ] **Step 7: on_conns 处理器**（`on_memory` 之后追加）
+- [x] **Step 7: on_conns 处理器**（`on_memory` 之后追加）
 
 ```rust
     /// 连接快照 → 排序 → 截断上限 → 替换状态。
@@ -373,7 +373,7 @@ fn spawn_connections_task(client: Arc<Client>, tx: mpsc::UnboundedSender<ConnSna
     }
 ```
 
-- [ ] **Step 8: run() 入口接线**（两处修改）
+- [x] **Step 8: run() 入口接线**（两处修改）
 
 (a) channel 创建（`let (memory_tx, memory_rx) = ...` 后）：
 ```rust
@@ -390,7 +390,7 @@ fn spawn_connections_task(client: Arc<Client>, tx: mpsc::UnboundedSender<ConnSna
     let result = app.run_loop(traffic_rx, memory_rx, conns_rx, ui_rx, sudo_rx).await;
 ```
 
-- [ ] **Step 9: 测试构造器与单测**
+- [x] **Step 9: 测试构造器与单测**
 
 (a) `test_app` 中 `AppState { ... }` 构造：`mem_history: VecDeque::new(),` 后加 `connections: Vec::new(),`。
 
@@ -439,10 +439,10 @@ fn spawn_connections_task(client: Arc<Client>, tx: mpsc::UnboundedSender<ConnSna
     }
 ```
 
-- [ ] **Step 10: 运行测试并提交**
+- [x] **Step 10: 运行测试并提交**
 
 Run: `cargo test 2>&1 | grep -E "^test result|FAILED|error" | head`
-Expected: `test result: ok. 176 passed`（174 + sort_connections_order + on_conns_truncates_and_sorts）
+Expected: `test result: ok. 180 passed`（178 + sort_connections_order + on_conns_truncates_and_sorts）
 
 ```bash
 git add src/app.rs
@@ -459,11 +459,11 @@ git commit -m "feat: app 接入 /connections 3s 轮询、连接排序与状态"
 
 前置依赖：Task 2 已完成（`st.connections: Vec<ConnInfo>` 存在）。
 
-- [ ] **Step 1: import 追加**
+- [x] **Step 1: import 追加**
 
 `use crate::core::client::ConnInfo;`（追加到现有 `use crate::core::merger::...` 附近，与现有 import 风格一致）。
 
-- [ ] **Step 2: 布局常量与宽度判定纯函数**（`const` 或文件级 fn，放在 `render_status` 前）
+- [x] **Step 2: 布局常量与宽度判定纯函数**（`const` 或文件级 fn，放在 `render_status` 前）
 
 ```rust
 /// 连接框响应式隐藏阈值：body 宽度低于此值时不渲染左列连接框。
@@ -475,7 +475,7 @@ fn connections_visible(width: u16) -> bool {
 }
 ```
 
-- [ ] **Step 3: render() 重构**（替换原 `render` 方法体——原实现为 status + `[left, right]` 60/40 后调 `render_traffic(f, left, st)` 与 `render_totals(f, right, st)`；新实现如下）
+- [x] **Step 3: render() 重构**（替换原 `render` 方法体——原实现为 status + `[left, right]` 60/40 后调 `render_traffic(f, left, st)` 与 `render_totals(f, right, st)`；新实现如下）
 
 ```rust
     fn render(&mut self, f: &mut Frame, area: Rect, st: &AppState) {
@@ -503,7 +503,7 @@ fn connections_visible(width: u16) -> bool {
     }
 ```
 
-- [ ] **Step 4: render_right / render_network**（将原 `render_traffic` 整体替换为以下两个函数；标题由 ` 实时网速 ` 改为 ` 网络 `；速率行追加右对齐累计）
+- [x] **Step 4: render_right / render_network**（将原 `render_traffic` 整体替换为以下两个函数；标题由 ` 实时网速 ` 改为 ` 网络 `；速率行追加右对齐累计）
 
 ```rust
 /// 右列：网络（上 50%）+ 内存（下 50%）。
@@ -576,7 +576,7 @@ fn rate_row(label: &str, rate: u64, total: u64, color: Color, inner_width: u16) 
 
 注意：`Span::width()` 是 ratatui 提供的方法（`ratatui::text::Span::width(&self) -> usize`），无需额外 import。
 
-- [ ] **Step 5: render_connections**（新增，放在 `render_network` 之后；同时把原 `render_totals` 中"内存"部分抽成 `render_memory`，删除整个 `render_totals`）
+- [x] **Step 5: render_connections**（新增，放在 `render_network` 之后；同时把原 `render_totals` 中"内存"部分抽成 `render_memory`，删除整个 `render_totals`）
 
 ```rust
 /// 左列：最近连接列表（start 降序，已在 app 层排序）。
@@ -655,7 +655,7 @@ fn conn_host(c: &ConnInfo) -> String {
 }
 ```
 
-- [ ] **Step 6: render_memory**（从原 `render_totals` 中抽取内存部分，删除 `render_totals` 整体）
+- [x] **Step 6: render_memory**（从原 `render_totals` 中抽取内存部分，删除 `render_totals` 整体）
 
 ```rust
 /// 内存框：inuse 数值 + Sparkline。
@@ -686,7 +686,7 @@ fn render_memory(f: &mut Frame, area: Rect, st: &AppState) {
 }
 ```
 
-- [ ] **Step 7: 单元测试**（文件末尾追加 `#[cfg(test)] mod tests`）
+- [x] **Step 7: 单元测试**（文件末尾追加 `#[cfg(test)] mod tests`）
 
 ```rust
 #[cfg(test)]
@@ -760,10 +760,10 @@ mod tests {
 
 注意：`Line::to_string()` 将 spans 拼接为字符串（不含样式），可用于断言。
 
-- [ ] **Step 8: 运行测试并提交**
+- [x] **Step 8: 运行测试并提交**
 
 Run: `cargo test 2>&1 | grep -E "^test result|FAILED|error\[|error:" | head -20`
-Expected: `test result: ok. 179 passed`（176 + 3 新增）。app.rs 既有"小终端回归整帧渲染不 panic"测试（TestBackend 宽 30 < 60）会覆盖窄窗口路径；若有任何 test 失败或编译错误，修复后重跑。
+Expected: `test result: ok. 183 passed`（180 + 3 新增）。app.rs 既有"小终端回归整帧渲染不 panic"测试（TestBackend 宽 30 < 60）会覆盖窄窗口路径；若有任何 test 失败或编译错误，修复后重跑。
 
 ```bash
 git add src/ui/dashboard.rs
@@ -779,7 +779,7 @@ git commit -m "feat: 仪表盘布局重构——连接框（响应式）+ 网络
 
 前置：Task 1-3 分支代码已提交（README 描述与代码一致即可，无编译依赖，可与 Task 1/2 并行，但推荐在 Task 3 完成后做以便核对最终渲染效果；若并行则按本任务描述直接改）。
 
-- [ ] **Step 1: 更新简介与 ASCII 图**（约 13-42 行区域）
+- [x] **Step 1: 更新简介与 ASCII 图**（约 13-42 行区域）
 
 - 第 13 行附近 `**仪表盘（首页）**——模式/TUN/IPv6/出口 IP 热切换、实时网速双曲线、总流量、内存` 改为 `**仪表盘（首页）**——模式/TUN/IPv6/出口 IP 热切换、连接列表、网络速率/累计流量、内存`。
 - ASCII 图（约 20-42 行）中：
@@ -789,18 +789,18 @@ git commit -m "feat: 仪表盘布局重构——连接框（响应式）+ 网络
   - 内存框示意保持。
   - 图中响应式说明：左列连接框在窗口过窄（<60 列）时隐藏。
 
-- [ ] **Step 2: 更新布局要点列表**（约 50-51 行）
+- [x] **Step 2: 更新布局要点列表**（约 50-51 行）
 
 - 现 `- 左 60%：实时网速双 Sparkline（上行绿色、下行蓝色，120 样本环形缓冲）+ 当前速率` 改为 `- 左 60%：连接列表（GET /connections 每 3 秒轮询，按建立时间倒序；目标 host + TCP/UDP 色标 + ↑↓ 流量；窗口宽度 < 60 列时自动隐藏，网络/内存占满全宽）`
 - 现 `- 右 40%：总流量（upTotal/downTotal 大数字）+ 内存占用（inuse + Sparkline）` 改为 `- 右 40%：网络（上行/下行速率左对齐 + 累计流量右对齐，双 Sparkline；累计来自 /traffic 流 upTotal/downTotal）+ 内存占用（inuse + Sparkline）`
 
-- [ ] **Step 3: 全文替换残留的「实时网速」字样**（帮助文本/按键表/FAQ 中如有）
+- [x] **Step 3: 全文替换残留的「实时网速」字样**（帮助文本/按键表/FAQ 中如有）
 
 Run: `grep -n "实时网速\|总流量" README.md`
 - 所有"实时网速"改为"网络"（描述语境）或"网络框"；"总流量"改为"累计流量"（如提及）。
 - 注意：不要改动与本次无关的段落（如 API 表 `PATCH /configs` 等）。`docs/` 目录下其他文档不动。
 
-- [ ] **Step 4: 核对并提交**
+- [x] **Step 4: 核对并提交**
 
 Run: `grep -n "实时网速" README.md`（应无输出）；`grep -n "连接" README.md | head`（应有新描述）
 Expected: 无残留旧词；README 与实现布局一致。
@@ -816,11 +816,11 @@ git commit -m "docs: README 仪表盘节同步连接框/网络框布局"
 
 **Files:** 无（验证 + 汇总）
 
-- [ ] **Step 1: 全量测试 + 构建**
+- [x] **Step 1: 全量测试 + 构建**
 
 Run: `cargo test 2>&1 | tail -3` 与 `cargo build 2>&1 | tail -1`
-Expected: `test result: ok. 179 passed`；`Finished` 无 warning（或仅既有 warning）。
+Expected: `test result: ok. 183 passed`；`Finished` 无 warning（或仅既有 warning）。
 
-- [ ] **Step 2: 更新计划勾选状态**（把本文件中各任务 checkbox 勾选；如用 executing-plans 由执行者处理）
+- [x] **Step 2: 更新计划勾选状态**（把本文件中各任务 checkbox 勾选；如用 executing-plans 由执行者处理）
 
-- [ ] **Step 3: 汇报**：向 feature_lead 报告：改动文件清单、测试数（174 → 179）、端到端验证建议（连真实 mihomo 时 `GET /connections` 有连接则列表显示；缩窄终端观察连接框隐藏）、README 同步情况、与 `.worktrees/fix-dashboard-toggle-persist` 会话的潜在合入冲突提示（双方同改 dashboard.rs，其改动在 handle_key 区域、本功能在 render 区域，git 三路合并可自动处理非重叠 hunk）。
+- [x] **Step 3: 汇报**：向 feature_lead 报告：改动文件清单、测试数（174 → 183）、端到端验证建议（连真实 mihomo 时 `GET /connections` 有连接则列表显示；缩窄终端观察连接框隐藏）、README 同步情况、与 `.worktrees/fix-dashboard-toggle-persist` 会话的潜在合入冲突提示（双方同改 dashboard.rs，其改动在 handle_key 区域、本功能在 render 区域，git 三路合并可自动处理非重叠 hunk）。

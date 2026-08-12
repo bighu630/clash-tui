@@ -50,7 +50,8 @@ pub struct AppState {
     pub exit_ip: Option<String>,
     /// mihomo 日志环形缓冲（logs 后台任务填充，日志页只读展示）。
     pub logs: VecDeque<LogEntry>,
-    pub notices: VecDeque<String>,
+    /// 通知（带到达时刻）。整组共享截止时间（notice_deadline），到期整组同消。
+    pub notices: VecDeque<(Instant, String)>,
 }
 
 impl AppState {
@@ -59,21 +60,21 @@ impl AppState {
         let settings = match load_settings() {
             Ok(s) => s,
             Err(e) => {
-                notices.push_back(format!("[✗] 加载设置失败: {e}"));
+                notices.push_back((Instant::now(), format!("[✗] 加载设置失败: {e}")));
                 NetworkSettings::default()
             }
         };
         let subs = match load_subscriptions() {
             Ok(s) => s,
             Err(e) => {
-                notices.push_back(format!("[✗] 加载订阅失败: {e}"));
+                notices.push_back((Instant::now(), format!("[✗] 加载订阅失败: {e}")));
                 Vec::new()
             }
         };
         let overrides = match load_overrides() {
             Ok(o) => o,
             Err(e) => {
-                notices.push_back(format!("[✗] 加载规则覆盖失败: {e}"));
+                notices.push_back((Instant::now(), format!("[✗] 加载规则覆盖失败: {e}")));
                 Overrides::default()
             }
         };
@@ -93,9 +94,9 @@ impl AppState {
         }
     }
 
-    /// 追加通知，保留最近 5 条。
+    /// 追加通知（记录到达时刻），保留最近 5 条。
     pub fn notice(&mut self, msg: String) {
-        self.notices.push_back(msg);
+        self.notices.push_back((Instant::now(), msg));
         while self.notices.len() > 5 {
             self.notices.pop_front();
         }
@@ -168,6 +169,34 @@ const LOG_HISTORY: usize = 1000;
 /// API 状态通知去抖窗口：同向状态变化在此窗口内不重复入列通知
 /// （traffic 流断连与 5s 轮询成功竞态会造成高频翻转刷屏）。
 const API_NOTICE_DEBOUNCE: Duration = Duration::from_secs(3);
+
+/// 通知类型时长：`[✗]`/`[!]` 错误警告 10s，其余（成功/普通）5s。
+const NOTICE_OK_TTL: Duration = Duration::from_secs(5);
+const NOTICE_ERR_TTL: Duration = Duration::from_secs(10);
+
+/// 单条通知的类型时长。
+fn notice_ttl(text: &str) -> Duration {
+    if text.starts_with("[✗]") || text.starts_with("[!]") {
+        NOTICE_ERR_TTL
+    } else {
+        NOTICE_OK_TTL
+    }
+}
+
+/// 整组通知截止时间：组内所有 `到达时刻 + 类型时长` 的最大值
+/// （锚定"时间最长的一条"，不管新旧）；空组返回 None。
+/// 调用方以 `deadline > now` 判定整组是否可见，到期整组同时消失。
+/// 入参为通知引用迭代器（&[(Instant, String)] / &VecDeque 均可）。
+fn notice_deadline<'a>(notices: impl IntoIterator<Item = &'a (Instant, String)>) -> Option<Instant> {
+    notices
+        .into_iter()
+        .map(|(at, text)| {
+            // 1.88 无 Instant::saturating_add：checked_add 溢出（实际不可能）时
+            // 回退到 at 本身（立即到期），不 panic
+            (*at).checked_add(notice_ttl(text)).unwrap_or(*at)
+        })
+        .max()
+}
 
 const HELP_LINES: &[&str] = &[
     "全局按键:",
@@ -245,14 +274,17 @@ where
     fn draw(&mut self) -> Result<CompletedFrame<'_>, BoxError> {
         let tabs: Vec<String> = TABS.iter().map(|s| s.to_string()).collect();
         let current = self.current;
-        let notices: Vec<(String, bool)> = self
-            .state
-            .notices
-            .iter()
-            .rev()
-            .take(3)
-            .map(|n| (n.clone(), n.starts_with("[✓]")))
-            .collect();
+        let now = Instant::now();
+        // 整组共享截止时间：到期整组同时清除（避免一条条过期触发多次重绘）
+        let notices_visible = notice_deadline(&self.state.notices).is_some_and(|d| d > now);
+        if !notices_visible {
+            self.state.notices.clear();
+        }
+        let visible_notice_rows = if notices_visible {
+            self.state.notices.len().min(3)
+        } else {
+            0
+        };
         let hints = page_hints(current);
 
         let frame = self.terminal.draw(|f| {
@@ -260,7 +292,7 @@ where
             let [top, middle, bottom] = Layout::vertical([
                 Constraint::Length(3),
                 Constraint::Min(1),
-                Constraint::Length(4),
+                Constraint::Length(1 + visible_notice_rows as u16),
             ])
             .areas(area);
 
@@ -295,8 +327,8 @@ where
             // 通知最多占到底栏高度-1 行（最后一行是按键提示）；终端过小时直接截断，
             // 避免 y 超出 buffer 导致 ratatui Buffer::index_of panic
             let (notice_rows, hint_y) = bottom_bar_rows(bottom, area.height);
-            for (i, (text, ok)) in notices.iter().take(notice_rows as usize).enumerate() {
-                let style = if *ok {
+            for (i, (_, text)) in st.notices.iter().rev().take(notice_rows as usize).enumerate() {
+                let style = if text.starts_with("[✓]") {
                     Style::default().fg(Color::Green)
                 } else if text.starts_with("[!]") {
                     Style::default().fg(Color::Yellow)
@@ -1158,30 +1190,33 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     /// 底栏行计算纯函数：任意终端高度下提示行与通知行数都不越界。
-    /// 回归：h=1/2 时 bottom.height=0，此前 hint_y=bottom.y 越出 buffer 顶。
+    /// 回归：h=1/2 时 bottom.height=0，此前 hint_y=bottom.y 越出 buffer 顶；
+    /// 动态底栏：可见通知 0..=3 行（通知 + 提示）全扫。
     #[test]
     fn bottom_bar_rows_always_in_bounds() {
-        for h in 0..=30u16 {
-            let area = Rect::new(0, 0, 30, h);
-            let [_, _, bottom] = Layout::vertical([
-                Constraint::Length(3),
-                Constraint::Min(1),
-                Constraint::Length(4),
-            ])
-            .areas(area);
-            let (notice_rows, hint_y) = bottom_bar_rows(bottom, h);
-            assert!(notice_rows <= h, "h={h}: notice_rows {notice_rows} > 高度");
-            match hint_y {
-                Some(y) => {
-                    assert!(y < h, "h={h}: hint_y {y} >= 高度");
-                    assert!(y >= bottom.y, "h={h}: hint_y {y} < bottom.y {}", bottom.y);
-                    assert_eq!(
-                        y - bottom.y,
-                        notice_rows,
-                        "h={h}: 通知行数应等于 hint_y - bottom.y"
-                    );
+        for n in 0..=3u16 {
+            for h in 0..=30u16 {
+                let area = Rect::new(0, 0, 30, h);
+                let [_, _, bottom] = Layout::vertical([
+                    Constraint::Length(3),
+                    Constraint::Min(1),
+                    Constraint::Length(1 + n),
+                ])
+                .areas(area);
+                let (notice_rows, hint_y) = bottom_bar_rows(bottom, h);
+                assert!(notice_rows <= h, "n={n} h={h}: notice_rows {notice_rows} > 高度");
+                match hint_y {
+                    Some(y) => {
+                        assert!(y < h, "n={n} h={h}: hint_y {y} >= 高度");
+                        assert!(y >= bottom.y, "n={n} h={h}: hint_y {y} < bottom.y {}", bottom.y);
+                        assert_eq!(
+                            y - bottom.y,
+                            notice_rows,
+                            "n={n} h={h}: 通知行数应等于 hint_y - bottom.y"
+                        );
+                    }
+                    None => assert_eq!(notice_rows, 0, "n={n} h={h}: 无提示行时通知也应为 0"),
                 }
-                None => assert_eq!(notice_rows, 0, "h={h}: 无提示行时通知也应为 0"),
             }
         }
     }
@@ -1348,7 +1383,7 @@ mod tests {
             app.state
                 .notices
                 .iter()
-                .any(|n| n.contains("[✓] 已切换TUN并已保存")),
+                .any(|(_, t)| t.contains("[✓] 已切换TUN并已保存")),
             "应通知成功并保存: {:?}",
             app.state.notices
         );
@@ -1368,7 +1403,7 @@ mod tests {
             app.state
                 .notices
                 .iter()
-                .any(|n| n.contains("已切换TUN") && n.contains("未能保存")),
+                .any(|(_, t)| t.contains("已切换TUN") && t.contains("未能保存")),
             "应通知已切换但未能保存: {:?}",
             app.state.notices
         );
@@ -1452,7 +1487,7 @@ mod tests {
         assert!(app.result_popup.is_none(), "恢复成功后应关闭陈旧错误弹窗");
         assert_eq!(app.state.exit_ip.as_deref(), Some("1.2.3.4"));
         assert!(
-            app.state.notices.iter().any(|n| n.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
+            app.state.notices.iter().any(|(_, t)| t.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
             "应通知恢复: {:?}",
             app.state.notices
         );
@@ -1460,7 +1495,7 @@ mod tests {
         app.on_ui_event(UiEvent::ExitIp(Ok("5.6.7.8".into())));
         assert_eq!(app.state.exit_ip.as_deref(), Some("5.6.7.8"));
         assert!(
-            !app.state.notices.iter().any(|n| n.contains("5.6.7.8")),
+            !app.state.notices.iter().any(|(_, t)| t.contains("5.6.7.8")),
             "无失败历史时不应再通知恢复: {:?}",
             app.state.notices
         );
@@ -1486,7 +1521,7 @@ mod tests {
         );
         assert!(!app.exit_ip_was_error, "恢复后应清除失败标记");
         assert!(
-            app.state.notices.iter().any(|n| n.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
+            app.state.notices.iter().any(|(_, t)| t.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
             "应通知恢复: {:?}",
             app.state.notices
         );
@@ -1531,6 +1566,69 @@ mod tests {
         sort_connections(&mut conns);
         let ids: Vec<&str> = conns.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec!["dup-1", "dup-2", "dup-3"]);
+    }
+
+    /// 组截止时间 = 组内「到达+时长」最大的一条（锚定时间最长，不管新旧）。
+    #[test]
+    fn notice_deadline_anchors_longest() {
+        let now = Instant::now();
+        // 仅成功通知：5s
+        let d = notice_deadline(&[(now, "[✓] a".to_string())]).unwrap();
+        assert_eq!(d, now + NOTICE_OK_TTL);
+        // 错误通知：10s
+        let d = notice_deadline(&[(now, "[✗] a".to_string())]).unwrap();
+        assert_eq!(d, now + NOTICE_ERR_TTL);
+        // 旧成功 + 新错误：锚定新错误的 10s
+        let old = now - Duration::from_secs(3);
+        let d = notice_deadline(&[
+            (old, "[✓] old".to_string()),
+            (now, "[✗] new".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(d, now + NOTICE_ERR_TTL);
+        // 旧错误 + 新成功：仍锚定错误（到达早，但时长最长）
+        let old_err = now - Duration::from_secs(2);
+        let d = notice_deadline(&[
+            (old_err, "[✗] old".to_string()),
+            (now, "[✓] new".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(d, old_err + NOTICE_ERR_TTL);
+        // 空组：None
+        assert_eq!(notice_deadline(&[]), None);
+    }
+
+    /// 过期整组在 draw 时同时清除（不留半组）。
+    #[test]
+    fn expired_notices_cleared_on_draw() {
+        let mut app = test_app(24);
+        app.state.notices.push_back((
+            Instant::now() - Duration::from_secs(60),
+            "[✓] 旧通知".to_string(),
+        ));
+        app.state.notices.push_back((
+            Instant::now() - Duration::from_secs(60),
+            "[✗] 更旧".to_string(),
+        ));
+        let _ = app.draw().expect("draw 不应失败");
+        assert!(app.state.notices.is_empty(), "过期整组应被清除");
+    }
+
+    /// 无通知时底栏收成 1 行（仅按键提示）；有通知时通知文本可见。
+    #[test]
+    fn bottom_bar_collapses_without_notices() {
+        let mut app = test_app(24);
+        let frame = app.draw().expect("draw 不应失败");
+        let cell = frame.buffer.cell((0, 23)).expect("提示行应在最后一行");
+        assert!(
+            cell.symbol().starts_with('['),
+            "无通知时最后一行应为按键提示: {:?}",
+            cell.symbol()
+        );
+        // 有通知：通知文本渲染可见
+        app.state.notice("[✓] 测试通知".to_string());
+        let text = buffer_text(&mut app);
+        assert!(text.contains("测试通知"), "通知应可见: {text}");
     }
 
     /// 数字键 5 切到日志页（index 4）。

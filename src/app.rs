@@ -153,7 +153,7 @@ enum KeyAction {
     Interactive(InteractiveTask),
 }
 
-const TABS: [&str; 4] = ["仪表盘", "订阅", "规则组", "规则"];
+const TABS: [&str; 5] = ["仪表盘", "订阅", "规则组", "规则", "日志"];
 
 const TRAFFIC_HISTORY: usize = 120;
 
@@ -200,6 +200,12 @@ const HELP_LINES: &[&str] = &[
     "  Enter              编辑规则",
     "  K / J              上移 / 下移",
     "  d                  删除规则",
+    "",
+    "日志:",
+    "  e                  切换级别 (error → warning → info → debug)",
+    "  ↑ / ↓ / PgUp / PgDn 回溯日志（暂停跟随）",
+    "  f / End             恢复跟随底部",
+    "  c                  清空日志",
 ];
 
 struct App<B: Backend> {
@@ -375,7 +381,7 @@ where
             KeyCode::Left => {
                 self.current = (self.current + self.pages.len() - 1) % self.pages.len();
             }
-            KeyCode::Char(c) if ('1'..='4').contains(&c) => {
+            KeyCode::Char(c) if ('1'..='5').contains(&c) => {
                 self.current = c.to_digit(10).unwrap_or(1) as usize - 1;
             }
             KeyCode::Char('?') => {
@@ -895,12 +901,20 @@ fn page_hints(current: usize) -> Vec<(String, String)> {
             ("m".into(), "成员".into()),
             ("d".into(), "删除".into()),
         ],
-        _ => vec![
+        3 => vec![
             ("n".into(), "新建".into()),
             ("Enter".into(), "编辑".into()),
             ("K/J".into(), "移动".into()),
             ("d".into(), "删除".into()),
         ],
+        4 => vec![
+            ("e".into(), "级别".into()),
+            ("c".into(), "清空".into()),
+            ("f".into(), "跟随".into()),
+            ("↑↓".into(), "滚动".into()),
+        ],
+        // 兜底：current 实际恒在 0..=4（由 pages.len() 决定），此处仅满足穷尽性
+        _ => vec![],
     };
     hints.push(("Tab".into(), "切页".into()));
     hints.push(("?".into(), "帮助".into()));
@@ -1091,6 +1105,7 @@ pub async fn run() -> Result<(), BoxError> {
         Box::new(SubscriptionsPage::new()),
         Box::new(GroupsPage::new()),
         Box::new(RulesPage::new()),
+        Box::new(crate::ui::logs::LogsPage::new()),
     ];
 
     let mut app = App {
@@ -1298,6 +1313,7 @@ mod tests {
                 Box::new(SubscriptionsPage::new()),
                 Box::new(GroupsPage::new()),
                 Box::new(RulesPage::new()),
+                Box::new(crate::ui::logs::LogsPage::new()),
             ],
             current: 0,
             client,
@@ -1515,6 +1531,27 @@ mod tests {
         sort_connections(&mut conns);
         let ids: Vec<&str> = conns.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec!["dup-1", "dup-2", "dup-3"]);
+    }
+
+    /// 数字键 5 切到日志页（index 4）。
+    #[test]
+    fn tab_key_5_switches_to_logs_page() {
+        let mut app = test_app(24);
+        assert_eq!(app.pages.len(), 5);
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+        assert_eq!(app.current, 4);
+    }
+
+    /// 日志页 handle_key('e') 发 SetLogLevel 命令并循环级别。
+    #[test]
+    fn logs_page_e_key_cycles_level() {
+        let mut app = test_app(24);
+        app.current = 4;
+        let cmd = app.pages[4].handle_key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            &mut app.state,
+        );
+        assert!(matches!(cmd, Some(UiCommand::SetLogLevel(LogLevel::Warning))));
     }
 
     /// 日志环形缓冲：超过 LOG_HISTORY 淘汰最旧。

@@ -17,7 +17,9 @@ use ratatui::{CompletedFrame, Terminal};
 use tokio::sync::mpsc;
 
 use crate::core::apply::{apply_config, validate_config, ApplyOutcome};
-use crate::core::client::{Client, ConnInfo, ConnSnapshot, MemoryFrame, RuntimeConfig, TrafficFrame};
+use crate::core::client::{
+    Client, ConnInfo, ConnSnapshot, LogEntry, LogLevel, MemoryFrame, RuntimeConfig, TrafficFrame,
+};
 use crate::core::exit_ip::{self, ProxyPorts};
 use crate::core::models::{NetworkSettings, Overrides, Subscription, SubscriptionCache};
 use crate::core::settings::{load_overrides, load_settings, load_subscriptions, save_subscriptions};
@@ -46,6 +48,8 @@ pub struct AppState {
     pub mem_history: VecDeque<u64>,
     pub connections: Vec<ConnInfo>,
     pub exit_ip: Option<String>,
+    /// mihomo 日志环形缓冲（logs 后台任务填充，日志页只读展示）。
+    pub logs: VecDeque<LogEntry>,
     pub notices: VecDeque<String>,
 }
 
@@ -84,6 +88,7 @@ impl AppState {
             mem_history: VecDeque::new(),
             connections: Vec::new(),
             exit_ip: None,
+            logs: VecDeque::new(),
             notices,
         }
     }
@@ -110,6 +115,8 @@ pub enum UiCommand {
     FetchExitIp,
     ReloadConfigs,
     InstallSetup,
+    /// 日志页切换显示级别：主循环转发给 logs 后台任务触发 ?level= 重连。
+    SetLogLevel(LogLevel),
 }
 
 /// 后台任务 → 主循环的事件。
@@ -124,6 +131,8 @@ pub enum UiEvent {
     SubscriptionFetched(usize, Result<SubscriptionCache, String>),
     ExitIp(Result<String, String>),
     ConfigsRefreshed(Result<RuntimeConfig, String>),
+    /// logs 后台任务推送的单条日志。
+    LogLine(LogEntry),
 }
 
 /// traffic 后台任务发往主循环的消息。
@@ -152,6 +161,9 @@ const TRAFFIC_HISTORY: usize = 120;
 const CONNECTIONS_KEEP: usize = 200;
 /// /connections 轮询间隔。
 const CONNECTIONS_POLL: Duration = Duration::from_secs(3);
+
+/// 日志保留上限（环形缓冲，超出淘汰最旧）。
+const LOG_HISTORY: usize = 1000;
 
 /// API 状态通知去抖窗口：同向状态变化在此窗口内不重复入列通知
 /// （traffic 流断连与 5s 轮询成功竞态会造成高频翻转刷屏）。
@@ -200,6 +212,8 @@ struct App<B: Backend> {
     cmd_rx: mpsc::UnboundedReceiver<UiCommand>,
     sudo_tx: mpsc::UnboundedSender<String>,
     exit_trigger: mpsc::UnboundedSender<()>,
+    /// 日志级别切换通道（spawn_command → spawn_logs_task）。
+    log_level_tx: mpsc::UnboundedSender<LogLevel>,
     /// 代理端口快照（ApplyDone 成功后更新并触发重测）
     exit_ports: Arc<Mutex<ProxyPorts>>,
     /// 需要用户确认后执行的交互任务（sudo 密码/首次安装）
@@ -386,6 +400,7 @@ where
         mut traffic_rx: mpsc::UnboundedReceiver<BgMsg>,
         mut memory_rx: mpsc::UnboundedReceiver<MemoryFrame>,
         mut conns_rx: mpsc::UnboundedReceiver<ConnSnapshot>,
+        mut logs_rx: mpsc::UnboundedReceiver<LogEntry>,
         mut ui_rx: mpsc::UnboundedReceiver<UiEvent>,
         mut sudo_rx: mpsc::UnboundedReceiver<String>,
     ) -> Result<(), BoxError> {
@@ -400,6 +415,7 @@ where
                 Bg(BgMsg),
                 Mem(MemoryFrame),
                 Conns(ConnSnapshot),
+                Log(LogEntry),
                 Ui(UiEvent),
                 Cmd(UiCommand),
                 Sudo(String),
@@ -416,6 +432,7 @@ where
                 msg = traffic_rx.recv() => match msg { Some(m) => Act::Bg(m), None => continue },
                 msg = memory_rx.recv() => match msg { Some(m) => Act::Mem(m), None => continue },
                 msg = conns_rx.recv() => match msg { Some(m) => Act::Conns(m), None => continue },
+                msg = logs_rx.recv() => match msg { Some(m) => Act::Log(m), None => continue },
                 ev = ui_rx.recv() => match ev { Some(e) => Act::Ui(e), None => continue },
                 cmd = self.cmd_rx.recv() => match cmd { Some(c) => Act::Cmd(c), None => continue },
                 yaml = sudo_rx.recv() => match yaml { Some(y) => Act::Sudo(y), None => continue },
@@ -445,6 +462,7 @@ where
                 Act::Bg(msg) => self.on_bg_msg(msg),
                 Act::Mem(frame) => self.on_memory(frame),
                 Act::Conns(snap) => self.on_conns(snap),
+                Act::Log(entry) => self.on_log(entry),
                 Act::Ui(ev) => self.on_ui_event(ev),
                 Act::Cmd(cmd) => self.spawn_command(cmd),
                 Act::Sudo(yaml) => {
@@ -511,6 +529,13 @@ where
             self.state.mem_history.pop_front();
         }
         self.state.mem_history.push_back(frame.inuse);
+    }
+
+    fn on_log(&mut self, entry: LogEntry) {
+        if self.state.logs.len() >= LOG_HISTORY {
+            self.state.logs.pop_front();
+        }
+        self.state.logs.push_back(entry);
     }
 
     /// 连接快照 → 排序 → 截断上限 → 替换状态。
@@ -657,6 +682,7 @@ where
                     self.set_api_ok(false, Some(&e));
                 }
             },
+            UiEvent::LogLine(entry) => self.on_log(entry),
         }
     }
 
@@ -751,6 +777,9 @@ where
                     ),
                     InteractiveTask::Install,
                 ));
+            }
+            UiCommand::SetLogLevel(level) => {
+                let _ = self.log_level_tx.send(level);
             }
         }
     }
@@ -943,6 +972,47 @@ fn spawn_memory_task(client: Arc<Client>, tx: mpsc::UnboundedSender<MemoryFrame>
     });
 }
 
+/// logs 后台任务：流式拉取 /logs?level=，失败/断开 sleep 2s 重连；
+/// 级别切换经 level_rx 通知，立即以新级别重连。
+fn spawn_logs_task(
+    client: Arc<Client>,
+    mut level_rx: mpsc::UnboundedReceiver<LogLevel>,
+    tx: mpsc::UnboundedSender<LogEntry>,
+) {
+    tokio::spawn(async move {
+        let mut level = LogLevel::Info;
+        loop {
+            let mut stream = match client.log_stream(level).await {
+                Ok(s) => s,
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+            loop {
+                tokio::select! {
+                    new_level = level_rx.recv() => match new_level {
+                        Some(l) => {
+                            level = l;
+                            break; // 以新级别重连
+                        }
+                        None => return, // 主循环已退出
+                    },
+                    item = stream.next() => match item {
+                        Some(Ok(entry)) => {
+                            if tx.send(entry).is_err() {
+                                return;
+                            }
+                        }
+                        Some(Err(_)) | None => break, // 断开 → 外层重连
+                    },
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+}
+
 /// connections 后台任务：每 3s 轮询 /connections 快照；失败静默跳过
 /// （下次轮询重试，保留上一次成功数据；API 状态联动由 traffic 任务负责）。
 fn spawn_connections_task(client: Arc<Client>, tx: mpsc::UnboundedSender<ConnSnapshot>) {
@@ -1000,6 +1070,8 @@ pub async fn run() -> Result<(), BoxError> {
     let (traffic_tx, traffic_rx) = mpsc::unbounded_channel();
     let (memory_tx, memory_rx) = mpsc::unbounded_channel();
     let (conns_tx, conns_rx) = mpsc::unbounded_channel();
+    let (log_tx, log_rx) = mpsc::unbounded_channel();
+    let (log_level_tx, log_level_rx) = mpsc::unbounded_channel();
     let (sudo_tx, sudo_rx) = mpsc::unbounded_channel();
     let (exit_trigger, trigger_rx) = mpsc::unbounded_channel();
     let exit_ports = Arc::new(Mutex::new(ProxyPorts::from_settings(&state.settings)));
@@ -1007,6 +1079,7 @@ pub async fn run() -> Result<(), BoxError> {
     spawn_traffic_task(client.clone(), traffic_tx);
     spawn_memory_task(client.clone(), memory_tx);
     spawn_connections_task(client.clone(), conns_tx);
+    spawn_logs_task(client.clone(), log_level_rx, log_tx);
     spawn_exit_ip_task(exit_ports.clone(), trigger_rx, ui_tx.clone());
 
     let backend = CrosstermBackend::new(io::stdout());
@@ -1030,6 +1103,7 @@ pub async fn run() -> Result<(), BoxError> {
         cmd_rx,
         sudo_tx,
         exit_trigger,
+        log_level_tx,
         exit_ports,
         pending_confirm: None,
         help_popup: None,
@@ -1056,7 +1130,9 @@ pub async fn run() -> Result<(), BoxError> {
             InteractiveTask::Install,
         ));
     }
-    let result = app.run_loop(traffic_rx, memory_rx, conns_rx, ui_rx, sudo_rx).await;
+    let result = app
+        .run_loop(traffic_rx, memory_rx, conns_rx, log_rx, ui_rx, sudo_rx)
+        .await;
     let _ = app.terminal.show_cursor();
     result
 }
@@ -1205,12 +1281,14 @@ mod tests {
             mem_history: VecDeque::new(),
             connections: Vec::new(),
             exit_ip: None,
+            logs: VecDeque::new(),
             notices: VecDeque::new(),
         };
         let (ui_tx, _) = mpsc::unbounded_channel();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (sudo_tx, _) = mpsc::unbounded_channel();
         let (exit_trigger, _) = mpsc::unbounded_channel();
+        let (log_level_tx, _) = mpsc::unbounded_channel();
         let client = Arc::new(Client::new(&state.settings));
         let exit_ports = Arc::new(Mutex::new(ProxyPorts::from_settings(&state.settings)));
         App {
@@ -1228,6 +1306,7 @@ mod tests {
             cmd_rx,
             sudo_tx,
             exit_trigger,
+            log_level_tx,
             exit_ports,
             pending_confirm: None,
             help_popup: None,
@@ -1436,6 +1515,35 @@ mod tests {
         sort_connections(&mut conns);
         let ids: Vec<&str> = conns.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec!["dup-1", "dup-2", "dup-3"]);
+    }
+
+    /// 日志环形缓冲：超过 LOG_HISTORY 淘汰最旧。
+    #[test]
+    fn logs_push_truncates_at_cap() {
+        let mut app = test_app(24);
+        for i in 0..(LOG_HISTORY + 100) {
+            app.on_log(LogEntry {
+                time: None,
+                level: LogLevel::Info,
+                message: format!("m{i}"),
+            });
+        }
+        assert_eq!(app.state.logs.len(), LOG_HISTORY);
+        assert_eq!(app.state.logs.front().unwrap().message, "m100");
+        assert_eq!(
+            app.state.logs.back().unwrap().message,
+            format!("m{}", LOG_HISTORY + 99)
+        );
+    }
+
+    /// SetLogLevel 命令转发到 logs 后台任务通道。
+    #[test]
+    fn set_log_level_forwards_to_task_channel() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut app = test_app(24);
+        app.log_level_tx = tx;
+        app.spawn_command(UiCommand::SetLogLevel(LogLevel::Debug));
+        assert_eq!(rx.try_recv(), Ok(LogLevel::Debug));
     }
 
     /// on_conns：快照替换 + 上限截断 200。

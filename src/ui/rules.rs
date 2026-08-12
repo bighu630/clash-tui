@@ -132,7 +132,7 @@ impl RulesPage {
         SelectList::new(st.overrides.rules.iter().map(Self::row).collect())
     }
 
-    /// 目标下拉选项：BUILTIN_TARGETS + 自定义组名 + 激活订阅组名（去重，保持顺序）。
+    /// 目标下拉选项：BUILTIN_TARGETS + 激活订阅组名（去重，保持顺序）。
     /// 激活订阅组名取 cache.proxy_groups 中每个 mapping 的 name 字段。
     fn target_options(st: &AppState) -> Vec<String> {
         let mut seen = std::collections::HashSet::new();
@@ -140,11 +140,6 @@ impl RulesPage {
         for t in BUILTIN_TARGETS {
             if seen.insert(t.to_string()) {
                 opts.push(t.to_string());
-            }
-        }
-        for g in &st.overrides.groups {
-            if seen.insert(g.name.clone()) {
-                opts.push(g.name.clone());
             }
         }
         if let Some(act) = st.subs.iter().find(|s| s.active) {

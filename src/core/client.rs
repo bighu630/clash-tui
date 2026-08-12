@@ -35,6 +35,100 @@ pub struct MemoryFrame {
     pub inuse: u64,
 }
 
+/// 日志级别（mihomo /logs?level= 阈值过滤，服务端下发 >= level 的日志）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Error,
+    Warning,
+    Info,
+    Debug,
+}
+
+impl LogLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LogLevel::Error => "error",
+            LogLevel::Warning => "warning",
+            LogLevel::Info => "info",
+            LogLevel::Debug => "debug",
+        }
+    }
+
+    /// 循环顺序 error → warning → info → debug（UI 按 e 键循环）。
+    pub fn next(self) -> LogLevel {
+        match self {
+            LogLevel::Error => LogLevel::Warning,
+            LogLevel::Warning => LogLevel::Info,
+            LogLevel::Info => LogLevel::Debug,
+            LogLevel::Debug => LogLevel::Error,
+        }
+    }
+
+    /// 从 JSON 字符串解析；未知级别归为 info。
+    pub fn from_str(s: &str) -> LogLevel {
+        match s {
+            "error" => LogLevel::Error,
+            "warning" => LogLevel::Warning,
+            "debug" => LogLevel::Debug,
+            _ => LogLevel::Info,
+        }
+    }
+}
+
+/// 单条日志（来自 /logs）。time 仅 structured 格式提供（HH:MM:SS）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogEntry {
+    pub time: Option<String>,
+    pub level: LogLevel,
+    pub message: String,
+}
+
+impl LogEntry {
+    /// 解析一行日志，兼容两种格式：
+    /// - 标准：{"type":"info","payload":"..."}
+    /// - structured：{"time":"HH:MM:SS","level":"info","message":"...","fields":[]}
+    /// 无法解析/缺关键字段时降级为 Debug 级原始文本（不丢日志）。
+    pub fn parse(line: &str) -> LogEntry {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => {
+                return LogEntry {
+                    time: None,
+                    level: LogLevel::Debug,
+                    message: line.to_string(),
+                }
+            }
+        };
+        if let Some(payload) = v.get("payload").and_then(|x| x.as_str()) {
+            LogEntry {
+                time: None,
+                level: v
+                    .get("type")
+                    .and_then(|x| x.as_str())
+                    .map(LogLevel::from_str)
+                    .unwrap_or(LogLevel::Info),
+                message: payload.to_string(),
+            }
+        } else if let Some(message) = v.get("message").and_then(|x| x.as_str()) {
+            LogEntry {
+                time: v.get("time").and_then(|x| x.as_str()).map(String::from),
+                level: v
+                    .get("level")
+                    .and_then(|x| x.as_str())
+                    .map(LogLevel::from_str)
+                    .unwrap_or(LogLevel::Info),
+                message: message.to_string(),
+            }
+        } else {
+            LogEntry {
+                time: None,
+                level: LogLevel::Debug,
+                message: line.to_string(),
+            }
+        }
+    }
+}
+
 /// 连接快照（GET /connections，camelCase 键）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConnSnapshot {
@@ -296,6 +390,19 @@ impl Client {
         Ok(stream.map(|line| line.and_then(|l| l.parse())))
     }
 
+    /// GET /logs?level={level} → 按行解析的日志流；结束/出错由调用方重连。
+    /// 与 /traffic、/memory 同模式：Bearer 鉴权 + LineStream 按行切分。
+    pub async fn log_stream(
+        &self,
+        level: LogLevel,
+    ) -> Result<impl Stream<Item = Result<LogEntry, ApiError>> + Unpin, ApiError> {
+        let resp = self
+            .stream_response(&format!("/logs?level={}", level.as_str()))
+            .await?;
+        let stream = LineStream::new(resp.bytes_stream().map(|c| c.map(|b| b.to_vec())));
+        Ok(stream.map(|line| line.map(|l| LogEntry::parse(&l))))
+    }
+
     /// GET /connections → 连接快照（全量，一次返回）。
     pub async fn get_connections(&self) -> Result<ConnSnapshot, ApiError> {
         let body = self.request_text(reqwest::Method::GET, "/connections").await?;
@@ -396,6 +503,20 @@ where
                     return Poll::Ready(Some(Err(ApiError::Conn(e.to_string()))));
                 }
                 Poll::Ready(None) => {
+                    // 先逐行切分剩余缓冲（可能含多条完整行，此前整段返回会把
+                    // 多行合并成一条伪行导致 JSON 解析降级）；最后再 flush 无换行
+                    // 结尾的残余，缓冲为空才真正结束。
+                    while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
+                        let mut line: Vec<u8> = self.buf.drain(..=pos).collect();
+                        line.pop();
+                        if line.last() == Some(&b'\r') {
+                            line.pop();
+                        }
+                        let s = String::from_utf8_lossy(&line).trim().to_string();
+                        if !s.is_empty() {
+                            return Poll::Ready(Some(Ok(s)));
+                        }
+                    }
                     let rest = std::mem::take(&mut self.buf);
                     let s = String::from_utf8_lossy(&rest).trim().to_string();
                     if !s.is_empty() {
@@ -469,6 +590,57 @@ mod tests {
         assert_eq!(c.secret, "abc123");
     }
 
+    // ---------- 日志解析 ----------
+
+    #[test]
+    fn log_entry_parse_standard_format() {
+        let e = LogEntry::parse(r#"{"type":"info","payload":"[TCP] dial 1.2.3.4:443"}"#);
+        assert_eq!(e.level, LogLevel::Info);
+        assert_eq!(e.message, "[TCP] dial 1.2.3.4:443");
+        assert_eq!(e.time, None);
+    }
+
+    #[test]
+    fn log_entry_parse_structured_format() {
+        let e = LogEntry::parse(
+            r#"{"time":"12:34:56","level":"warning","message":"rule match","fields":[]}"#,
+        );
+        assert_eq!(e.level, LogLevel::Warning);
+        assert_eq!(e.message, "rule match");
+        assert_eq!(e.time.as_deref(), Some("12:34:56"));
+    }
+
+    #[test]
+    fn log_entry_parse_unknown_level_falls_back_info() {
+        let e = LogEntry::parse(r#"{"type":"verbose","payload":"x"}"#);
+        assert_eq!(e.level, LogLevel::Info);
+    }
+
+    #[test]
+    fn log_entry_parse_garbage_falls_back_debug_raw() {
+        let e = LogEntry::parse("not json at all");
+        assert_eq!(e.level, LogLevel::Debug);
+        assert_eq!(e.message, "not json at all");
+        assert_eq!(e.time, None);
+    }
+
+    #[test]
+    fn log_entry_parse_json_without_known_keys_falls_back_raw() {
+        let e = LogEntry::parse(r#"{"foo":1}"#);
+        assert_eq!(e.level, LogLevel::Debug);
+        assert_eq!(e.message, r#"{"foo":1}"#);
+    }
+
+    #[test]
+    fn log_level_cycle_and_str() {
+        assert_eq!(LogLevel::Error.next(), LogLevel::Warning);
+        assert_eq!(LogLevel::Warning.next(), LogLevel::Info);
+        assert_eq!(LogLevel::Info.next(), LogLevel::Debug);
+        assert_eq!(LogLevel::Debug.next(), LogLevel::Error);
+        assert_eq!(LogLevel::Info.as_str(), "info");
+        assert_eq!(LogLevel::Debug.as_str(), "debug");
+    }
+
     // ---------- 与假 mihomo API 服务器联测 ----------
 
     async fn spawn_api_server() -> (u16, tokio::sync::mpsc::UnboundedReceiver<String>) {
@@ -519,6 +691,19 @@ mod tests {
                         "/configs" => r#"{"mode":"rule","ipv6":true,"tun":{"enable":false}}"#.to_string(),
                         "/traffic" => {
                             let payload = "{\"up\":1,\"down\":2,\"upTotal\":3,\"downTotal\":4}\n{\"up\":5,\"down\":6,\"upTotal\":7,\"downTotal\":8}\n";
+                            let _ = sock
+                                .write_all(
+                                    format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                                        payload.len()
+                                    )
+                                    .as_bytes(),
+                                )
+                                .await;
+                            return;
+                        }
+                        p if p.starts_with("/logs") => {
+                            let payload = "{\"type\":\"info\",\"payload\":\"one\"}\n{\"time\":\"12:00:00\",\"level\":\"warning\",\"message\":\"two\",\"fields\":[]}\nnot-json-at-all\n";
                             let _ = sock
                                 .write_all(
                                     format!(
@@ -700,6 +885,31 @@ mod tests {
         let frames: Vec<MemoryFrame> = stream.take(1).map(|r| r.unwrap()).collect().await;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].inuse, 111);
+    }
+
+    #[tokio::test]
+    async fn log_stream_parses_entries_and_sends_level_query() {
+        let (port, mut rx) = spawn_api_server().await;
+        let stream = client_on(port).log_stream(LogLevel::Warning).await.unwrap();
+        let entries: Vec<LogEntry> = stream.take(3).map(|r| r.unwrap()).collect().await;
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].level, LogLevel::Info);
+        assert_eq!(entries[0].message, "one");
+        assert_eq!(entries[1].level, LogLevel::Warning);
+        assert_eq!(entries[1].time.as_deref(), Some("12:00:00"));
+        assert_eq!(entries[2].level, LogLevel::Debug);
+        assert_eq!(entries[2].message, "not-json-at-all");
+        // 请求行应带 ?level= 查询参数与 Bearer 鉴权
+        let req = rx.recv().await.expect("服务器应收到请求");
+        assert!(
+            req.starts_with("GET /logs?level=warning"),
+            "请求行: {req}"
+        );
+        let req_lower = req.to_lowercase();
+        assert!(
+            req_lower.contains("authorization: bearer testsecret"),
+            "应带 Bearer 鉴权: {req}"
+        );
     }
 
     // ---------- /connections 解析 ----------

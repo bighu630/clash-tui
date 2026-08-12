@@ -18,8 +18,10 @@ pub struct LogsPage {
     pub level: LogLevel,
     /// 是否跟随底部；回溯（↑↓/PgUp/PgDn）时暂停，f/End 恢复。
     pub follow: bool,
-    /// 回溯偏移：距最新一条日志的条数（0 = 最新）。
-    pub offset: usize,
+    /// 暂停时窗口首行（绝对索引，0 = 缓冲最旧一条）；跟随模式下每帧由 total 重算。
+    pub top: usize,
+    /// 最近一次渲染的视口行数（handle_key 滚动钳制用）。
+    view_rows: usize,
 }
 
 impl LogsPage {
@@ -27,21 +29,23 @@ impl LogsPage {
         Self {
             level: LogLevel::Info,
             follow: true,
-            offset: 0,
+            top: 0,
+            view_rows: 0,
         }
     }
 
-    /// 向上回溯 n 行（暂停跟随）。
+    /// 向上回溯 n 行（暂停跟随，不能越过缓冲开头）。
     fn scroll_up(&mut self, n: usize) {
         self.follow = false;
-        self.offset = self.offset.saturating_add(n);
+        self.top = self.top.saturating_sub(n);
     }
 
-    /// 向下回溯 n 行；回到最新（offset=0）时恢复跟随。
-    fn scroll_down(&mut self, n: usize) {
+    /// 向下滚动 n 行；窗口底部到达最新日志（top >= total - view_rows）时恢复跟随。
+    fn scroll_down(&mut self, n: usize, total: usize) {
         self.follow = false;
-        self.offset = self.offset.saturating_sub(n);
-        if self.offset == 0 {
+        let max_top = total.saturating_sub(self.view_rows);
+        self.top = self.top.saturating_add(n).min(max_top);
+        if self.top >= max_top {
             self.follow = true;
         }
     }
@@ -49,29 +53,23 @@ impl LogsPage {
     /// 复位视图到底部跟随。
     fn reset_view(&mut self) {
         self.follow = true;
-        self.offset = 0;
+        self.top = 0;
     }
 
     /// 可见日志区间 [start, end)（纯函数，供测试）：
-    /// follow=true → 最后 min(total, rows) 条；否则从 offset 处向上取 rows 条。
-    /// 回溯超过总量（offset >= total）时窗口完全越过开头，钳制到开头显示
-    /// 前 min(total, rows) 条（避免空区间）。
-    pub fn visible_range(total: usize, rows: usize, follow: bool, offset: usize) -> (usize, usize) {
+    /// follow=true → 最后 min(total, rows) 条；否则以 top 为窗口首行（绝对索引），
+    /// 新日志到达不移动窗口（回溯阅读不漂移）；top 越过底部时钳制到末尾。
+    pub fn visible_range(total: usize, rows: usize, follow: bool, top: usize) -> (usize, usize) {
         if total == 0 || rows == 0 {
             return (0, 0);
         }
-        let end = if follow {
-            total
+        if follow {
+            let start = total.saturating_sub(rows);
+            (start, total)
         } else {
-            let end = total.saturating_sub(offset.min(total));
-            if end == 0 {
-                rows.min(total)
-            } else {
-                end
-            }
-        };
-        let start = end.saturating_sub(rows);
-        (start, end)
+            let start = top.min(total.saturating_sub(rows));
+            (start, (start + rows).min(total))
+        }
     }
 
     /// 级别样式（纯函数，供测试）。
@@ -126,7 +124,7 @@ impl Page for LogsPage {
                 None
             }
             KeyCode::Down => {
-                self.scroll_down(1);
+                self.scroll_down(1, st.logs.len());
                 None
             }
             KeyCode::PageUp => {
@@ -134,7 +132,7 @@ impl Page for LogsPage {
                 None
             }
             KeyCode::PageDown => {
-                self.scroll_down(10);
+                self.scroll_down(10, st.logs.len());
                 None
             }
             _ => None,
@@ -156,7 +154,8 @@ impl Page for LogsPage {
             .borders(Borders::ALL);
         let inner = block.inner(area);
         let rows = inner.height as usize;
-        let (start, end) = Self::visible_range(st.logs.len(), rows, self.follow, self.offset);
+        self.view_rows = rows;
+        let (start, end) = Self::visible_range(st.logs.len(), rows, self.follow, self.top);
         if start == end {
             let msg = Paragraph::new("等待 mihomo 日志……（按 e 切换级别）")
                 .style(Style::default().fg(Color::DarkGray))
@@ -187,13 +186,22 @@ mod tests {
     }
 
     #[test]
-    fn visible_range_scrolled_back() {
-        // 回溯 30 条：显示 [50, 70)
-        assert_eq!(LogsPage::visible_range(100, 20, false, 30), (50, 70));
-        // 回溯超过总量：钳制到 [0, 20)
-        assert_eq!(LogsPage::visible_range(100, 20, false, 500), (0, 20));
-        // 偏移 0 但未跟随：等价于显示底部
-        assert_eq!(LogsPage::visible_range(100, 20, false, 0), (80, 100));
+    fn visible_range_paused_shows_window_from_top() {
+        // 暂停：top=50 显示 [50, 70)
+        assert_eq!(LogsPage::visible_range(100, 20, false, 50), (50, 70));
+        // top 越过底部：钳制到末尾
+        assert_eq!(LogsPage::visible_range(100, 20, false, 500), (80, 100));
+        // top=0：显示缓冲开头
+        assert_eq!(LogsPage::visible_range(100, 20, false, 0), (0, 20));
+    }
+
+    #[test]
+    fn visible_range_paused_no_drift_when_new_logs_arrive() {
+        // 暂停在 top=50；新日志到达（total 100→120）窗口不移动
+        assert_eq!(LogsPage::visible_range(100, 20, false, 50), (50, 70));
+        assert_eq!(LogsPage::visible_range(120, 20, false, 50), (50, 70));
+        // 跟随模式：total 增长窗口追尾
+        assert_eq!(LogsPage::visible_range(120, 20, true, 0), (100, 120));
     }
 
     #[test]
@@ -231,20 +239,31 @@ mod tests {
     #[test]
     fn scroll_up_pauses_follow() {
         let mut page = LogsPage::new();
-        page.scroll_up(1);
+        page.top = 10;
+        page.scroll_up(3);
         assert!(!page.follow);
-        assert_eq!(page.offset, 1);
+        assert_eq!(page.top, 7);
+        page.scroll_up(100);
+        assert_eq!(page.top, 0, "不能越过缓冲开头");
     }
 
     #[test]
     fn scroll_down_back_to_bottom_resumes_follow() {
         let mut page = LogsPage::new();
-        page.scroll_up(5);
-        page.scroll_down(3);
+        page.view_rows = 20;
+        page.top = 50;
+        page.scroll_down(3, 100);
         assert!(!page.follow);
-        assert_eq!(page.offset, 2);
-        page.scroll_down(10);
-        assert!(page.follow, "回到最新应恢复跟随");
-        assert_eq!(page.offset, 0);
+        assert_eq!(page.top, 53);
+        // 窗口底部到达最新日志（top >= total - view_rows）恢复跟随
+        page.scroll_down(100, 100);
+        assert!(page.follow, "到达底部应恢复跟随");
+        // 越过底部钳制
+        let mut page2 = LogsPage::new();
+        page2.view_rows = 20;
+        page2.top = 90;
+        page2.scroll_down(10, 100);
+        assert_eq!(page2.top, 80, "应钳制到 total - view_rows");
+        assert!(page2.follow);
     }
 }

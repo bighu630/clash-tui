@@ -201,7 +201,7 @@ fn notice_deadline<'a>(notices: impl IntoIterator<Item = &'a (Instant, String)>)
 const HELP_LINES: &[&str] = &[
     "全局按键:",
     "  q / Ctrl-C / Esc   退出",
-    "  Tab / ← → / 1-4    切换页面",
+    "  Tab / ← → / 1-5    切换页面",
     "  ?                  显示本帮助",
     "",
     "仪表盘:",
@@ -1018,8 +1018,8 @@ fn spawn_memory_task(client: Arc<Client>, tx: mpsc::UnboundedSender<MemoryFrame>
     });
 }
 
-/// logs 后台任务：流式拉取 /logs?level=，失败/断开 sleep 2s 重连；
-/// 级别切换经 level_rx 通知，立即以新级别重连。
+/// logs 后台任务：流式拉取 /logs?level=；错误/EOF 路径 sleep 2s 重连；
+/// 级别切换（level_rx）**立即**以新级别重连（不经过重连等待）。
 fn spawn_logs_task(
     client: Arc<Client>,
     mut level_rx: mpsc::UnboundedReceiver<LogLevel>,
@@ -1027,34 +1027,48 @@ fn spawn_logs_task(
 ) {
     tokio::spawn(async move {
         let mut level = LogLevel::Info;
+        // 非零时表示需要重连等待；等待期间收到级别变化立即重连
+        let mut retry_delay = Duration::ZERO;
         loop {
-            let mut stream = match client.log_stream(level).await {
-                Ok(s) => s,
-                Err(_) => {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue;
-                }
-            };
-            loop {
+            if !retry_delay.is_zero() {
                 tokio::select! {
+                    _ = tokio::time::sleep(retry_delay) => {}
                     new_level = level_rx.recv() => match new_level {
-                        Some(l) => {
-                            level = l;
-                            break; // 以新级别重连
-                        }
-                        None => return, // 主循环已退出
-                    },
-                    item = stream.next() => match item {
-                        Some(Ok(entry)) => {
-                            if tx.send(entry).is_err() {
-                                return;
-                            }
-                        }
-                        Some(Err(_)) | None => break, // 断开 → 外层重连
+                        Some(l) => level = l,
+                        None => return,
                     },
                 }
             }
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            match client.log_stream(level).await {
+                Ok(mut stream) => {
+                    retry_delay = Duration::ZERO;
+                    loop {
+                        tokio::select! {
+                            new_level = level_rx.recv() => match new_level {
+                                Some(l) => {
+                                    level = l;
+                                    break; // 立即以新级别重连
+                                }
+                                None => return,
+                            },
+                            item = stream.next() => match item {
+                                Some(Ok(entry)) => {
+                                    if tx.send(entry).is_err() {
+                                        return;
+                                    }
+                                }
+                                Some(Err(_)) | None => {
+                                    retry_delay = Duration::from_secs(2);
+                                    break;
+                                }
+                            },
+                        }
+                    }
+                }
+                Err(_) => {
+                    retry_delay = Duration::from_secs(2);
+                }
+            }
         }
     });
 }

@@ -14,4 +14,3 @@
   - 偏差：rustc 1.88 无 Instant::saturating_add，改 checked_add+兜底
 - [x] Task 6: README
 - [x] Task 7: 全量验证（220 测试全绿、clippy 0 警告、真实 mihomo 端到端验证通过）
-- [ ] Task 7: 全量验证

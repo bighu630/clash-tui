@@ -915,6 +915,22 @@ mod tests {
         );
     }
 
+    // ---------- LineStream 流结束分支 ----------
+
+    /// 回归：inner 流结束时剩余缓冲若含多条完整行，必须逐行切分返回，
+    /// 不能整段合并成一条伪行（否则 JSON 解析降级、流任务误判断线重连）。
+    #[tokio::test]
+    async fn line_stream_flushes_residue_by_lines() {
+        use futures_util::stream;
+        let inner = stream::iter(vec![Ok::<Vec<u8>, ApiError>(b"a\nb\nc".to_vec())]);
+        let mut ls = LineStream::new(inner);
+        let mut lines = Vec::new();
+        while let Some(l) = ls.next().await {
+            lines.push(l.unwrap());
+        }
+        assert_eq!(lines, vec!["a", "b", "c"]);
+    }
+
     // ---------- /connections 解析 ----------
 
     #[test]

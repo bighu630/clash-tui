@@ -5,6 +5,7 @@ pub mod dashboard;
 pub mod groups;
 pub mod logs;
 pub mod rules;
+pub mod settings;
 pub mod subscriptions;
 pub mod widgets;
 

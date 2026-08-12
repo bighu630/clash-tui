@@ -1,7 +1,8 @@
-//! 规则组管理页：自定义规则组（select/url-test/fallback）的新建、编辑、成员勾选、删除。
+//! 规则组页：只读展示运行时策略组（GET /proxies），select 组可切换节点，
+//! 自动选择组（url-test/fallback 等）展示但禁选并提示；支持整组延迟测试。
 //!
-//! 合并/去重/冲突语义见 README「合并器组装顺序与去重规则」；列表行：`名称 | 类型 | 成员N | url | interval`。
-//! 成员候选 = 订阅节点 ∪ 其他自定义组 ∪ 订阅组 ∪ 内置目标（DIRECT 等），无激活订阅仍可选其他组/内置目标。
+//! 数据源优先级：运行时策略组（含当前选择 now/成员 all）→ 激活订阅缓存组
+//! （API 不可用时降级展示名称/类型/成员数，无当前选择）。
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -11,22 +12,14 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{AppState, UiCommand};
-use crate::core::models::{default_group_interval, default_test_url, BUILTIN_TARGETS, UserGroup};
-use crate::core::settings::save_overrides;
-use crate::ui::widgets::{
-    centered_rect, CheckAction, ConfirmPopup, FormAction, FormField, FieldKind, FormPopup,
-    MessagePopup, SelectList,
-};
+use crate::core::client::GroupInfo;
+use crate::ui::widgets::{centered_rect, MessagePopup, SelectList};
 use crate::ui::Page;
 
 /// 页面内弹窗状态机
 enum GroupPopup {
-    /// 新建/编辑表单
-    Form(FormPopup),
-    /// 组成员多选
-    Members(MemberPopup),
-    /// 删除确认
-    Confirm(ConfirmPopup),
+    /// select 组节点单选
+    Selector(SelectorPopup),
     /// 错误/提示
     Message(MessagePopup),
 }
@@ -34,7 +27,7 @@ enum GroupPopup {
 pub struct GroupsPage {
     list: SelectList,
     popup: Option<GroupPopup>,
-    /// 表单/删除/成员操作对应的组索引（None=新建）
+    /// 弹窗对应的组索引
     pending: Option<usize>,
     /// 列表数据签名：内容变化时重建 SelectList
     sig: String,
@@ -56,338 +49,189 @@ impl GroupsPage {
         }
     }
 
-    /// 列表行：`名称 | 类型 | 成员N | url | interval`
-    fn row(g: &UserGroup) -> String {
-        format!(
-            "{} | {} | 成员{} | {} | {}s",
-            g.name, g.group_type, g.proxies.len(), g.url, g.interval
-        )
+    /// 运行时组类型 → 展示用 kebab 形式（与订阅 YAML 的 type 一致）。
+    fn type_display(t: &str) -> String {
+        match t {
+            "Selector" => "select".to_string(),
+            "URLTest" => "url-test".to_string(),
+            "Fallback" => "fallback".to_string(),
+            "LoadBalance" => "load-balance".to_string(),
+            "Relay" => "relay".to_string(),
+            "Compatible" => "compatible".to_string(),
+            "Pass" => "pass".to_string(),
+            other => other.to_string(),
+        }
     }
 
-    fn sig_of(st: &AppState) -> String {
-        let items: Vec<(String, String, String, u64, u64, usize)> = st
-            .overrides
-            .groups
-            .iter()
-            .map(|g| {
-                (
-                    g.name.clone(),
-                    g.group_type.clone(),
-                    g.url.clone(),
-                    g.interval,
-                    g.tolerance,
-                    g.proxies.len(),
-                )
-            })
-            .collect();
-        format!("{items:?}")
+    /// 是否可手动切换：仅 Selector（select）组。
+    fn is_switchable(t: &str) -> bool {
+        t == "Selector"
     }
 
-    fn rebuild_list(st: &AppState) -> SelectList {
-        SelectList::new(st.overrides.groups.iter().map(Self::row).collect())
+    /// 运行时行：`名称 | select | 当前: 节点X`
+    fn row(g: &GroupInfo) -> String {
+        let now = g.now.as_deref().unwrap_or("-");
+        format!("{} | {} | 当前: {}", g.name, Self::type_display(&g.group_type), now)
     }
 
-    /// 新建/编辑共用表单（编辑时预填；类型下拉 select|url-test|fallback）
-    fn group_form(title: &str, g: Option<&UserGroup>) -> FormPopup {
-        FormPopup::new(
-            title.to_string(),
-            vec![
-                FormField {
-                    label: "名称".to_string(),
-                    value: g.map(|x| x.name.clone()).unwrap_or_default(),
-                    kind: FieldKind::Text,
-                },
-                FormField {
-                    label: "类型".to_string(),
-                    value: g.map(|x| x.group_type.clone()).unwrap_or_else(|| "select".to_string()),
-                    kind: FieldKind::Dropdown(vec![
-                        "select".to_string(),
-                        "url-test".to_string(),
-                        "fallback".to_string(),
-                    ]),
-                },
-                FormField {
-                    label: "URL".to_string(),
-                    value: g.map(|x| x.url.clone()).unwrap_or_else(default_test_url),
-                    kind: FieldKind::Text,
-                },
-                FormField {
-                    label: "interval".to_string(),
-                    value: g
-                        .map(|x| x.interval.to_string())
-                        .unwrap_or_else(|| default_group_interval().to_string()),
-                    kind: FieldKind::Number,
-                },
-                FormField {
-                    label: "tolerance".to_string(),
-                    value: g.map(|x| x.tolerance.to_string()).unwrap_or_else(|| "0".to_string()),
-                    kind: FieldKind::Number,
-                },
-            ],
-        )
+    /// 降级行（订阅缓存）：`名称 | select | 成员5 | 当前: -`
+    fn fallback_row(name: &str, group_type: &str, members: usize) -> String {
+        format!("{name} | {group_type} | 成员{members} | 当前: -")
     }
 
-    /// 表单值解析与校验：名称非空、interval>0、数值合法
-    fn parse_group_values(v: &[String]) -> Result<UserGroup, String> {
-        if v.len() < 5 {
-            return Err("表单字段缺失".to_string());
-        }
-        let name = v[0].trim();
-        let group_type = v[1].trim();
-        let url = v[2].trim();
-        if name.is_empty() {
-            return Err("名称不能为空".to_string());
-        }
-        if url.is_empty() {
-            return Err("URL 不能为空".to_string());
-        }
-        let interval: u64 = v[3]
-            .trim()
-            .parse()
-            .map_err(|_| format!("interval 必须是正整数（当前：{}）", v[3].trim()))?;
-        if interval == 0 {
-            return Err("interval 必须大于 0".to_string());
-        }
-        let tolerance: u64 = v[4]
-            .trim()
-            .parse()
-            .map_err(|_| format!("tolerance 必须是数字（当前：{}）", v[4].trim()))?;
-        Ok(UserGroup {
-            name: name.to_string(),
-            group_type: group_type.to_string(),
-            url: url.to_string(),
-            interval,
-            tolerance,
-            proxies: Vec::new(),
-        })
-    }
-
-    /// n：新建表单
-    fn start_new(&mut self) -> Option<UiCommand> {
-        self.pending = None;
-        self.popup = Some(GroupPopup::Form(Self::group_form("新建规则组", None)));
-        None
-    }
-
-    /// Enter：编辑表单（预填，名称可改）
-    fn start_edit(&mut self, st: &mut AppState) -> Option<UiCommand> {
-        let idx = self.list.selected();
-        if idx >= st.overrides.groups.len() {
-            return None;
-        }
-        self.pending = Some(idx);
-        self.popup =
-            Some(GroupPopup::Form(Self::group_form("编辑规则组", Some(&st.overrides.groups[idx]))));
-        None
-    }
-
-    /// 表单确认：校验 → push/替换 + 落盘
-    fn submit_form(&mut self, p: &mut FormPopup, st: &mut AppState) -> Option<UiCommand> {
-        let v = p.values();
-        match Self::parse_group_values(&v) {
-            Err(msg) => {
-                self.popup = Some(GroupPopup::Message(MessagePopup::new("输入有误".to_string(), vec![msg])));
-            }
-            Ok(mut g) => {
-                match self.pending {
-                    Some(idx) if idx < st.overrides.groups.len() => {
-                        // 编辑保留原成员
-                        g.proxies = st.overrides.groups[idx].proxies.clone();
-                        st.overrides.groups[idx] = g;
-                    }
-                    _ => {
-                        if g.proxies.is_empty() {
-                            st.notice(format!(
-                                "[!] 规则组「{}」暂无成员，按 m 勾选成员（节点/其他组/内置目标）后即可应用",
-                                g.name
-                            ));
-                        }
-                        st.overrides.groups.push(g);
-                    }
-                }
-                if let Err(e) = save_overrides(&st.overrides) {
-                    self.popup = Some(GroupPopup::Message(MessagePopup::new(
-                        "保存失败".to_string(),
-                        vec![e.to_string()],
-                    )));
-                }
-            }
-        }
-        self.pending = None;
-        None
-    }
-
-    /// m：成员多选（items=订阅节点 ∪ 其他自定义组 ∪ 订阅组 ∪ 内置目标，保序去重；
-    /// 预勾选当前组成员；无激活订阅仍可选其他组/内置目标）
-    fn start_members(&mut self, st: &mut AppState) -> Option<UiCommand> {
-        let idx = self.list.selected();
-        if idx >= st.overrides.groups.len() {
-            return None;
-        }
-        // 去重模式与遍历 cache.proxy_groups 的 name 的写法对齐 src/ui/rules.rs::target_options
-        let mut seen = std::collections::HashSet::new();
-        let mut items = Vec::new();
-        // 1. 激活订阅节点名
-        if let Some(act) = st.subs.iter().find(|s| s.active) {
-            if let Some(cache) = &act.cache {
-                for p in &cache.proxies {
-                    if seen.insert(p.name.clone()) {
-                        items.push(p.name.clone());
-                    }
-                }
-            }
-        }
-        // 2. 其他自定义组名（排除当前组自身：自引用=直接循环恒非法，合并器兜底报错）
-        let self_name = st.overrides.groups[idx].name.clone();
-        for g in &st.overrides.groups {
-            if g.name != self_name && seen.insert(g.name.clone()) {
-                items.push(g.name.clone());
-            }
-        }
-        // 3. 激活订阅组名
+    /// 订阅缓存组签名：激活订阅 proxy_groups 的 name/type/成员数。
+    fn fallback_sig(st: &AppState) -> String {
+        let mut items: Vec<(String, String, usize)> = Vec::new();
         if let Some(act) = st.subs.iter().find(|s| s.active) {
             if let Some(cache) = &act.cache {
                 for g in &cache.proxy_groups {
-                    if let Some(name) = g.get("name").and_then(|v| v.as_str()) {
-                        if seen.insert(name.to_string()) {
-                            items.push(name.to_string());
-                        }
-                    }
+                    let m = match g.as_mapping() {
+                        Some(m) => m,
+                        None => continue,
+                    };
+                    let name = m
+                        .get(serde_yaml::Value::String("name".into()))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let t = m
+                        .get(serde_yaml::Value::String("type".into()))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let n = m
+                        .get(serde_yaml::Value::String("proxies".into()))
+                        .and_then(|v| v.as_sequence())
+                        .map(|s| s.len())
+                        .unwrap_or(0);
+                    items.push((name, t, n));
                 }
             }
         }
-        // 4. 内置目标（恒非空，兜底）
-        for t in BUILTIN_TARGETS {
-            if seen.insert(t.to_string()) {
-                items.push(t.to_string());
+        format!("{items:?}")
+    }
+
+    fn sig_of(st: &AppState) -> String {
+        format!("{:?}|{}", st.proxy_groups, Self::fallback_sig(st))
+    }
+
+    fn rebuild_list(st: &AppState) -> SelectList {
+        if !st.proxy_groups.is_empty() {
+            let rows: Vec<String> = st.proxy_groups.iter().map(Self::row).collect();
+            SelectList::new(rows).with_title(" 规则组（运行时，Enter 切换 / r 测速 / R 刷新） ".to_string())
+        } else {
+            let mut rows: Vec<String> = Vec::new();
+            if let Some(act) = st.subs.iter().find(|s| s.active) {
+                if let Some(cache) = &act.cache {
+                    for g in &cache.proxy_groups {
+                        let m = match g.as_mapping() {
+                            Some(m) => m,
+                            None => continue,
+                        };
+                        let name = m
+                            .get(serde_yaml::Value::String("name".into()))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string();
+                        let t = m
+                            .get(serde_yaml::Value::String("type".into()))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string();
+                        let n = m
+                            .get(serde_yaml::Value::String("proxies".into()))
+                            .and_then(|v| v.as_sequence())
+                            .map(|s| s.len())
+                            .unwrap_or(0);
+                        rows.push(Self::fallback_row(&name, &t, n));
+                    }
+                }
             }
+            SelectList::new(rows).with_title(" 规则组（API 不可用，展示订阅缓存） ".to_string())
         }
-        if items.is_empty() {
+    }
+
+    /// 当前选中组：运行时优先。
+    fn current_group<'a>(&self, st: &'a AppState) -> Option<&'a GroupInfo> {
+        let idx = self.list.selected();
+        st.proxy_groups.get(idx)
+    }
+
+    /// Enter：select 组 → 单选弹窗；自动组/降级 → 提示。
+    fn start_select(&mut self, st: &mut AppState) -> Option<UiCommand> {
+        let Some(g) = self.current_group(st) else {
             self.popup = Some(GroupPopup::Message(MessagePopup::new(
-                "编辑成员".to_string(),
-                vec!["没有可选的成员（节点/其他组/内置目标）".to_string()],
+                "无法切换".to_string(),
+                vec![
+                    "运行时 API 不可用（mihomo 未运行或未连接），无法获取/切换节点。".to_string(),
+                    "请确认 mihomo 服务已启动，或按 R 刷新。".to_string(),
+                ],
+            )));
+            return None;
+        };
+        if !Self::is_switchable(&g.group_type) {
+            self.popup = Some(GroupPopup::Message(MessagePopup::new(
+                "不可手动切换".to_string(),
+                vec![format!(
+                    "「{}」是 {} 自动选择组，节点由 mihomo 自动测速/健康检查决定，不可手动切换。",
+                    g.name,
+                    Self::type_display(&g.group_type)
+                )],
             )));
             return None;
         }
-        let current: Vec<String> = st.overrides.groups[idx].proxies.clone();
+        if g.all.is_empty() {
+            self.popup = Some(GroupPopup::Message(MessagePopup::new(
+                "没有可选节点".to_string(),
+                vec![format!("「{}」没有可切换的成员。", g.name)],
+            )));
+            return None;
+        }
+        let idx = self.list.selected();
         self.pending = Some(idx);
-        self.popup = Some(GroupPopup::Members(MemberPopup::new(
-            format!("选择组员：{}", st.overrides.groups[idx].name),
-            items,
-            current,
+        self.popup = Some(GroupPopup::Selector(SelectorPopup::new(
+            format!("选择节点：{}", g.name),
+            g.all.clone(),
+            g.now.clone(),
         )));
         None
     }
 
-    /// 成员确认：更新组.proxies + 落盘。checked 为空 → 阻止保存（不更新、不落盘）并提示
-    fn apply_members(&mut self, checked: Vec<String>, st: &mut AppState) -> Option<UiCommand> {
-        if let Some(idx) = self.pending {
-            if idx < st.overrides.groups.len() {
-                if checked.is_empty() {
-                    self.pending = None;
-                    self.popup = Some(GroupPopup::Message(MessagePopup::new(
-                        "成员不能为空".to_string(),
-                        vec![
-                            "规则组至少需要一个成员，mihomo 校验会拒绝空组。请至少勾选一个成员（节点/其他组/内置目标）。".to_string(),
-                        ],
-                    )));
-                    return None;
-                }
-                st.overrides.groups[idx].proxies = checked;
-                if let Err(e) = save_overrides(&st.overrides) {
-                    self.popup = Some(GroupPopup::Message(MessagePopup::new(
-                        "保存失败".to_string(),
-                        vec![e.to_string()],
-                    )));
-                }
-            }
-        }
-        self.pending = None;
-        None
-    }
-
-    /// d：删除确认。组被规则/其他组成员引用时在确认里提示（仍可删除，合并校验会兜底报错）
-    fn start_delete(&mut self, st: &mut AppState) -> Option<UiCommand> {
-        let idx = self.list.selected();
-        if idx >= st.overrides.groups.len() {
+    /// r：整组延迟测试（需要选中组；降级模式提示）。
+    fn start_delay_test(&mut self, st: &AppState) -> Option<UiCommand> {
+        let Some(g) = self.current_group(st) else {
+            self.popup = Some(GroupPopup::Message(MessagePopup::new(
+                "无法测速".to_string(),
+                vec!["运行时 API 不可用，无法执行延迟测试。".to_string()],
+            )));
             return None;
-        }
-        let name = st.overrides.groups[idx].name.clone();
-        // 引用统计：规则 target + 其他自定义组成员（某类为 0 则不提及）
-        let rule_refs = st.overrides.rules.iter().filter(|r| r.target == name).count();
-        let group_refs = st.overrides.groups.iter().filter(|g| g.proxies.contains(&name)).count();
-        let mut cited: Vec<String> = Vec::new();
-        if rule_refs > 0 {
-            cited.push(format!("{rule_refs} 条规则"));
-        }
-        if group_refs > 0 {
-            cited.push(format!("{group_refs} 个组"));
-        }
-        let msg = if cited.is_empty() {
-            format!("确定删除规则组「{name}」？")
-        } else {
-            format!(
-                "规则组「{name}」被 {} 引用。\n删除后这些引用将失效，合并校验会报错（需同步修改）。仍要删除吗？",
-                cited.join("、")
-            )
         };
-        self.pending = Some(idx);
-        self.popup = Some(GroupPopup::Confirm(ConfirmPopup::new("删除规则组".to_string(), msg)));
-        None
+        Some(UiCommand::TestGroupDelay(g.name.clone()))
     }
 
-    fn confirm_delete(&mut self, st: &mut AppState) -> Option<UiCommand> {
-        if let Some(idx) = self.pending {
-            if idx < st.overrides.groups.len() {
-                st.overrides.groups.remove(idx);
-                if let Err(e) = save_overrides(&st.overrides) {
-                    self.popup = Some(GroupPopup::Message(MessagePopup::new(
-                        "保存失败".to_string(),
-                        vec![e.to_string()],
-                    )));
-                }
-            }
-        }
+    /// 单选确认：发切换命令。
+    fn confirm_select(&mut self, target: String, st: &mut AppState) -> Option<UiCommand> {
+        let group = self
+            .pending
+            .and_then(|idx| st.proxy_groups.get(idx))
+            .map(|g| g.name.clone());
         self.pending = None;
-        None
+        match group {
+            Some(name) => Some(UiCommand::SwitchGroup { group: name, target }),
+            None => None,
+        }
     }
 
-    /// popup 打开期间：按键优先喂 popup，popup 关闭后才恢复页面按键
     fn handle_popup(&mut self, popup: GroupPopup, key: KeyEvent, st: &mut AppState) -> Option<UiCommand> {
         match popup {
-            GroupPopup::Form(mut p) => match p.handle_key(key) {
-                Some(FormAction::Confirm) => self.submit_form(&mut p, st),
-                Some(FormAction::Cancel) => {
+            GroupPopup::Selector(mut p) => match p.handle_key(key) {
+                Some(SelectAction::Confirm(target)) => self.confirm_select(target, st),
+                Some(SelectAction::Cancel) => {
                     self.pending = None;
                     None
                 }
                 None => {
-                    self.popup = Some(GroupPopup::Form(p));
-                    None
-                }
-            },
-            GroupPopup::Members(mut p) => match p.handle_key(key) {
-                Some(CheckAction::Confirm) => {
-                    let checked = p.selected_items();
-                    self.apply_members(checked, st)
-                }
-                Some(CheckAction::Cancel) => {
-                    self.pending = None;
-                    None
-                }
-                None => {
-                    self.popup = Some(GroupPopup::Members(p));
-                    None
-                }
-            },
-            GroupPopup::Confirm(mut p) => match p.handle_key(key) {
-                Some(true) => self.confirm_delete(st),
-                Some(false) => {
-                    self.pending = None;
-                    None
-                }
-                None => {
-                    self.popup = Some(GroupPopup::Confirm(p));
+                    self.popup = Some(GroupPopup::Selector(p));
                     None
                 }
             },
@@ -404,7 +248,6 @@ impl GroupsPage {
 }
 
 impl Page for GroupsPage {
-    /// 页面内部弹窗打开时，全局键（Esc/Tab 等）交给页面处理。
     fn popup_open(&self) -> bool {
         self.popup.is_some()
     }
@@ -421,10 +264,9 @@ impl Page for GroupsPage {
                 self.list.handle_key(key);
                 None
             }
-            KeyCode::Char('n') => self.start_new(),
-            KeyCode::Enter => self.start_edit(st),
-            KeyCode::Char('m') => self.start_members(st),
-            KeyCode::Char('d') => self.start_delete(st),
+            KeyCode::Enter => self.start_select(st),
+            KeyCode::Char('r') => self.start_delay_test(st),
+            KeyCode::Char('R') => Some(UiCommand::RefreshGroups),
             _ => None,
         }
     }
@@ -435,84 +277,52 @@ impl Page for GroupsPage {
             self.sig = sig;
             self.list = Self::rebuild_list(st);
         }
-        if st.overrides.groups.is_empty() {
-            let hint = Paragraph::new(Line::from("无规则组，按 n 新建"))
-                .block(Block::default().borders(Borders::ALL).title(" 规则组 "));
-            f.render_widget(hint, centered_rect(50, 30, area));
+        if self.list.is_empty() {
+            let hint = Paragraph::new(Line::from(
+                "无可用规则组（无激活订阅或 mihomo 未运行），按 R 刷新",
+            ))
+            .block(Block::default().borders(Borders::ALL).title(" 规则组 "));
+            f.render_widget(hint, centered_rect(60, 30, area));
         } else {
             self.list.render(f, area);
         }
-        // popup 置顶绘制
         if let Some(popup) = &mut self.popup {
             match popup {
-                GroupPopup::Form(p) => p.render(f, area),
-                GroupPopup::Members(p) => p.render(f, area),
-                GroupPopup::Confirm(p) => p.render(f, area),
+                GroupPopup::Selector(p) => p.render(f, area),
                 GroupPopup::Message(p) => p.render(f, area),
             }
         }
     }
 }
 
-/// 组成员多选弹窗。
-///
-/// 说明：B1 的 CheckboxList 契约（计划 §3）的 `new()` 全部默认未选中，无预勾选 API；
-/// 为满足规格"预勾选当前组成员"，本页自实现同语义弹窗：
-/// j/k/↑↓ 移动、Space 勾选、/ 或字母过滤（勾选状态保留）、Enter 确认、Esc 取消。
-/// 若 B1 后续给 CheckboxList 增加 set_checked 之类 API，可替换回用。
-struct MemberPopup {
-    title: String,
-    items: Vec<String>,
-    checked: Vec<bool>,
-    selected: usize,
-    filter: String,
+/// 单选弹窗动作。
+enum SelectAction {
+    Confirm(String),
+    Cancel,
 }
 
-impl MemberPopup {
-    fn new(title: String, items: Vec<String>, pre_checked: Vec<String>) -> Self {
-        let checked = items
-            .iter()
-            .map(|n| pre_checked.iter().any(|c| c == n))
-            .collect();
+/// select 组节点单选弹窗：j/k 移动、Enter 确认、Esc 取消、当前项 ▶ 标记。
+struct SelectorPopup {
+    title: String,
+    items: Vec<String>,
+    now: Option<String>,
+    selected: usize,
+}
+
+impl SelectorPopup {
+    fn new(title: String, items: Vec<String>, now: Option<String>) -> Self {
         Self {
             title,
             items,
-            checked,
+            now,
             selected: 0,
-            filter: String::new(),
         }
     }
 
-    /// 过滤匹配文本（开头的 '/' 仅作为过滤模式提示，不参与匹配）
-    fn match_text(&self) -> &str {
-        self.filter.trim_start_matches('/')
-    }
-
-    /// 当前可见项（过滤后）在 items 中的索引
-    fn visible(&self) -> Vec<usize> {
-        let needle = self.match_text().to_lowercase();
-        self.items
-            .iter()
-            .enumerate()
-            .filter(|(_, n)| needle.is_empty() || n.to_lowercase().contains(&needle))
-            .map(|(i, _)| i)
-            .collect()
-    }
-
-    fn selected_items(&self) -> Vec<String> {
-        self.items
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| self.checked[*i])
-            .map(|(_, n)| n.clone())
-            .collect()
-    }
-
-    fn handle_key(&mut self, key: KeyEvent) -> Option<CheckAction> {
-        let visible_len = self.visible().len();
+    fn handle_key(&mut self, key: KeyEvent) -> Option<SelectAction> {
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                if visible_len > 0 && self.selected + 1 < visible_len {
+                if self.selected + 1 < self.items.len() {
                     self.selected += 1;
                 }
                 None
@@ -521,69 +331,115 @@ impl MemberPopup {
                 self.selected = self.selected.saturating_sub(1);
                 None
             }
-            KeyCode::Char(' ') => {
-                if let Some(idx) = self.visible().get(self.selected) {
-                    self.checked[*idx] = !self.checked[*idx];
-                }
-                None
-            }
-            KeyCode::Char('/') => {
-                self.filter.push('/');
-                self.selected = 0;
-                None
-            }
-            KeyCode::Char(c) if c.is_alphanumeric() => {
-                self.filter.push(c);
-                self.selected = 0;
-                None
-            }
-            KeyCode::Backspace => {
-                self.filter.pop();
-                self.selected = 0;
-                None
-            }
-            KeyCode::Enter => Some(CheckAction::Confirm),
-            KeyCode::Esc => Some(CheckAction::Cancel),
+            KeyCode::Enter => Some(SelectAction::Confirm(self.items[self.selected].clone())),
+            KeyCode::Esc => Some(SelectAction::Cancel),
             _ => None,
         }
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect) {
-        let rect = centered_rect(60, 70, area);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(1)])
-            .split(rect);
-        let visible = self.visible();
-        if visible.is_empty() {
-            self.selected = 0;
-        } else {
-            // List 渲染时自动滚动到选中项可见（ratatui ListState.offset 由控件维护）
-            self.selected = self.selected.min(visible.len() - 1);
-        }
-        let items: Vec<ListItem> = visible
+        let rect = centered_rect(60, 60, area);
+        let items: Vec<ListItem> = self
+            .items
             .iter()
-            .map(|&i| {
-                let mark = if self.checked[i] { "[x]" } else { "[ ]" };
-                ListItem::new(format!("{mark} {}", self.items[i]))
+            .map(|n| {
+                let mark = if self.now.as_deref() == Some(n.as_str()) { "▶ " } else { "  " };
+                ListItem::new(format!("{mark}{n}"))
             })
             .collect();
         let list = List::new(items)
             .block(Block::default().borders(Borders::ALL).title(self.title.clone()))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
         let mut state = ListState::default();
-        if !visible.is_empty() {
-            state.select(Some(self.selected));
-        }
-        f.render_stateful_widget(list, chunks[0], &mut state);
-        let filter_display = if self.filter.is_empty() {
-            "（无）".to_string()
-        } else {
-            self.filter.clone()
-        };
-        let footer = Paragraph::new(Line::from(format!(
-            "过滤: {filter_display}   j/k 移动  Space 勾选  /或字母 过滤  Enter 确定  Esc 取消"
-        )));
+        state.select(Some(self.selected));
+        f.render_stateful_widget(list, rect, &mut state);
+        let footer = Paragraph::new(Line::from("j/k 移动  Enter 切换  Esc 取消"));
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(rect);
         f.render_widget(footer, chunks[1]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyModifiers;
+
+    #[test]
+    fn type_display_mapping() {
+        assert_eq!(GroupsPage::type_display("Selector"), "select");
+        assert_eq!(GroupsPage::type_display("URLTest"), "url-test");
+        assert_eq!(GroupsPage::type_display("Fallback"), "fallback");
+        assert_eq!(GroupsPage::type_display("LoadBalance"), "load-balance");
+        assert_eq!(GroupsPage::type_display("Relay"), "relay");
+        assert_eq!(GroupsPage::type_display("Compatible"), "compatible");
+        assert_eq!(GroupsPage::type_display("Pass"), "pass");
+        assert_eq!(GroupsPage::type_display("未知类型"), "未知类型");
+    }
+
+    #[test]
+    fn is_switchable_only_selector() {
+        assert!(GroupsPage::is_switchable("Selector"));
+        assert!(!GroupsPage::is_switchable("URLTest"));
+        assert!(!GroupsPage::is_switchable("Fallback"));
+        assert!(!GroupsPage::is_switchable("LoadBalance"));
+        assert!(!GroupsPage::is_switchable("Relay"));
+    }
+
+    #[test]
+    fn row_format() {
+        let g = GroupInfo {
+            name: "手动选择".into(),
+            group_type: "Selector".into(),
+            now: Some("节点A".into()),
+            all: vec!["节点A".into()],
+        };
+        assert_eq!(GroupsPage::row(&g), "手动选择 | select | 当前: 节点A");
+        let g2 = GroupInfo {
+            name: "自动".into(),
+            group_type: "URLTest".into(),
+            now: None,
+            all: vec![],
+        };
+        assert_eq!(GroupsPage::row(&g2), "自动 | url-test | 当前: -");
+    }
+
+    #[test]
+    fn fallback_row_format() {
+        assert_eq!(GroupsPage::fallback_row("订阅组", "select", 3), "订阅组 | select | 成员3 | 当前: -");
+    }
+
+    #[test]
+    fn selector_popup_navigation_and_confirm() {
+        let mut p = SelectorPopup::new(
+            "选择节点：g".into(),
+            vec!["A".into(), "B".into(), "C".into()],
+            Some("B".into()),
+        );
+        // 初始选中第一项
+        assert!(matches!(
+            p.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SelectAction::Confirm(ref t)) if t == "A"
+        ));
+        // 移到 B（当前项）再确认
+        let _ = p.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(matches!(
+            p.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SelectAction::Confirm(ref t)) if t == "B"
+        ));
+        // Esc 取消
+        assert!(matches!(
+            p.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(SelectAction::Cancel)
+        ));
+        // 越界保护
+        let mut p2 = SelectorPopup::new("t".into(), vec!["A".into()], None);
+        let _ = p2.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(matches!(
+            p2.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(SelectAction::Confirm(ref t)) if t == "A"
+        ));
     }
 }

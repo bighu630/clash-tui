@@ -138,7 +138,9 @@ pub fn country_display(code: Option<&str>, en: Option<&str>) -> Option<String> {
             return Some(t.to_string());
         }
     }
-    code.map(|c| c.to_string())
+    code.map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(|c| c.to_string())
 }
 
 #[cfg(test)]
@@ -184,5 +186,11 @@ mod tests {
         assert_eq!(country_display(None, Some("   ")), None);
         assert_eq!(country_display(None, Some("")), None);
         assert_eq!(country_display(None, Some(" United States ")), Some("United States".to_string()));
+    }
+
+    #[test]
+    fn display_blank_code_returns_none() {
+        // 空白代码不得兜底为 Some(" ")：trim 后为空应返回 None（UI 显示「未知」）
+        assert_eq!(country_display(Some("  "), None), None);
     }
 }

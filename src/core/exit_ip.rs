@@ -84,7 +84,7 @@ const ENDPOINTS: &[(&str, ParseMode)] = &[
     ("http://myip.ipip.net", ParseMode::Ipip),
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum ParseMode {
     Plain,
     Trace,
@@ -874,5 +874,22 @@ mod tests {
         assert!(err.contains(&port.to_string()), "err: {err}");
         assert!(err.contains("连接被拒"), "err: {err}");
         assert!(err.contains("代理端口全部连接被拒"), "err: {err}");
+    }
+
+    /// 顺序契约：前 3 个端点必须是带国家模式（IpApi/Trace/Ipwho），
+    /// Plain/Ipip 混入会静默降级国家为「未知」。
+    #[test]
+    fn endpoints_country_capable_first() {
+        assert!(ENDPOINTS.len() >= 3);
+        for (_, mode) in ENDPOINTS.iter().take(3) {
+            assert!(
+                matches!(mode, ParseMode::IpApi | ParseMode::Trace | ParseMode::Ipwho),
+                "前 3 个端点必须是带国家模式，实际 {mode:?}"
+            );
+        }
+        // 其余端点均为纯 IP 模式
+        for (_, mode) in ENDPOINTS.iter().skip(3) {
+            assert!(matches!(mode, ParseMode::Plain | ParseMode::Ipip));
+        }
     }
 }

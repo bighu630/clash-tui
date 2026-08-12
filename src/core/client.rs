@@ -35,6 +35,47 @@ pub struct MemoryFrame {
     pub inuse: u64,
 }
 
+/// 连接快照（GET /connections，camelCase 键）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConnSnapshot {
+    pub download_total: u64,
+    pub upload_total: u64,
+    pub connections: Vec<ConnInfo>,
+    pub memory: u64,
+}
+
+/// 单条连接。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConnInfo {
+    pub id: String,
+    pub meta: ConnMeta,
+    pub upload: u64,
+    pub download: u64,
+    /// 连接建立时间（RFC3339）；缺失/解析失败为 None。
+    pub start: Option<chrono::DateTime<chrono::Utc>>,
+    pub chains: Vec<String>,
+    pub rule: String,
+    pub rule_payload: String,
+    pub dl_speed: u64,
+    pub ul_speed: u64,
+    pub is_alive: bool,
+}
+
+/// 连接元数据（metadata 子对象，全部字符串可缺失）。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConnMeta {
+    pub network: String,
+    pub host: String,
+    pub sniff_host: String,
+    pub remote_destination: String,
+    pub destination_ip: String,
+    pub destination_port: String,
+    pub source_ip: String,
+    pub source_port: String,
+    pub r#type: String,
+    pub process_path: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("{0}")]
@@ -94,6 +135,82 @@ impl FromStr for MemoryFrame {
             inuse: v.get("inuse").and_then(|x| x.as_u64()).unwrap_or(0),
         })
     }
+}
+
+impl FromStr for ConnSnapshot {
+    type Err = ApiError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let v: serde_json::Value =
+            serde_json::from_str(s).map_err(|e| ApiError::Json(e.to_string()))?;
+        let conns = v
+            .get("connections")
+            .and_then(|x| x.as_array())
+            .map(|arr| arr.iter().filter_map(parse_conn).collect())
+            .unwrap_or_default();
+        Ok(Self {
+            download_total: v.get("downloadTotal").and_then(|x| x.as_u64()).unwrap_or(0),
+            upload_total: v.get("uploadTotal").and_then(|x| x.as_u64()).unwrap_or(0),
+            connections: conns,
+            memory: v.get("memory").and_then(|x| x.as_u64()).unwrap_or(0),
+        })
+    }
+}
+
+/// 单条连接解析：非对象元素或 start 非法时该字段置默认/None，不整条丢弃。
+fn parse_conn(c: &serde_json::Value) -> Option<ConnInfo> {
+    let obj = c.as_object()?;
+    let get = |key: &str| obj.get(key).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let start = obj
+        .get("start")
+        .and_then(|x| x.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    let meta = c
+        .get("metadata")
+        .and_then(|m| m.as_object())
+        .map(|m| {
+            let mget = |key: &str| {
+                m.get(key)
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            ConnMeta {
+                network: mget("network"),
+                host: mget("host"),
+                sniff_host: mget("sniffHost"),
+                remote_destination: mget("remoteDestination"),
+                destination_ip: mget("destinationIP"),
+                destination_port: mget("destinationPort"),
+                source_ip: mget("sourceIP"),
+                source_port: mget("sourcePort"),
+                r#type: mget("type"),
+                process_path: mget("processPath"),
+            }
+        })
+        .unwrap_or_default();
+    Some(ConnInfo {
+        id: get("id"),
+        meta,
+        upload: obj.get("upload").and_then(|x| x.as_u64()).unwrap_or(0),
+        download: obj.get("download").and_then(|x| x.as_u64()).unwrap_or(0),
+        start,
+        chains: obj
+            .get("chains")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        rule: get("rule"),
+        rule_payload: get("rulePayload"),
+        dl_speed: obj.get("dlSpeed").and_then(|x| x.as_u64()).unwrap_or(0),
+        ul_speed: obj.get("ulSpeed").and_then(|x| x.as_u64()).unwrap_or(0),
+        is_alive: obj.get("isAlive").and_then(|x| x.as_bool()).unwrap_or(true),
+    })
 }
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -176,6 +293,12 @@ impl Client {
         let resp = self.stream_response("/memory").await?;
         let stream = LineStream::new(resp.bytes_stream().map(|c| c.map(|b| b.to_vec())));
         Ok(stream.map(|line| line.and_then(|l| l.parse())))
+    }
+
+    /// GET /connections → 连接快照（全量，一次返回）。
+    pub async fn get_connections(&self) -> Result<ConnSnapshot, ApiError> {
+        let body = self.request_text(reqwest::Method::GET, "/connections").await?;
+        body.parse()
     }
 
     async fn request_text(
@@ -419,6 +542,19 @@ mod tests {
                                 .await;
                             return;
                         }
+                        "/connections" => {
+                            let payload = "{\"downloadTotal\":9,\"uploadTotal\":8,\"memory\":7,\"connections\":[{\"id\":\"conn1\",\"metadata\":{\"network\":\"tcp\",\"host\":\"conn.example.com\",\"destinationIP\":\"9.9.9.9\",\"destinationPort\":\"443\"},\"upload\":77,\"download\":88,\"start\":\"2026-08-12T10:00:00.000Z\",\"chains\":[\"DIRECT\"],\"rule\":\"DIRECT\",\"rulePayload\":\"\"}]}";
+                            let _ = sock
+                                .write_all(
+                                    format!(
+                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                                        payload.len()
+                                    )
+                                    .as_bytes(),
+                                )
+                                .await;
+                            return;
+                        }
                         _ => r#"{"ok":true}"#.to_string(),
                     };
                     let _ = sock
@@ -528,6 +664,87 @@ mod tests {
         let frames: Vec<MemoryFrame> = stream.take(1).map(|r| r.unwrap()).collect().await;
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].inuse, 111);
+    }
+
+    // ---------- /connections 解析 ----------
+
+    #[test]
+    fn conn_snapshot_full_json() {
+        let snap = ConnSnapshot::from_str(
+            r#"{"downloadTotal":111,"uploadTotal":222,"memory":333,"connections":[
+                {"id":"c1","metadata":{"network":"tcp","type":"HTTP","sourceIP":"127.0.0.1",
+                 "destinationIP":"1.2.3.4","sourcePort":"55555","destinationPort":"443",
+                 "host":"example.com","dnsMode":"fake-ip","processPath":"/usr/bin/curl",
+                 "remoteDestination":"1.2.3.4:443","sniffHost":""},
+                 "upload":100,"download":200,
+                 "start":"2026-08-12T10:00:00.000Z",
+                 "chains":["DIRECT"],"rule":"DIRECT","rulePayload":"","dlSpeed":5,"ulSpeed":3,"isAlive":true}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(snap.download_total, 111);
+        assert_eq!(snap.upload_total, 222);
+        assert_eq!(snap.memory, 333);
+        assert_eq!(snap.connections.len(), 1);
+        let c = &snap.connections[0];
+        assert_eq!(c.id, "c1");
+        assert_eq!(c.meta.host, "example.com");
+        assert_eq!(c.meta.network, "tcp");
+        assert_eq!(c.meta.destination_ip, "1.2.3.4");
+        assert_eq!(c.meta.process_path, "/usr/bin/curl");
+        assert_eq!(c.upload, 100);
+        assert_eq!(c.download, 200);
+        assert!(c.start.is_some());
+        assert_eq!(c.chains, vec!["DIRECT".to_string()]);
+        assert_eq!(c.rule, "DIRECT");
+        assert_eq!(c.dl_speed, 5);
+        assert_eq!(c.ul_speed, 3);
+        assert!(c.is_alive);
+    }
+
+    #[test]
+    fn conn_snapshot_missing_and_empty() {
+        // 顶层缺字段 + connections 缺失 + 空数组
+        let snap = ConnSnapshot::from_str(r#"{}"#).unwrap();
+        assert_eq!(snap.download_total, 0);
+        assert!(snap.connections.is_empty());
+        let snap = ConnSnapshot::from_str(r#"{"connections":[]}"#).unwrap();
+        assert!(snap.connections.is_empty());
+        let snap = ConnSnapshot::from_str(r#"{"connections":null}"#).unwrap();
+        assert!(snap.connections.is_empty());
+    }
+
+    #[test]
+    fn conn_start_parsing_variants() {
+        // 合法 RFC3339
+        let snap = ConnSnapshot::from_str(
+            r#"{"connections":[{"id":"a","start":"2026-08-12T10:00:00.000Z"}]}"#,
+        )
+        .unwrap();
+        assert!(snap.connections[0].start.is_some());
+        // RFC3339Nano（带纳秒）
+        let snap = ConnSnapshot::from_str(
+            r#"{"connections":[{"id":"b","start":"2026-08-12T10:00:00.123456789Z"}]}"#,
+        )
+        .unwrap();
+        assert!(snap.connections[0].start.is_some());
+        // 缺失 / 非法 → None，不整条丢弃
+        let snap = ConnSnapshot::from_str(
+            r#"{"connections":[{"id":"c"},{"id":"d","start":"not-a-date"}]}"#,
+        )
+        .unwrap();
+        assert!(snap.connections[0].start.is_none());
+        assert!(snap.connections[1].start.is_none());
+        assert_eq!(snap.connections.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn get_connections_ok() {
+        let (port, _rx) = spawn_api_server().await;
+        let snap = client_on(port).get_connections().await.unwrap();
+        assert_eq!(snap.connections.len(), 1);
+        assert_eq!(snap.connections[0].meta.host, "conn.example.com");
+        assert_eq!(snap.connections[0].upload, 77);
     }
 
     #[tokio::test]

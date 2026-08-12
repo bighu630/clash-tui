@@ -65,6 +65,8 @@ impl LogLevel {
     }
 
     /// 从 JSON 字符串解析；未知级别归为 info。
+    /// 命名沿用计划契约（供 LogEntry::parse 调用），非 std::str::FromStr 实现。
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> LogLevel {
         match s {
             "error" => LogLevel::Error,
@@ -87,6 +89,7 @@ impl LogEntry {
     /// 解析一行日志，兼容两种格式：
     /// - 标准：{"type":"info","payload":"..."}
     /// - structured：{"time":"HH:MM:SS","level":"info","message":"...","fields":[]}
+    ///
     /// 无法解析/缺关键字段时降级为 Debug 级原始文本（不丢日志）。
     pub fn parse(line: &str) -> LogEntry {
         let v: serde_json::Value = match serde_json::from_str(line) {

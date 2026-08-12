@@ -98,6 +98,12 @@ impl LogsPage {
     }
 }
 
+impl Default for LogsPage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Page for LogsPage {
     fn handle_key(&mut self, key: KeyEvent, st: &mut AppState) -> Option<UiCommand> {
         match key.code {

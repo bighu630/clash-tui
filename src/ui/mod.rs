@@ -3,6 +3,7 @@
 
 pub mod dashboard;
 pub mod groups;
+pub mod logs;
 pub mod rules;
 pub mod subscriptions;
 pub mod widgets;

@@ -245,7 +245,7 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
 mod tests {
     use super::*;
     use crate::core::models::{
-        Overrides, ProxyNode, Subscription, SubscriptionCache, TunSettings, UserRule,
+        Overrides, ProxyNode, RunMode, Subscription, SubscriptionCache, TunSettings, UserRule,
     };
     use serde_yaml::{Mapping, Value};
 
@@ -834,6 +834,7 @@ mod tests {
                 enable: true,
                 ..Default::default()
             },
+            run_mode: RunMode::Systemd,
             ..Default::default()
         };
         let out = merge(MergeContext {

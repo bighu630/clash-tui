@@ -11,7 +11,7 @@ use ratatui::Frame;
 
 use crate::app::{AppState, UiCommand};
 use crate::core::merger::{merge, MergeContext};
-use crate::core::models::{DnsSettings, NetworkSettings, TunSettings};
+use crate::core::models::{DnsSettings, NetworkSettings, RunMode, TunSettings};
 use crate::core::settings::{generate_secret, save_settings};
 use crate::ui::widgets::{FieldKind, FormField, MessagePopup};
 use crate::ui::Page;
@@ -270,6 +270,9 @@ pub(crate) fn apply_values(f: &[FormField]) -> Result<NetworkSettings, Validatio
         },
         external_controller: nonempty("external-controller", &f[20].value)?,
         secret: nonempty("secret", &f[21].value)?,
+        // 运行方式不纳入表单（Task 5 加入表单区块）；表单保存时保持 systemd，
+        // run_mode 仅由 settings.toml 持久化值决定。
+        run_mode: RunMode::Systemd,
     })
 }
 
@@ -694,6 +697,7 @@ mod tests {
     fn fixed_settings() -> NetworkSettings {
         NetworkSettings {
             secret: "a".repeat(32),
+            run_mode: RunMode::Systemd,
             mode: "global".into(),
             ipv6: true,
             allow_lan: true,

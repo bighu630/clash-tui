@@ -161,7 +161,7 @@ fn with_dir<T>(f: impl FnOnce() -> T) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::models::{SubscriptionCache, TunSettings, UserGroup, UserRule};
+    use crate::core::models::{RunMode, SubscriptionCache, TunSettings, UserGroup, UserRule};
 
     #[test]
     fn settings_roundtrip() {
@@ -286,6 +286,7 @@ mod tests {
                     enable: true,
                     ..Default::default()
                 },
+                run_mode: RunMode::Systemd,
                 ..Default::default()
             };
             save_settings(&s).unwrap();
@@ -319,6 +320,38 @@ mod tests {
             save_settings(&s).unwrap();
             let file_mode = fs::metadata(settings_path()).unwrap().permissions().mode() & 0o777;
             assert_eq!(file_mode, 0o600, "配置文件应为 0600");
+        });
+    }
+
+    /// 旧版 settings.toml 无 run_mode 字段 → 加载为 systemd（serde default 兼容）。
+    #[test]
+    fn legacy_settings_file_defaults_run_mode() {
+        with_dir(|| {
+            let old = "mode = \"rule\"\nipv6 = false\nallow_lan = false\nport = 7890\nsocks_port = 7891\n\
+mixed_port = 7892\nlog_level = \"info\"\nexternal_controller = \"127.0.0.1:9090\"\nsecret = \"1234567890abcdef1234567890abcdef\"\n\
+[tun]\nenable = false\nstack = \"mixed\"\nauto_route = true\ndns_hijack = [\"any:53\"]\nmtu = 9000\n\
+[dns]\nenable = false\nlisten = \"0.0.0.0:1053\"\nenhanced_mode = \"fake-ip\"\nfake_ip_range = \"198.18.0.1/16\"\n\
+nameserver = [\"https://doh.pub/dns-query\"]\ndefault_nameserver = [\"223.5.5.5\"]\nfallback = []\nfake_ip_filter = []\n";
+            std::fs::write(settings_path(), old).unwrap();
+            let s = load_settings().unwrap();
+            assert_eq!(s.run_mode, RunMode::Systemd);
+        });
+    }
+
+    /// run_mode 持久化往返：save → load 全等。
+    #[test]
+    fn run_mode_roundtrip() {
+        with_dir(|| {
+            let s = NetworkSettings {
+                run_mode: RunMode::Direct,
+                ..NetworkSettings::default()
+            };
+            save_settings(&s).unwrap();
+            let back = load_settings().unwrap();
+            assert_eq!(back.run_mode, RunMode::Direct);
+            assert!(std::fs::read_to_string(settings_path())
+                .unwrap()
+                .contains("run_mode = \"direct\""));
         });
     }
 }

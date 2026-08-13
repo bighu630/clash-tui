@@ -5,6 +5,16 @@ Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订�
 
 仓库：<https://github.com/bighu630/clash-tui>
 
+## 平台支持
+
+| 平台 | 运行方式 | 说明 |
+|---|---|---|
+| Linux | systemd（默认）/ 直接进程 | 直接进程经提权脚本 `mihomo-proc` 管理；配置目录 `~/.config/mihomo-tui/` |
+| Windows | 直接进程（唯一） | TUI 直接启动/停止/重启 `mihomo.exe`；配置目录 `%APPDATA%\mihomo-tui\` |
+
+Windows 没有 systemd/sudo 体系：在设置页「运行方式」区块设置 mihomo 可执行文件路径后，
+TUI 直接以子进程方式管理 mihomo（详见「Windows 使用指南」）。
+
 ## 功能总览
 
 六个页面，顶部 Tabs 切换（`Tab`/`←`/`→`/`1`-`6`），底部为按键提示栏与最近通知
@@ -221,7 +231,51 @@ cargo build --release
 - 切换页面不丢，退出后清空（重启不保留）
 - 切换级别不自动清空缓冲：旧级别与新级别条目混合显示，直至滚出缓冲或按 c 清空
 
+## Windows 使用指南
+
+### 1. 安装
+
+1. 下载 mihomo Windows 版（[GitHub Releases](https://github.com/MetaCubeX/mihomo/releases)，
+   选 `mihomo-windows-amd64-v*.zip`），解压到任意目录（如 `C:\mihomo\`）。
+   **如需 TUN 模式，请保留同目录的 `wintun.dll`**（官方 zip 自带）。
+2. 下载本项目的 Windows release（`mihomo-tui-v*-x86_64-pc-windows-msvc.zip`）并解压。
+3. 在终端中运行 `mihomo-tui.exe`（推荐 Windows Terminal）。
+
+### 2. 设置 mihomo 路径
+
+- 设置页（`s` 键）→「运行方式」区块 → `mihomo-bin` 行按 `Enter`
+- 输入 mihomo 可执行文件**绝对路径**（如 `C:\mihomo\mihomo.exe`）并确认
+- TUI 会校验路径并执行 `mihomo.exe -v` 探测；路径保存在 `%APPDATA%\mihomo-tui\settings.toml`
+
+### 3. 使用
+
+- 订阅页按 `a` 添加订阅 → 按 `Enter` 激活：自动完成「合并 → `mihomo -t` 校验 →
+  写入 config.yaml → 重启 mihomo」
+- 设置页「运行方式」区块的**启动/停止/重启**按钮直接管理 mihomo 进程
+- 所有配置存放在 `%APPDATA%\mihomo-tui\`：`config.yaml`、`mihomo.pid`、`mihomo.log`、
+  `settings.toml`、`subscriptions.toml`、`overrides.toml`
+- mihomo 以子进程方式运行（`CREATE_NO_WINDOW`，不弹控制台窗口）；**TUI 退出后 mihomo
+  继续运行**，再次启动 TUI 可看到状态并停止/重启
+
+### 4. TUN 模式（管理员权限）
+
+Windows 上开启 TUN 需要**管理员权限**（UAC 提权是进程级属性，运行中无法提升）：
+
+- 以管理员身份运行 TUI（右键 `mihomo-tui.exe` →「以管理员身份运行」），且
+  `mihomo.exe` 同目录存在 `wintun.dll`
+- 若 TUI 未以管理员运行：设置页开启 TUN 时会弹警告，启动时也会提示一次；
+  此时 mihomo 无法创建 TUN 设备（其他功能不受影响）
+
+### 5. 与 Linux 的差异
+
+- 无 systemd 服务、无开机自启（重启系统后需手动启动 mihomo）
+- 无提权安装器（`i` 键安装流程仅在 Linux 可用）
+- mihomo 日志写入 `%APPDATA%\mihomo-tui\mihomo.log`（持续追加，无轮转）
+
 ## 前提
+
+**Linux**：Arch Linux（或任何能装 mihomo 的 Linux 发行版；Arch 上 `sudo pacman -S mihomo`）
+**Windows**：见「Windows 使用指南」（mihomo.exe + wintun.dll，无 systemd/sudo 要求）
 
 - **Arch Linux**（或任何能装 mihomo 的 Linux 发行版；Arch 上 `sudo pacman -S mihomo`）
 - mihomo 已安装并作为 **systemd 服务**存在（安装器要求 `systemctl list-unit-files` 中出现 `mihomo.service`）；也可在设置页切换「直接进程」运行方式，不依赖 systemd 服务（见「两种运行方式与安全设计」）

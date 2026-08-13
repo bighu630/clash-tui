@@ -47,6 +47,11 @@ pub enum ApplyError {
          或检查 /etc/sudoers.d/99-mihomo 与 /etc/sudoers 的 @includedir /etc/sudoers.d 配置"
     )]
     NotInSudoers,
+    #[error(
+        "缺少提权脚本 /usr/local/sbin/mihomo-proc（直接进程模式需要）。\n\
+         请重新安装提权组件：仪表盘页按 i，或手动安装 resources/mihomo-proc.sh 并更新 sudoers"
+    )]
+    ProcScriptMissing,
     #[error("mihomo -t 校验失败:\n{stderr}")]
     ValidateFailed { stderr: String },
     #[error("执行失败:\n{stdout}\n{stderr}")]
@@ -211,7 +216,11 @@ async fn run_apply_script(
 }
 
 /// `sudo -n /usr/local/sbin/mihomo-proc`，stdin 首行 = 命令（start/stop/restart）。
+/// 脚本未安装时直接返回 ProcScriptMissing（明确引导重装，避免 sudo 裸报"找不到命令"）。
 pub async fn proc_control(op: ProcOp) -> Result<ApplyOutcome, ApplyError> {
+    if !is_proc_script_installed().await {
+        return Err(ApplyError::ProcScriptMissing);
+    }
     run_apply_script(
         "/usr/local/sbin/mihomo-proc",
         &format!("{}\n", op.stdin_line()),
@@ -222,7 +231,11 @@ pub async fn proc_control(op: ProcOp) -> Result<ApplyOutcome, ApplyError> {
 }
 
 /// `sudo -n /usr/local/sbin/mihomo-proc` status：查询进程实例状态。
+/// 脚本未安装时返回 ProcScriptMissing（调用方决定静默或提示）。
 pub async fn proc_status() -> Result<ProcStatus, ApplyError> {
+    if !is_proc_script_installed().await {
+        return Err(ApplyError::ProcScriptMissing);
+    }
     let out = run_apply_script("/usr/local/sbin/mihomo-proc", "status\n", true, STATUS_TMP).await?;
     Ok(parse_proc_status(&out.stdout))
 }
@@ -620,12 +633,34 @@ mod tests {
                 assert!(!s.running);
             }
             Err(
-                ApplyError::SudoNotAvailable
+                ApplyError::ProcScriptMissing
+                | ApplyError::SudoNotAvailable
                 | ApplyError::NotInSudoers
                 | ApplyError::CommandFailed { .. }
                 | ApplyError::SudoNeedsPassword,
             ) => {}
             Err(other) => panic!("意外错误: {other:?}"),
+        }
+    }
+
+    /// 环境自适应：mihomo-proc 未安装时 proc_control/proc_status 直接返回
+    /// ProcScriptMissing（明确引导重装，而非 sudo 裸报"找不到命令"）。
+    #[tokio::test]
+    async fn proc_ops_report_missing_script_with_guidance() {
+        if !is_proc_script_installed().await {
+            let e = proc_control(ProcOp::Start).await.unwrap_err();
+            assert!(
+                matches!(e, ApplyError::ProcScriptMissing),
+                "未安装时应返回 ProcScriptMissing: {e:?}"
+            );
+            let e = proc_status().await.unwrap_err();
+            assert!(matches!(e, ApplyError::ProcScriptMissing));
+            // 错误文案含重装引导
+            assert!(e.to_string().contains("mihomo-proc"));
+            assert!(e.to_string().contains("按 i"));
+        } else {
+            // 已安装环境：不额外断言（正常链路由其他测试覆盖）
+            let _ = proc_control(ProcOp::Stop).await;
         }
     }
 }

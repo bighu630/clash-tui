@@ -16,7 +16,10 @@ use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 use ratatui::{CompletedFrame, Terminal};
 use tokio::sync::mpsc;
 
-use crate::core::apply::{apply_config, validate_config, ApplyOutcome, ProcOp, RunStatus};
+use crate::core::apply::{
+    apply_config, proc_control, proc_status, service_is_active, service_unit_exists,
+    validate_config, ApplyOutcome, ProcOp, RunStatus,
+};
 use crate::core::client::GROUP_DELAY_TIMEOUT_MS;
 use crate::core::client::{
     Client, ConnInfo, ConnSnapshot, GroupInfo, LogEntry, LogLevel, MemoryFrame, RuntimeConfig,
@@ -449,6 +452,7 @@ where
         if idx == 5 {
             let st = &self.state;
             self.pages[idx].on_enter(st);
+            let _ = self.cmd_tx.send(UiCommand::RefreshStatus);
         }
     }
 
@@ -619,6 +623,30 @@ where
         Ok(())
     }
 
+    /// 启动引导：systemd 模式且服务不可用 → 通知用户（设置页可启动服务或切换 direct 模式）。
+    /// 非阻塞、无 sudo；检测失败静默。
+    fn spawn_startup_guard(&self) {
+        if self.state.settings.run_mode != RunMode::Systemd {
+            return;
+        }
+        let ui_tx = self.ui_tx.clone();
+        tokio::spawn(async move {
+            if !service_unit_exists().await {
+                let _ = ui_tx.send(UiEvent::StartupNotice(
+                    "未检测到 mihomo.service：设置页 Enter 查看指引，或设置 mihomo 路径切换 direct 模式"
+                        .to_string(),
+                ));
+                return;
+            }
+            if !service_is_active().await {
+                let _ = ui_tx.send(UiEvent::StartupNotice(
+                    "mihomo 服务未运行：设置页 Enter 启动服务，或设置 mihomo 路径切换 direct 模式"
+                        .to_string(),
+                ));
+            }
+        });
+    }
+
     fn on_bg_msg(&mut self, msg: BgMsg) {
         match msg {
             BgMsg::Traffic(frame) => {
@@ -733,6 +761,8 @@ where
                         self.result_popup = Some(MessagePopup::new("应用结果".into(), lines));
                         self.state.notice("[✓] 配置已应用".to_string());
                     }
+                    // 应用后刷新运行状态（进程模式重启后 PID 变化）
+                    let _ = self.cmd_tx.send(UiCommand::RefreshStatus);
                 }
                 Err(e) => self.popup_error("应用失败", e),
             },
@@ -864,9 +894,35 @@ where
                 }
                 Err(e) => self.popup_error("延迟测试失败", e),
             },
-            UiEvent::RunStatusDone(_) | UiEvent::ProcActionDone(_) | UiEvent::StartupNotice(_) => {
-                // 骨架阶段占位：Task 6 实现
-            }
+            UiEvent::RunStatusDone(res) => match res {
+                Ok(rs) => self.state.run_status = Some(rs),
+                Err(_) => self.state.run_status = None,
+            },
+            UiEvent::ProcActionDone(res) => match res {
+                Ok(outcome) => {
+                    let stdout = outcome.stdout.trim().to_string();
+                    let stderr = outcome.stderr.trim().to_string();
+                    if stdout.is_empty() && stderr.is_empty() {
+                        self.state.notice("[✓] 操作完成".to_string());
+                    } else {
+                        let mut lines: Vec<String> = Vec::new();
+                        if !stdout.is_empty() {
+                            lines.extend(stdout.lines().map(|s| s.to_string()));
+                        }
+                        if !stderr.is_empty() {
+                            lines.push(format!("stderr: {stderr}"));
+                        }
+                        self.result_popup = Some(MessagePopup::new("操作结果".into(), lines));
+                        self.state.notice(format!(
+                            "[✓] {}",
+                            stdout.lines().next().unwrap_or("操作完成")
+                        ));
+                    }
+                    let _ = self.cmd_tx.send(UiCommand::RefreshStatus);
+                }
+                Err(e) => self.popup_error("操作失败", e),
+            },
+            UiEvent::StartupNotice(msg) => self.state.notice(msg),
             UiEvent::LogLine(entry) => self.on_log(entry),
         }
     }
@@ -901,13 +957,14 @@ where
             }
             UiCommand::ApplyConfig(yaml) => {
                 let sudo_tx = self.sudo_tx.clone();
+                let mode = self.state.settings.run_mode;
                 tokio::spawn(async move {
                     // 先 mihomo -t 校验，再非交互 sudo
                     match validate_config(&yaml).await {
                         Err(e) => {
                             let _ = ui_tx.send(UiEvent::ApplyDone(Err(e.to_string())));
                         }
-                        Ok(()) => match apply_config(&yaml, true, RunMode::Systemd).await {
+                        Ok(()) => match apply_config(&yaml, true, mode).await {
                             Ok(outcome) => {
                                 let _ = ui_tx.send(UiEvent::ApplyDone(Ok(outcome)));
                             }
@@ -1002,11 +1059,56 @@ where
                     InteractiveTask::Install,
                 ));
             }
-            UiCommand::RefreshStatus
-            | UiCommand::ProcAction(_)
-            | UiCommand::StartSystemdService
-            | UiCommand::SaveMihomoBin(_) => {
-                // 骨架阶段占位：Task 6 实现（刷新状态/进程操作/交互提权）
+            UiCommand::RefreshStatus => {
+                let ui_tx = self.ui_tx.clone();
+                tokio::spawn(async move {
+                    let unit = service_unit_exists().await;
+                    let active = service_is_active().await;
+                    // 进程实例查询失败（未装脚本/未授权）静默置 None，设置页显示"查询失败"
+                    let proc = proc_status().await.ok();
+                    let _ = ui_tx.send(UiEvent::RunStatusDone(Ok(RunStatus {
+                        service_unit: Some(unit),
+                        service_active: Some(active),
+                        proc,
+                    })));
+                });
+            }
+            UiCommand::ProcAction(op) => {
+                let ui_tx = self.ui_tx.clone();
+                tokio::spawn(async move {
+                    match proc_control(op).await {
+                        Ok(outcome) => {
+                            let _ = ui_tx.send(UiEvent::ProcActionDone(Ok(outcome)));
+                        }
+                        Err(crate::core::apply::ApplyError::SudoNeedsPassword) => {
+                            let _ = ui_tx.send(UiEvent::ProcActionDone(Err(
+                                "sudo 需要密码：请确认已安装提权组件（仪表盘按 i）并重新登录终端"
+                                    .to_string(),
+                            )));
+                        }
+                        Err(e) => {
+                            let _ = ui_tx.send(UiEvent::ProcActionDone(Err(e.to_string())));
+                        }
+                    }
+                });
+            }
+            UiCommand::StartSystemdService => {
+                self.pending_confirm = Some((
+                    ConfirmPopup::new(
+                        "启动 systemd 服务".into(),
+                        "需要 root 权限执行 systemctl start mihomo。是否继续？".into(),
+                    ),
+                    InteractiveTask::StartSystemdService,
+                ));
+            }
+            UiCommand::SaveMihomoBin(path) => {
+                self.pending_confirm = Some((
+                    ConfirmPopup::new(
+                        "保存 mihomo 路径".into(),
+                        format!("需要 root 权限写入 {path} 到系统配置。是否继续？"),
+                    ),
+                    InteractiveTask::SaveMihomoBin(path),
+                ));
             }
             UiCommand::SetLogLevel(level) => {
                 let _ = self.log_level_tx.send(level);
@@ -1020,9 +1122,12 @@ where
         let _ = crossterm::execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen);
 
         let result = match task {
-            InteractiveTask::Apply(yaml) => apply_config(&yaml, false, RunMode::Systemd)
-                .await
-                .map_err(|e| e.to_string()),
+            InteractiveTask::Apply(yaml) => {
+                let mode = self.state.settings.run_mode;
+                apply_config(&yaml, false, mode)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
             InteractiveTask::Install => crate::service::installer::install()
                 .await
                 .map(|lines| ApplyOutcome {
@@ -1031,9 +1136,25 @@ where
                     stderr: String::new(),
                 })
                 .map_err(|e| e.to_string()),
-            InteractiveTask::SaveMihomoBin(_) | InteractiveTask::StartSystemdService => {
-                // 骨架阶段占位：Task 6 实现
-                Err("交互任务尚未接线".to_string())
+            InteractiveTask::SaveMihomoBin(path) => {
+                crate::service::installer::save_mihomo_bin(&path)
+                    .await
+                    .map(|lines| ApplyOutcome {
+                        success: true,
+                        stdout: lines.join("\n"),
+                        stderr: String::new(),
+                    })
+                    .map_err(|e| e.to_string())
+            }
+            InteractiveTask::StartSystemdService => {
+                crate::service::installer::start_systemd_service()
+                    .await
+                    .map(|lines| ApplyOutcome {
+                        success: true,
+                        stdout: lines.join("\n"),
+                        stderr: String::new(),
+                    })
+                    .map_err(|e| e.to_string())
             }
         };
 
@@ -1425,6 +1546,7 @@ pub async fn run() -> Result<(), BoxError> {
             InteractiveTask::Install,
         ));
     }
+    app.spawn_startup_guard();
     let result = app
         .run_loop(traffic_rx, memory_rx, conns_rx, log_rx, ui_rx, sudo_rx)
         .await;
@@ -1435,6 +1557,7 @@ pub async fn run() -> Result<(), BoxError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::apply::ProcStatus;
     use crate::core::models::UserGroup;
     use crate::core::settings::with_settings_dir;
     use ratatui::backend::TestBackend;
@@ -1999,6 +2122,60 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(UiCommand::RefreshGroups)));
         app.switch_page(0);
         assert!(rx.try_recv().is_err(), "非规则组页不应发刷新");
+    }
+
+    /// RunStatusDone 更新 run_status；失败置 None。
+    #[test]
+    fn run_status_done_updates_state() {
+        let (mut app, _rx) = test_app(20);
+        app.on_ui_event(UiEvent::RunStatusDone(Ok(RunStatus {
+            service_unit: Some(true),
+            service_active: Some(true),
+            proc: Some(ProcStatus {
+                bin: Some("/usr/bin/mihomo".into()),
+                pid: Some(1),
+                running: true,
+            }),
+        })));
+        let rs = app.state.run_status.as_ref().expect("应更新 run_status");
+        assert_eq!(rs.service_active, Some(true));
+        assert_eq!(rs.proc.as_ref().unwrap().pid, Some(1));
+        app.on_ui_event(UiEvent::RunStatusDone(Err("查询失败".into())));
+        assert!(app.state.run_status.is_none(), "失败应清空");
+    }
+
+    /// ProcActionDone 成功 → notice + 触发 RefreshStatus（cmd 队列出现）。
+    #[test]
+    fn proc_action_done_notices_and_refreshes() {
+        let (mut app, mut cmd_rx) = test_app(20);
+        app.on_ui_event(UiEvent::ProcActionDone(Ok(ApplyOutcome {
+            success: true,
+            stdout: "OK: mihomo 已停止".into(),
+            stderr: String::new(),
+        })));
+        assert!(app
+            .state
+            .notices
+            .iter()
+            .any(|(_, t)| t.contains("mihomo 已停止")));
+        // 状态刷新命令已入队
+        let got = cmd_rx.try_recv();
+        assert!(
+            matches!(got, Ok(UiCommand::RefreshStatus)),
+            "应触发状态刷新: {got:?}"
+        );
+    }
+
+    /// StartupNotice → notice 入列。
+    #[test]
+    fn startup_notice_queues_notice() {
+        let (mut app, _rx) = test_app(20);
+        app.on_ui_event(UiEvent::StartupNotice("mihomo 服务未运行".into()));
+        assert!(app
+            .state
+            .notices
+            .iter()
+            .any(|(_, t)| t.contains("mihomo 服务未运行")));
     }
 
     fn conn(id: &str, start: Option<&str>, upload: u64, download: u64) -> ConnInfo {

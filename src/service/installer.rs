@@ -20,6 +20,12 @@ use crate::core::settings::config_dir;
 
 /// 提权脚本安装路径（sudoers 授权即针对此路径）
 pub const APPLY_SCRIPT: &str = "/usr/local/sbin/mihomo-apply";
+/// 直接进程模式提权脚本安装路径（sudoers 第二条授权）
+pub const PROC_SCRIPT: &str = "/usr/local/sbin/mihomo-proc";
+/// root 侧路径配置文件目录
+pub const PROC_CONF_DIR: &str = "/etc/mihomo-tui";
+/// root 侧路径配置文件（mihomo 二进制唯一事实源，root:root 0600）
+pub const PROC_CONF: &str = "/etc/mihomo-tui/mihomo.conf";
 /// sudoers 规则文件路径
 pub const SUDOERS_FILE: &str = "/etc/sudoers.d/99-mihomo";
 /// 提权授权组名
@@ -32,9 +38,12 @@ pub fn installed_marker_path() -> PathBuf {
     config_dir().join(INSTALL_MARKER)
 }
 
-/// 生成 sudoers 规则行：组内成员免密以 root 执行提权脚本（内容与安装路径强绑定）。
-pub fn sudoers_line() -> String {
-    format!("%{ADMIN_GROUP} ALL=(root) NOPASSWD: {APPLY_SCRIPT}\n")
+/// 生成 sudoers 规则行：组内成员免密以 root 执行两个无参提权脚本（内容与安装路径强绑定）。
+pub fn sudoers_lines() -> Vec<String> {
+    vec![
+        format!("%{ADMIN_GROUP} ALL=(root) NOPASSWD: {APPLY_SCRIPT}\n"),
+        format!("%{ADMIN_GROUP} ALL=(root) NOPASSWD: {PROC_SCRIPT}\n"),
+    ]
 }
 
 /// 首次安装检测：提权脚本存在（系统侧）或本地安装标记存在（本机侧）→ 已安装，返回 false。
@@ -114,19 +123,22 @@ pub async fn install() -> Result<Vec<String>, InstallError> {
     if !mihomo_exists() {
         return Err(InstallError::MihomoNotFound);
     }
-    logs.push("[1/6] 已检测到 mihomo 二进制".to_string());
+    logs.push("[1/7] 已检测到 mihomo 二进制".to_string());
 
     // b. 检查 systemd 服务单元
     if !crate::core::apply::service_unit_exists().await {
         return Err(InstallError::ServiceUnitMissing);
     }
-    logs.push("[2/6] 已检测到 mihomo.service 系统单元".to_string());
+    logs.push("[2/7] 已检测到 mihomo.service 系统单元".to_string());
 
     // c. 确保 mihomo-admin 系统组存在
     ensure_group(&mut logs)?;
 
     // d. 安装提权脚本
     install_apply_script(&mut logs)?;
+
+    // d2. 安装直接进程模式脚本 mihomo-proc
+    install_proc_script(&mut logs)?;
 
     // e. 写入 sudoers 规则并校验
     install_sudoers(&mut logs)?;
@@ -234,12 +246,12 @@ fn ensure_group(logs: &mut Vec<String>) -> Result<(), InstallError> {
         .map(|s| s.success())
         .unwrap_or(false);
     if exists {
-        logs.push("[3/6] 系统组 mihomo-admin 已存在".to_string());
+        logs.push("[3/7] 系统组 mihomo-admin 已存在".to_string());
         return Ok(());
     }
     let out = run_sudo("groupadd", &["--system", ADMIN_GROUP])?;
     check_output(out, "sudo groupadd --system mihomo-admin")?;
-    logs.push("[3/6] 已创建系统组 mihomo-admin".to_string());
+    logs.push("[3/7] 已创建系统组 mihomo-admin".to_string());
     Ok(())
 }
 
@@ -255,13 +267,29 @@ fn install_apply_script(logs: &mut Vec<String>) -> Result<(), InstallError> {
     let out = run_sudo("chmod", &["755", APPLY_SCRIPT])?;
     check_output(out, &format!("sudo chmod 755 {APPLY_SCRIPT}"))?;
 
-    logs.push("[4/6] 已安装提权脚本 /usr/local/sbin/mihomo-apply（root:root 0755）".to_string());
+    logs.push("[4/7] 已安装提权脚本 /usr/local/sbin/mihomo-apply（root:root 0755）".to_string());
+    Ok(())
+}
+
+/// d2. 安装提权脚本 `/usr/local/sbin/mihomo-proc`（root:root 0755）。
+fn install_proc_script(logs: &mut Vec<String>) -> Result<(), InstallError> {
+    let script = include_str!("../../resources/mihomo-proc.sh");
+    let out = sudo_tee(PROC_SCRIPT, script)?;
+    check_output(out, &format!("sudo tee {PROC_SCRIPT}"))?;
+
+    let out = run_sudo("chown", &["root:root", PROC_SCRIPT])?;
+    check_output(out, &format!("sudo chown root:root {PROC_SCRIPT}"))?;
+
+    let out = run_sudo("chmod", &["755", PROC_SCRIPT])?;
+    check_output(out, &format!("sudo chmod 755 {PROC_SCRIPT}"))?;
+
+    logs.push("[5/7] 已安装提权脚本 /usr/local/sbin/mihomo-proc（root:root 0755）".to_string());
     Ok(())
 }
 
 /// e. 写入 sudoers 规则并校验（`sudo tee` 写入 → 0440 → `visudo -cf`）。
 fn install_sudoers(logs: &mut Vec<String>) -> Result<(), InstallError> {
-    let out = sudo_tee(SUDOERS_FILE, &sudoers_line())?;
+    let out = sudo_tee(SUDOERS_FILE, &sudoers_lines().join(""))?;
     check_output(out, &format!("sudo tee {SUDOERS_FILE}"))?;
 
     let out = run_sudo("chmod", &["0440", SUDOERS_FILE])?;
@@ -281,7 +309,7 @@ fn install_sudoers(logs: &mut Vec<String>) -> Result<(), InstallError> {
             ),
         });
     }
-    logs.push("[5/6] 已写入 /etc/sudoers.d/99-mihomo（0440）并通过 visudo -cf 校验".to_string());
+    logs.push("[6/7] 已写入 /etc/sudoers.d/99-mihomo（0440）并通过 visudo -cf 校验".to_string());
     Ok(())
 }
 
@@ -295,7 +323,7 @@ fn add_user_to_group(logs: &mut Vec<String>) -> Result<(), InstallError> {
     }
     let out = run_sudo("usermod", &["-aG", ADMIN_GROUP, &user])?;
     check_output(out, &format!("sudo usermod -aG {ADMIN_GROUP} {user}"))?;
-    logs.push(format!("[6/6] 已将当前用户 {user} 加入 mihomo-admin 组"));
+    logs.push(format!("[7/7] 已将当前用户 {user} 加入 mihomo-admin 组"));
     Ok(())
 }
 
@@ -331,6 +359,85 @@ fn current_user() -> String {
         .unwrap_or_default()
 }
 
+/// 校验 mihomo 二进制路径：绝对路径 + 字符集白名单 + 存在 + 可执行 + `-v` 版本探测。
+/// 供设置页路径保存与提权保存双重校验（防御纵深）。
+pub fn validate_mihomo_bin(path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("路径不能为空".to_string());
+    }
+    if !path.starts_with('/') {
+        return Err("路径必须为绝对路径（以 / 开头）".to_string());
+    }
+    if !path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '+' | '-' | '/'))
+    {
+        return Err("路径含不允许的字符（仅允许字母数字与 _ . + - /）".to_string());
+    }
+    if !Path::new(path).exists() {
+        return Err(format!("文件不存在: {path}"));
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let mode = Path::new(path)
+        .metadata()
+        .map_err(|e| format!("无法读取文件信息: {e}"))?
+        .permissions()
+        .mode();
+    if mode & 0o111 == 0 {
+        return Err(format!("文件不可执行: {path}"));
+    }
+    // 版本探测：`<path> -v` 输出应含 mihomo 字样
+    let out = Command::new(path)
+        .arg("-v")
+        .output()
+        .map_err(|e| format!("执行 {path} -v 失败: {e}"))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if !text.to_lowercase().contains("mihomo") {
+        return Err(format!(
+            "{path} -v 输出不含 mihomo 字样，可能不是 mihomo 二进制:\n{text}"
+        ));
+    }
+    Ok(())
+}
+
+/// 交互式提权保存 mihomo 路径：校验 → 建目录 → sudo tee 写 conf → chown/chmod。
+/// 由 app 在恢复终端后调用（需用户输入 sudo 密码——不进 NOPASSWD 授权面）。
+pub async fn save_mihomo_bin(path: &str) -> Result<Vec<String>, InstallError> {
+    let mut logs = Vec::new();
+    validate_mihomo_bin(path).map_err(InstallError::Other)?;
+    logs.push(format!("路径校验通过: {path}"));
+
+    let out = run_sudo("mkdir", &["-p", PROC_CONF_DIR])?;
+    check_output(out, &format!("sudo mkdir -p {PROC_CONF_DIR}"))?;
+
+    let content = format!("mihomo_bin={path}\n");
+    let out = sudo_tee(PROC_CONF, &content)?;
+    check_output(out, &format!("sudo tee {PROC_CONF}"))?;
+
+    let out = run_sudo("chown", &["root:root", PROC_CONF])?;
+    check_output(out, &format!("sudo chown root:root {PROC_CONF}"))?;
+
+    let out = run_sudo("chmod", &["600", PROC_CONF])?;
+    check_output(out, &format!("sudo chmod 600 {PROC_CONF}"))?;
+
+    logs.push(format!(
+        "✓ 已保存 mihomo 路径 {path}（{PROC_CONF}，root:root 0600）"
+    ));
+    Ok(logs)
+}
+
+/// 交互式 `sudo systemctl start mihomo`（需密码；systemctl 不进 NOPASSWD 授权面）。
+/// 设置页状态行「服务未运行（Enter 启动）」的启动入口。
+pub async fn start_systemd_service() -> Result<Vec<String>, InstallError> {
+    let out = run_sudo("systemctl", &["start", "mihomo"])?;
+    check_output(out, "sudo systemctl start mihomo")?;
+    Ok(vec!["✓ mihomo 服务已启动".to_string()])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,17 +452,35 @@ mod tests {
         assert!(script.contains("rolling back"));
     }
 
-    /// sudoers 规则行必须与安装路径、授权组强一致。
+    /// 内嵌 mihomo-proc 脚本必须非空且包含关键逻辑行。
     #[test]
-    fn sudoers_line_matches_paths() {
-        let line = sudoers_line();
+    fn proc_script_is_embedded_and_complete() {
+        let script = include_str!("../../resources/mihomo-proc.sh");
+        assert!(!script.trim().is_empty());
+        assert!(script.contains("setsid"));
+        assert!(script.contains("mihomo.pid"));
+        assert!(script.contains("proc_alive"));
+        assert!(script.contains("apply|start|stop|restart|status"));
+        assert!(script.contains("MIHOMO_TUI_TEST"));
+        assert!(script.contains("rolling back"));
+    }
+
+    /// sudoers 规则：两行，分别绑定两个脚本路径。
+    #[test]
+    fn sudoers_lines_match_paths() {
+        let lines = sudoers_lines();
+        assert_eq!(lines.len(), 2);
         assert_eq!(
-            line,
+            lines[0],
             "%mihomo-admin ALL=(root) NOPASSWD: /usr/local/sbin/mihomo-apply\n"
         );
-        assert!(line.starts_with(&format!("%{ADMIN_GROUP} ")));
-        assert!(line.contains(APPLY_SCRIPT));
-        assert!(line.ends_with('\n'));
+        assert_eq!(
+            lines[1],
+            "%mihomo-admin ALL=(root) NOPASSWD: /usr/local/sbin/mihomo-proc\n"
+        );
+        assert!(lines[0].contains(APPLY_SCRIPT));
+        assert!(lines[1].contains(PROC_SCRIPT));
+        assert!(lines.iter().all(|l| l.ends_with('\n')));
     }
 
     /// groups_contain：按空白切分精确匹配组名（子串不算匹配）。
@@ -491,5 +616,57 @@ mod tests {
                 Path::new("/nonexistent/installed.marker")
             ));
         }
+    }
+
+    /// validate_mihomo_bin 各分支。
+    #[test]
+    fn validate_mihomo_bin_cases() {
+        // 空/相对路径/非法字符
+        assert!(validate_mihomo_bin("").is_err());
+        assert!(
+            validate_mihomo_bin("usr/bin/mihomo").is_err(),
+            "相对路径应拒绝"
+        );
+        assert!(
+            validate_mihomo_bin("/usr/bin/mihomo; rm -rf /").is_err(),
+            "特殊字符应拒绝"
+        );
+        assert!(validate_mihomo_bin("/tmp/a b").is_err(), "空白应拒绝");
+        // 不存在
+        assert!(validate_mihomo_bin("/nonexistent/mihomo").is_err());
+        // 存在但不可执行（/etc/passwd 常规存在且 644）
+        if std::path::Path::new("/etc/passwd").exists() {
+            assert!(
+                validate_mihomo_bin("/etc/passwd").is_err(),
+                "不可执行应拒绝"
+            );
+        }
+        // 存在且可执行但 -v 输出不含 mihomo：用 /bin/true 或 /usr/bin/true
+        for probe in ["/bin/true", "/usr/bin/true"] {
+            if std::path::Path::new(probe).exists() {
+                let e = validate_mihomo_bin(probe).unwrap_err();
+                assert!(e.contains("mihomo"), "非 mihomo 二进制应拒绝: {e}");
+                break;
+            }
+        }
+        // 环境自适应：本机 /usr/bin/mihomo 存在则校验通过
+        if std::path::Path::new("/usr/bin/mihomo").exists() {
+            validate_mihomo_bin("/usr/bin/mihomo").unwrap();
+        }
+    }
+
+    /// proc 脚本安装检测：与文件系统一致（环境自适应）。
+    #[test]
+    fn proc_script_installed_flag_matches_fs() {
+        let fs = std::path::Path::new(PROC_SCRIPT)
+            .metadata()
+            .map(|m| {
+                use std::os::unix::fs::PermissionsExt;
+                m.is_file() && m.permissions().mode() & 0o111 != 0
+            })
+            .unwrap_or(false);
+        // 同步判定辅助与文件系统一致
+        let synced = crate::core::apply::is_proc_script_installed_sync();
+        assert_eq!(synced, fs);
     }
 }

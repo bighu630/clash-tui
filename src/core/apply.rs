@@ -246,6 +246,14 @@ pub async fn is_apply_script_installed() -> bool {
     script_installed_at("/usr/local/sbin/mihomo-apply").await
 }
 
+/// 同步版（installer 测试用）：/usr/local/sbin/mihomo-proc 是否已安装。
+pub fn is_proc_script_installed_sync() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata("/usr/local/sbin/mihomo-proc")
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
 /// systemctl is-active --quiet mihomo。
 pub async fn service_is_active() -> bool {
     Command::new("systemctl")

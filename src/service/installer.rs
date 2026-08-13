@@ -430,14 +430,6 @@ pub async fn save_mihomo_bin(path: &str) -> Result<Vec<String>, InstallError> {
     Ok(logs)
 }
 
-/// 交互式 `sudo systemctl start mihomo`（需密码；systemctl 不进 NOPASSWD 授权面）。
-/// 设置页状态行「服务未运行（Enter 启动）」的启动入口。
-pub async fn start_systemd_service() -> Result<Vec<String>, InstallError> {
-    let out = run_sudo("systemctl", &["start", "mihomo"])?;
-    check_output(out, "sudo systemctl start mihomo")?;
-    Ok(vec!["✓ mihomo 服务已启动".to_string()])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

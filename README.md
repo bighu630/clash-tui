@@ -130,8 +130,9 @@ Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订�
   输入弹窗——自动预填已有路径，否则搜索 `which mihomo`（PATH）结果，确认后**交互式提权**
   保存到 root 侧 `/etc/mihomo-tui/mihomo.conf`；`mihomo-status` 显示运行状态，`Enter` 按状态
   分派：刷新 / 一键启动 systemd 服务 / 查看安装指引（详见「两种运行方式与安全设计」）；
-  启动/停止/重启为动作按钮，direct 模式下 `Enter` 执行（systemd 模式下显示 `—`，由
-  systemctl 管理）
+  启动/停止/重启为动作按钮，两种模式下 `Enter` 均可用——direct 模式经提权脚本
+  `mihomo-proc` 执行；systemd 模式直接 `pkexec systemctl start/stop/restart mihomo`，
+  **桌面 polkit 代理弹出系统密码框**认证（无需退出 TUI、无需输 sudo）
 - `↑↓` 移动字段，`Enter` 编辑文本/数字字段（`Esc` 退出编辑；编辑态内 `←→` 移动光标）、
   下拉字段上按 `Enter` 循环选项、动作按钮上按 `Enter` 执行、secret 只读字段上按 `Enter`
   重新生成 32 位密钥；`Tab`/`←→`/`1`-`6` 与其他页一样切换页面
@@ -253,7 +254,7 @@ mihomo 由谁管理有两种方式，在设置页「运行方式」区块切换�
 
 | 模式 | 管理方式 | 特点 |
 |---|---|---|
-| `systemd`（默认） | `systemctl start/stop/restart`，由系统服务管理器管理 | 开机自启、崩溃自动重启（`Restart=always`） |
+| `systemd`（默认） | TUI 内启动/停止/重启经 `pkexec systemctl`——**桌面 polkit 代理弹系统密码框**认证（无需退出 TUI、无需输 sudo；无桌面环境时手动 `sudo systemctl …`）；应用配置走 `mihomo-apply` 提权脚本 | 开机自启、崩溃自动重启（`Restart=always`） |
 | `direct`（直接进程） | TUI 经提权脚本 `/usr/local/sbin/mihomo-proc` 自行启动/停止/重启进程 | 不依赖 systemd 服务；无开机自启 |
 
 **无参脚本不变式**：sudoers 两条规则（`mihomo-apply` + `mihomo-proc`）均为**无参授权**，

@@ -54,6 +54,12 @@ pub enum ApplyError {
     ProcScriptMissing,
     #[error("mihomo -t 校验失败:\n{stderr}")]
     ValidateFailed { stderr: String },
+    #[error(
+        "systemctl {action} mihomo 认证失败（polkit 未授权或缺少认证代理）。\n\
+         请确认在桌面会话中运行（polkit 代理如 gnome-shell 会弹出密码框）；\n\
+         无桌面环境时请手动执行：sudo systemctl {action} mihomo\n原始错误：{stderr}"
+    )]
+    SystemdAuthFailed { action: String, stderr: String },
     #[error("执行失败:\n{stdout}\n{stderr}")]
     CommandFailed { stdout: String, stderr: String },
     #[error("{0}")]
@@ -238,6 +244,56 @@ pub async fn proc_status() -> Result<ProcStatus, ApplyError> {
     }
     let out = run_apply_script("/usr/local/sbin/mihomo-proc", "status\n", true, STATUS_TMP).await?;
     Ok(parse_proc_status(&out.stdout))
+}
+
+/// systemd 模式服务操作：`pkexec systemctl <action> mihomo`。
+/// pkexec 经桌面 polkit 代理弹系统密码框（无需 tty、无需退出 TUI raw 模式；
+/// 裸 systemctl 无 tty 时 polkit 拒绝交互认证，不会弹窗）。
+/// 无桌面代理/未授权 → SystemdAuthFailed（含手动 sudo 指引）。
+pub async fn systemctl_control(op: ProcOp) -> Result<ApplyOutcome, ApplyError> {
+    let action = match op {
+        ProcOp::Start => "start",
+        ProcOp::Stop => "stop",
+        ProcOp::Restart => "restart",
+    };
+    let result = run_capture("pkexec", &["systemctl", action, "mihomo"], None).await;
+    match result {
+        Ok((status, stdout, stderr)) => {
+            if status.success() {
+                Ok(ApplyOutcome {
+                    success: true,
+                    stdout,
+                    stderr,
+                })
+            } else {
+                Err(classify_systemctl_failure(action, &stdout, &stderr))
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// 分类 systemctl 失败：polkit 认证类错误 → SystemdAuthFailed（引导）；其余 → CommandFailed。
+fn classify_systemctl_failure(action: &str, stdout: &str, stderr: &str) -> ApplyError {
+    let combined = format!("{stdout}\n{stderr}").to_lowercase();
+    if combined.contains("interactive authentication required")
+        || combined.contains("not authorized")
+        || combined.contains("access denied")
+        || combined.contains("policykit")
+        || combined.contains("polkit")
+        || combined.contains("authentication agent")
+        || combined.contains("controlling terminal")
+    {
+        ApplyError::SystemdAuthFailed {
+            action: action.to_string(),
+            stderr: stderr.to_string(),
+        }
+    } else {
+        ApplyError::CommandFailed {
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        }
+    }
 }
 
 /// /usr/local/sbin/mihomo-proc 是否已安装（存在且可执行）。
@@ -638,6 +694,63 @@ mod tests {
                 | ApplyError::NotInSudoers
                 | ApplyError::CommandFailed { .. }
                 | ApplyError::SudoNeedsPassword,
+            ) => {}
+            Err(other) => panic!("意外错误: {other:?}"),
+        }
+    }
+
+    /// systemctl 失败分类：polkit 认证类 → SystemdAuthFailed；其余 → CommandFailed。
+    #[test]
+    fn classify_systemctl_failure_rules() {
+        let e = classify_systemctl_failure(
+            "start",
+            "",
+            "Failed to start mihomo.service: Interactive authentication required.",
+        );
+        assert!(matches!(e, ApplyError::SystemdAuthFailed { .. }), "{e}");
+        let ApplyError::SystemdAuthFailed { action, stderr } = &e else {
+            panic!()
+        };
+        assert_eq!(action, "start");
+        assert!(stderr.contains("Interactive authentication required"));
+        assert!(matches!(
+            classify_systemctl_failure("stop", "", "Failed to stop mihomo.service: Access denied."),
+            ApplyError::SystemdAuthFailed { .. }
+        ));
+        // pkexec 无桌面代理时的典型报错
+        assert!(matches!(
+            classify_systemctl_failure(
+                "start",
+                "",
+                "Error creating textual authentication agent: Error opening current controlling terminal"
+            ),
+            ApplyError::SystemdAuthFailed { .. }
+        ));
+        assert!(matches!(
+            classify_systemctl_failure("restart", "", "no authentication agent found"),
+            ApplyError::SystemdAuthFailed { .. }
+        ));
+        assert!(matches!(
+            classify_systemctl_failure("stop", "", "polkit: Not authorized"),
+            ApplyError::SystemdAuthFailed { .. }
+        ));
+        // 非认证类失败：单元不存在等 → CommandFailed
+        assert!(matches!(
+            classify_systemctl_failure("start", "", "Unit mihomo.service not found."),
+            ApplyError::CommandFailed { .. }
+        ));
+    }
+
+    /// 环境自适应：systemctl_control 直接执行（无 sudo）。
+    /// 桌面有 polkit 代理时可能成功；无代理/未授权 → SystemdAuthFailed 或 CommandFailed。
+    #[tokio::test]
+    async fn systemctl_control_env_adaptive() {
+        match systemctl_control(ProcOp::Start).await {
+            Ok(outcome) => assert!(outcome.success),
+            Err(
+                ApplyError::SystemdAuthFailed { .. }
+                | ApplyError::CommandFailed { .. }
+                | ApplyError::Io(_),
             ) => {}
             Err(other) => panic!("意外错误: {other:?}"),
         }

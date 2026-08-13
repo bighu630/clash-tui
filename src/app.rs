@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 
 use crate::core::apply::{
     apply_config, proc_control, proc_status, service_is_active, service_unit_exists,
-    validate_config, ApplyOutcome, ProcOp, RunStatus,
+    systemctl_control, validate_config, ApplyOutcome, ProcOp, RunStatus,
 };
 use crate::core::client::GROUP_DELAY_TIMEOUT_MS;
 use crate::core::client::{
@@ -156,10 +156,10 @@ pub enum UiCommand {
     },
     /// 刷新运行状态（systemd 单元/服务 + 直接进程实例）
     RefreshStatus,
-    /// 直接进程模式操作（start/stop/restart）
+    /// 直接进程模式操作（start/stop/restart，经 mihomo-proc 提权脚本）
     ProcAction(ProcOp),
-    /// 交互式启动 systemd 服务（需 sudo 密码）
-    StartSystemdService,
+    /// systemd 模式操作（start/stop/restart）：直接 systemctl，桌面 polkit 弹窗认证
+    SystemdAction(ProcOp),
     /// 交互式提权保存 mihomo 路径（需 sudo 密码）
     SaveMihomoBin(String),
     /// 日志页切换显示级别：主循环转发给 logs 后台任务触发 ?level= 重连。
@@ -190,6 +190,7 @@ pub enum UiEvent {
         result: Result<Vec<(String, u16)>, String>,
     },
     RunStatusDone(Result<RunStatus, String>),
+    /// 进程操作结果（direct 模式 mihomo-proc 与 systemd 模式 systemctl 共用）
     ProcActionDone(Result<ApplyOutcome, String>),
     /// 启动时引导通知（systemd 模式服务不可用）
     StartupNotice(String),
@@ -208,7 +209,6 @@ enum InteractiveTask {
     Apply(String),
     Install,
     SaveMihomoBin(String),
-    StartSystemdService,
 }
 
 /// 按键处理结果。
@@ -1125,14 +1125,20 @@ where
                     }
                 });
             }
-            UiCommand::StartSystemdService => {
-                self.pending_confirm = Some((
-                    ConfirmPopup::new(
-                        "启动 systemd 服务".into(),
-                        "需要 root 权限执行 systemctl start mihomo。是否继续？".into(),
-                    ),
-                    InteractiveTask::StartSystemdService,
-                ));
+            UiCommand::SystemdAction(op) => {
+                let ui_tx = self.ui_tx.clone();
+                tokio::spawn(async move {
+                    // 直接以当前用户执行 systemctl（不 sudo）：桌面 polkit 代理弹窗认证，
+                    // TUI 无需退出 raw 模式；结果复用 ProcActionDone 事件（弹窗/刷新通用）
+                    match systemctl_control(op).await {
+                        Ok(outcome) => {
+                            let _ = ui_tx.send(UiEvent::ProcActionDone(Ok(outcome)));
+                        }
+                        Err(e) => {
+                            let _ = ui_tx.send(UiEvent::ProcActionDone(Err(e.to_string())));
+                        }
+                    }
+                });
             }
             UiCommand::SaveMihomoBin(path) => {
                 self.pending_confirm = Some((
@@ -1171,16 +1177,6 @@ where
                 .map_err(|e| e.to_string()),
             InteractiveTask::SaveMihomoBin(path) => {
                 crate::service::installer::save_mihomo_bin(&path)
-                    .await
-                    .map(|lines| ApplyOutcome {
-                        success: true,
-                        stdout: lines.join("\n"),
-                        stderr: String::new(),
-                    })
-                    .map_err(|e| e.to_string())
-            }
-            InteractiveTask::StartSystemdService => {
-                crate::service::installer::start_systemd_service()
                     .await
                     .map(|lines| ApplyOutcome {
                         success: true,

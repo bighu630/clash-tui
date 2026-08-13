@@ -75,10 +75,7 @@ pub(crate) fn field_values(s: &NetworkSettings) -> Vec<FormField> {
     };
     let action = |label: &str| FormField {
         label: label.into(),
-        value: match s.run_mode {
-            RunMode::Direct => label.to_string(),
-            RunMode::Systemd => "—".to_string(),
-        },
+        value: label.to_string(),
         kind: FieldKind::Action,
     };
     let mut fields = vec![
@@ -725,24 +722,32 @@ impl Page for SettingsPage {
                                 Some(rs) if rs.service_active == Some(true) => {
                                     return Some(UiCommand::RefreshStatus)
                                 }
-                                _ => return Some(UiCommand::StartSystemdService),
+                                _ => {
+                                    // systemd 服务未运行：直接 systemctl start（polkit 弹窗认证）
+                                    return Some(UiCommand::SystemdAction(ProcOp::Start));
+                                }
                             },
                         }
                     }
                     _ => {}
                 },
                 FieldKind::Action => {
-                    // 以 run-mode 字段（f[0]）为准判定启停可用性：f[3..6] 按钮值在
-                    // Ctrl+S 保存后不会重新生成，可能残留 direct 文案造成误派发。
+                    // 以 run-mode 字段（f[0]）为准选择执行通道：f[3..6] 按钮值在
+                    // Ctrl+S 保存后不会重新生成，可能残留旧模式文案。
+                    // systemd → systemctl（polkit 弹窗认证）；direct → mihomo-proc。
                     let direct = self.fields[0].value == "direct";
                     let op = match self.focused {
-                        3 if direct => Some(ProcOp::Start),
-                        4 if direct => Some(ProcOp::Stop),
-                        5 if direct => Some(ProcOp::Restart),
+                        3 => Some(ProcOp::Start),
+                        4 => Some(ProcOp::Stop),
+                        5 => Some(ProcOp::Restart),
                         _ => None,
                     };
                     if let Some(op) = op {
-                        return Some(UiCommand::ProcAction(op));
+                        return Some(if direct {
+                            UiCommand::ProcAction(op)
+                        } else {
+                            UiCommand::SystemdAction(op)
+                        });
                     }
                 }
                 FieldKind::Dropdown(_) => self.cycle_dropdown(1),
@@ -863,14 +868,9 @@ impl Page for SettingsPage {
                             );
                         }
                         FieldKind::Action => {
-                            // 禁用样式按 run-mode 字段（f[0]）判定，与分派一致；
-                            // 按钮自身值保存后可能陈旧（未重新生成）。
-                            let enabled = self.fields[0].value == "direct";
-                            let text = if enabled {
-                                format!("[ {} ]", field.value)
-                            } else {
-                                "—".to_string()
-                            };
+                            // 两种模式按钮均可用：systemd → systemctl（polkit 弹窗认证），
+                            // direct → mihomo-proc；分派见 handle_key
+                            let text = format!("[ {} ]", field.value);
                             f.render_widget(
                                 Paragraph::new(Span::styled(text, value_style)),
                                 Rect::new(vx, y, vw, 1),
@@ -1572,7 +1572,7 @@ mod tests {
         }
     }
 
-    /// Action 字段：direct 模式 Enter → ProcAction 命令；systemd 模式（—）→ 无命令。
+    /// Action 字段：direct 模式 Enter → ProcAction（mihomo-proc）；systemd 模式 → SystemdAction（systemctl/polkit）。
     #[test]
     fn action_fields_dispatch_by_mode() {
         let mut st = test_state();
@@ -1599,21 +1599,41 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
         assert!(matches!(cmd, Some(UiCommand::ProcAction(ProcOp::Restart))));
-        // systemd 模式：按钮禁用（值 —）
+        // systemd 模式：按钮可用，走 systemctl（polkit 弹窗认证）
         let mut st2 = test_state();
         st2.settings.run_mode = RunMode::Systemd;
         let mut p2 = page_with_state(&st2);
-        assert_eq!(p2.fields[3].value, "—");
+        assert_eq!(p2.fields[3].value, "启动", "systemd 模式按钮应可用");
         p2.focused = 3;
         let cmd = press(
             &mut p2,
             &mut st2,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
-        assert!(cmd.is_none(), "systemd 模式动作应禁用");
+        assert!(
+            matches!(cmd, Some(UiCommand::SystemdAction(ProcOp::Start))),
+            "systemd 模式应派发 SystemdAction: {cmd:?}"
+        );
+        p2.focused = 4;
+        let cmd = press(
+            &mut p2,
+            &mut st2,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(matches!(cmd, Some(UiCommand::SystemdAction(ProcOp::Stop))));
+        p2.focused = 5;
+        let cmd = press(
+            &mut p2,
+            &mut st2,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(matches!(
+            cmd,
+            Some(UiCommand::SystemdAction(ProcOp::Restart))
+        ));
     }
 
-    /// status 字段 Enter 分派：systemd+active → 刷新；systemd+inactive → StartSystemdService；
+    /// status 字段 Enter 分派：systemd+active → 刷新；systemd+inactive → SystemdAction(Start)（polkit）；
     /// 单元缺失 → 页内指引弹窗；direct → 刷新。
     #[test]
     fn status_field_enter_dispatches() {
@@ -1635,7 +1655,7 @@ mod tests {
             matches!(cmd, Some(UiCommand::RefreshStatus)),
             "运行中应刷新: {cmd:?}"
         );
-        // systemd + 未运行 → StartSystemdService
+        // systemd + 未运行 → SystemdAction(Start)（systemctl 直接执行，polkit 弹窗认证）
         st.run_status = Some(RunStatus {
             service_unit: Some(true),
             service_active: Some(false),
@@ -1648,7 +1668,10 @@ mod tests {
             &mut st,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
-        assert!(matches!(cmd, Some(UiCommand::StartSystemdService)));
+        assert!(
+            matches!(cmd, Some(UiCommand::SystemdAction(ProcOp::Start))),
+            "未运行应派发 SystemdAction(Start): {cmd:?}"
+        );
         // 单元缺失 → 指引弹窗（无命令）
         st.run_status = Some(RunStatus {
             service_unit: Some(false),
@@ -1787,15 +1810,19 @@ mod tests {
             assert!(cmd.is_none(), "仅保存不应返回命令: {cmd:?}");
             assert_eq!(p.fields[0].value, "systemd");
             assert_eq!(p.fields[3].value, "启动", "按钮显示值未重新生成（陈旧）");
-            // 陈旧按钮值不应触发 ProcAction
-            for idx in [3, 4, 5] {
+            // systemd 模式：陈旧按钮值不误派发 ProcAction，正确走 SystemdAction（polkit）
+            for (idx, op) in [(3, ProcOp::Start), (4, ProcOp::Stop), (5, ProcOp::Restart)] {
                 p.focused = idx;
                 let cmd = press(
                     &mut p,
                     &mut st,
                     KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
                 );
-                assert!(cmd.is_none(), "f[{idx}] 陈旧按钮不应派发: {cmd:?}");
+                let dispatched = matches!(cmd, Some(UiCommand::SystemdAction(o)) if o == op);
+                assert!(
+                    dispatched,
+                    "f[{idx}] systemd 模式应派发 SystemdAction({op:?}): {cmd:?}"
+                );
             }
             // 切回 direct（未重新同步，按钮值仍陈旧）→ 按 f[0] 判定应恢复派发
             p.focused = 0;

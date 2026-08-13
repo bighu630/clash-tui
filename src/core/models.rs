@@ -6,14 +6,28 @@ use serde::{Deserialize, Serialize};
 use crate::core::settings::generate_secret;
 
 /// 运行方式：systemd（systemctl 管理，默认）/ direct（TUI 直接管理进程）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunMode {
-    /// systemd 服务管理（现状，默认）
-    #[default]
+    /// systemd 服务管理（Linux 默认）
     Systemd,
-    /// 直接进程模式：TUI 通过 mihomo-proc 启动/停止/重启
+    /// 直接进程模式：TUI 管理进程（Windows 唯一运行方式）
     Direct,
+}
+
+// #[default] 不能平台分支，故手写 impl；Linux 上与 derive 等价（clippy derivable_impls 豁免）。
+#[allow(clippy::derivable_impls)]
+impl Default for RunMode {
+    fn default() -> Self {
+        #[cfg(windows)]
+        {
+            RunMode::Direct
+        }
+        #[cfg(not(windows))]
+        {
+            RunMode::Systemd
+        }
+    }
 }
 
 /// 内置规则目标（不可用作组名/节点名）。
@@ -49,6 +63,10 @@ pub struct NetworkSettings {
     /// 运行方式（TUI 侧设置，不写入 config.yaml）
     #[serde(default)]
     pub run_mode: RunMode,
+    /// mihomo 可执行文件路径（Windows 专用，存 settings.toml；
+    /// Linux 走 root 侧 /etc/mihomo-tui/mihomo.conf，本字段恒为空）
+    #[serde(default)]
+    pub mihomo_bin: String,
     pub tun: TunSettings,
     pub dns: DnsSettings,
 }
@@ -65,7 +83,8 @@ impl Default for NetworkSettings {
             log_level: "info".into(),
             external_controller: "127.0.0.1:9090".into(),
             secret: generate_secret(),
-            run_mode: RunMode::Systemd,
+            run_mode: RunMode::default(),
+            mihomo_bin: String::new(),
             tun: TunSettings::default(),
             dns: DnsSettings::default(),
         }
@@ -307,6 +326,31 @@ mod tests {
                 .run_mode,
             RunMode::Direct
         );
-        assert_eq!(RunMode::default(), RunMode::Systemd);
+        assert_eq!(
+            RunMode::default(),
+            if cfg!(windows) {
+                RunMode::Direct
+            } else {
+                RunMode::Systemd
+            }
+        );
+    }
+
+    /// Windows 字段：settings.toml 读写往返 + 缺省空串。
+    #[test]
+    fn mihomo_bin_field_serde() {
+        let s = NetworkSettings {
+            secret: "c".repeat(32),
+            ..NetworkSettings::default()
+        };
+        assert_eq!(s.mihomo_bin, "");
+        let body = toml::to_string(&s).unwrap();
+        assert!(body.contains("mihomo_bin"));
+        let back: NetworkSettings = toml::from_str(&body).unwrap();
+        assert_eq!(back.mihomo_bin, "");
+        // 旧文件无该字段也能反序列化（serde default）
+        let old: NetworkSettings =
+            toml::from_str(&body.replace("\nmihomo_bin = \"\"", "")).unwrap();
+        assert_eq!(old.mihomo_bin, "");
     }
 }

@@ -3,7 +3,6 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::core::models::{NetworkSettings, Overrides, Subscription};
@@ -18,19 +17,48 @@ pub enum SettingsError {
     Yaml(String),
 }
 
-/// 配置目录：$HOME/.config/mihomo-tui（不存在则创建，权限 0700——配置含代理密码）。
+/// 配置目录：Linux `$HOME/.config/mihomo-tui`（0700）；Windows `%APPDATA%\mihomo-tui`。
 /// MIHOMO_TUI_SETTINGS_DIR 环境变量可覆盖（测试与 merge_sample 使用）。
 pub fn config_dir() -> PathBuf {
     let dir = std::env::var("MIHOMO_TUI_SETTINGS_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(".config").join("mihomo-tui")
-        });
+        .unwrap_or_else(|_| platform_config_dir());
     let _ = fs::create_dir_all(&dir);
-    // 隐私：配置文件含代理密码，目录收紧到仅本人可读
-    let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+    // 隐私：配置文件含代理密码，目录收紧到仅本人可读（Windows 由用户目录 ACL 保护，跳过）
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+    }
     dir
+}
+
+#[cfg(not(windows))]
+fn platform_config_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".config").join("mihomo-tui")
+}
+
+#[cfg(windows)]
+fn platform_config_dir() -> PathBuf {
+    // %APPDATA% 缺失（服务场景）→ USERPROFILE\AppData\Roaming → 当前目录兜底
+    std::env::var("APPDATA")
+        .map(|a| windows_config_dir(&a))
+        .unwrap_or_else(|_| {
+            std::env::var("USERPROFILE")
+                .map(|p| {
+                    PathBuf::from(p)
+                        .join("AppData")
+                        .join("Roaming")
+                        .join("mihomo-tui")
+                })
+                .unwrap_or_else(|_| PathBuf::from("mihomo-tui"))
+        })
+}
+
+/// 纯函数：Windows 配置目录 = %APPDATA%\mihomo-tui（跨平台单测；Linux 亦编译但不用）。
+pub fn windows_config_dir(appdata: &str) -> PathBuf {
+    PathBuf::from(appdata).join("mihomo-tui")
 }
 
 pub fn settings_path() -> PathBuf {
@@ -113,8 +141,13 @@ fn atomic_write(path: &Path, body: &[u8]) -> Result<(), SettingsError> {
     let tmp = dir.join(format!(".{name}.tmp{}", std::process::id()));
     let result = (|| -> std::io::Result<()> {
         let mut f = fs::File::create(&tmp)?;
-        // 隐私：配置文件含代理密码，0600（rename 保留临时文件权限）
-        f.set_permissions(fs::Permissions::from_mode(0o600))?;
+        // 隐私：配置文件含代理密码，0600（rename 保留临时文件权限）；
+        // Windows 由用户目录 ACL 保护，无需收紧
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         f.write_all(body)?;
         f.sync_all()?;
         fs::rename(&tmp, path)?;
@@ -312,14 +345,22 @@ mod tests {
     #[test]
     fn settings_dir_and_files_are_private() {
         with_dir(|| {
-            // 配置目录 0700
-            let dir_mode = fs::metadata(config_dir()).unwrap().permissions().mode() & 0o777;
-            assert_eq!(dir_mode, 0o700, "配置目录应为 0700");
+            // 配置目录 0700（Windows 无 mode 概念，由用户目录 ACL 保护）
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let dir_mode = fs::metadata(config_dir()).unwrap().permissions().mode() & 0o777;
+                assert_eq!(dir_mode, 0o700, "配置目录应 0700");
+            }
             // 配置文件 0600（原子写后）
             let s = NetworkSettings::default();
             save_settings(&s).unwrap();
-            let file_mode = fs::metadata(settings_path()).unwrap().permissions().mode() & 0o777;
-            assert_eq!(file_mode, 0o600, "配置文件应为 0600");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let file_mode = fs::metadata(settings_path()).unwrap().permissions().mode() & 0o777;
+                assert_eq!(file_mode, 0o600, "配置文件应为 0600");
+            }
         });
     }
 
@@ -353,5 +394,15 @@ nameserver = [\"https://doh.pub/dns-query\"]\ndefault_nameserver = [\"223.5.5.5\
                 .unwrap()
                 .contains("run_mode = \"direct\""));
         });
+    }
+
+    /// Windows 配置目录构造（纯函数，Linux 上也能断言字符串行为）。
+    #[test]
+    fn windows_config_dir_joins_appdata() {
+        let p = windows_config_dir(r"C:\Users\alice\AppData\Roaming");
+        assert!(p.ends_with("mihomo-tui"));
+        assert!(p
+            .to_string_lossy()
+            .contains(r"C:\Users\alice\AppData\Roaming"));
     }
 }

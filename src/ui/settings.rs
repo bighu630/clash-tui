@@ -281,6 +281,7 @@ pub(crate) fn apply_values(f: &[FormField]) -> Result<NetworkSettings, Validatio
             "systemd" => RunMode::Systemd,
             _ => RunMode::Direct,
         },
+        mihomo_bin: String::new(),
         mode: parse_dropdown("mode", &cfg[0].value, &["rule", "global", "direct"])?,
         ipv6: parse_yn("ipv6", &cfg[1].value)?,
         allow_lan: parse_yn("allow-lan", &cfg[2].value)?,
@@ -920,6 +921,7 @@ mod tests {
         NetworkSettings {
             secret: "a".repeat(32),
             run_mode: RunMode::Systemd,
+            mihomo_bin: String::new(),
             mode: "global".into(),
             ipv6: true,
             allow_lan: true,

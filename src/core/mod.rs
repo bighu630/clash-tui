@@ -4,6 +4,7 @@ pub mod client;
 pub mod country;
 pub mod exit_ip;
 pub mod merger;
+pub mod mihomo_bin;
 pub mod models;
 pub mod parsers;
 pub mod settings;

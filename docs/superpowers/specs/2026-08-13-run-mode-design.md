@@ -93,8 +93,12 @@ systemd 模式 apply 前增加**进程实例守卫**：若 `/run/mihomo-tui/miho
   命令行；返回 ApplyOutcome（复用）
 - 新增 `proc_status()`：`sudo -n mihomo-proc` stdin=`status` → 解析行协议 → `ProcStatus {
   bin: Option<String>, pid: Option<u32>, running: bool }`（纯解析函数可单测）
-- 新增 `RunStatus { service_active: Option<bool>, proc: Option<ProcStatus> }`：模式相关的统一状态
+- 新增 `RunStatus { service_unit: Option<bool>, service_active: Option<bool>, proc: Option<ProcStatus> }`：
+  模式相关的统一状态（service_unit = `systemctl list-unit-files` 是否含 mihomo.service）
 - `validate_config` 不变（用户态 `mihomo -t` 预校验，两种模式共用）
+- 新增 `service_unit_exists()`：`systemctl list-unit-files mihomo.service` 检测（installer 的
+  `service_unit_exists` 提为共享函数，两处复用）
+- 新增 `find_mihomo_in_path() -> Option<String>`：`which mihomo` 取路径（设置页路径输入预填用）
 
 ### 安装器（service/installer.rs）
 
@@ -118,11 +122,23 @@ systemd 模式 apply 前增加**进程实例守卫**：若 `/run/mihomo-tui/miho
 | idx | label | kind | 交互 |
 |---|---|---|---|
 | 0 | run-mode | Dropdown([systemd, direct]) | Enter 循环；Ctrl+S 保存持久化；切换 systemd 时若进程实例运行中 → 保存后自动 stop（见 app.rs） |
-| 1 | mihomo-bin | ReadOnly | 显示路径（来自 run_status，未设置显示提示）；Enter → FormPopup 输入新路径 → 确认 → `UiCommand::SaveMihomoBin`（交互式提权保存） |
-| 2 | mihomo-status | ReadOnly | 状态文本（systemd: 服务运行中/未运行；direct: 运行中 PID n / 未运行 / 未设置路径）；Enter → 刷新 |
+| 1 | mihomo-bin | ReadOnly | 显示路径（来自 run_status，未设置显示「未设置（Enter 设置）」）；Enter → FormPopup 输入新路径（**预填：已有配置路径优先；否则自动 `which mihomo` 搜索 PATH，找到即预填，用户可直接确认或删改**）→ 确认 → `UiCommand::SaveMihomoBin`（交互式提权保存） |
+| 2 | mihomo-status | ReadOnly | 状态文本（systemd: 服务运行中 / 服务未运行（Enter 启动）/ 未安装 mihomo.service（Enter 查看指引）；direct: 运行中 PID n / 未运行 / 未设置路径）；Enter 按状态分派（见下） |
 | 3 | 启动 | Action | direct 模式显示按钮；Enter → `UiCommand::ProcAction(Start)`（即时执行 + 结果弹窗） |
 | 4 | 停止 | Action | 同上 Stop |
 | 5 | 重启 | Action | 同上 Restart；systemd 模式下 3-5 显示 `—`（由 systemctl 管理，禁用） |
+
+**status 字段（f[2]）Enter 分派**（systemd 模式）：
+
+- 服务运行中 → 刷新状态
+- 服务未运行（单元存在）→ 确认框 → `InteractiveTask::StartSystemdService`（交互式 sudo
+  `systemctl start mihomo`，需密码——systemctl 不进 NOPASSWD 授权面，与路径提权同哲学）
+- 单元缺失 → 指引弹窗：创建 unit（README「手动安装」/ 仪表盘按 i 安装提权组件）或
+  Enter 设置路径转 direct 模式
+
+**TUI 启动引导**：app 启动后异步检测一次（非阻塞、不 sudo）：systemd 模式 + 服务未运行/单元
+缺失 → notice「mihomo 服务未运行：设置页 Enter 启动服务，或设置 mihomo 路径切换 direct 模式」。
+检测失败静默（无 systemd 环境不打扰）。
 
 - `field_values(&NetworkSettings)` 仍为纯函数（返回 28 字段；f[1]/f[2] 占位值，f[3..6] 由
   run_mode 决定启用/禁用）；`sync_from_settings`（持有 st）用 `st.run_status` 覆盖 f[1]/f[2] 显示值
@@ -155,6 +171,7 @@ systemd 模式 apply 前增加**进程实例守卫**：若 `/run/mihomo-tui/miho
 | systemd → direct | 无立即动作。用户点「启动」（有确认弹窗说明：若 systemd 服务运行中将被停止）→ mihomo-proc start 内 `ensure_service_stopped()`；Ctrl+A apply 同样由脚本处理 |
 | direct → systemd | 保存模式切换时若进程实例运行中 → 自动 stop（notice 说明）；mihomo-apply 的进程守卫兜底竞态；systemd 服务未运行由状态行提示（README 说明 `sudo systemctl start mihomo`） |
 | 未安装提权组件 | 运行方式区块显示「未安装提权组件，仪表盘按 i 安装」；进程操作报错 NotInSudoers（复用现有修复指引） |
+| systemd 服务不可用 | TUI 启动 notice 引导 + 设置页 status 字段三态显示（见设置页节）；服务未运行 → 一键交互式启动；单元缺失 → 创建指引；路径字段预填 `which mihomo` 结果，一键提权保存转 direct |
 | 旧安装缺 mihomo-proc | `is_proc_script_installed()` 检测，direct 模式操作前提示「缺少 mihomo-proc，请重新安装提权组件」 |
 
 ## 错误处理与用户反馈
@@ -173,12 +190,14 @@ systemd 模式 apply 前增加**进程实例守卫**：若 `/run/mihomo-tui/miho
 2. apply 分派：构造 stdin 首行命令断言（`apply`/`start`/`stop`/`restart`/`status` + yaml 拼接）；
    环境自适应测试沿用现有模式（bad yaml 在脚本内预校验阶段失败，无副作用）
 3. status 行协议解析：`bin=`/`pid=`/`running=` 正常、空值、乱序、未知行忽略
-4. 安装器：内嵌 mihomo-proc 脚本断言（setsid/PID 文件/白名单命令/校验逻辑关键行）、
+4. `find_mihomo_in_path`：PATH 中能找到 mihomo 时返回存在的可执行路径；`service_unit_exists` 环境自适应
+5. 安装器：内嵌 mihomo-proc 脚本断言（setsid/PID 文件/白名单命令/校验逻辑关键行）、
    sudoers 两行、`validate_mihomo_bin`（不存在/不可执行/非法字符/正常）、
    `save_mihomo_bin` 的预校验分支（sudo 调用部分环境自适应跳过）
-5. 设置页：SECTIONS 连续性（28）、field_values/apply_values 往返（含 run_mode、索引偏移）、
-   dirty 排除规则（状态刷新不污染未保存标记）、Action 字段 Enter 分派、路径 FormPopup 流程
-6. 现有测试索引偏移更新（port 3→9 等，逐处检查）
+6. 设置页：SECTIONS 连续性（28）、field_values/apply_values 往返（含 run_mode、索引偏移）、
+   dirty 排除规则（状态刷新不污染未保存标记）、Action 字段 Enter 分派、路径 FormPopup 预填
+   （配置路径优先 → which 结果 → 空）、status 字段三态 Enter 分派
+7. 现有测试索引偏移更新（port 3→9 等，逐处检查）
 
 脚本级端到端（无需 root/sudo，环境变量覆盖路径，本机 mihomo 真实二进制）：
 

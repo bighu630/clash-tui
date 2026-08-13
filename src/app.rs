@@ -895,7 +895,13 @@ where
                 Err(e) => self.popup_error("延迟测试失败", e),
             },
             UiEvent::RunStatusDone(res) => match res {
-                Ok(rs) => self.state.run_status = Some(rs),
+                Ok(rs) => {
+                    self.state.run_status = Some(rs);
+                    // 设置页路径/状态显示值随状态刷新（不动表单编辑状态）
+                    if self.current == 5 {
+                        self.pages[5].refresh_state(&self.state);
+                    }
+                }
                 Err(_) => self.state.run_status = None,
             },
             UiEvent::ProcActionDone(res) => match res {

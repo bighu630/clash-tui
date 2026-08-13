@@ -412,7 +412,12 @@ impl SettingsPage {
         self.editing = false;
         self.offset = 0;
         self.path_popup = None;
-        // 运行方式区块：用运行状态覆盖路径/状态显示值
+        self.apply_status_display(st);
+    }
+
+    /// 用 st.run_status 覆盖 f[1]/f[2]（路径/状态）显示值。
+    /// sync_from_settings（全量同步）与 refresh_state（仅显示刷新）共用。
+    fn apply_status_display(&mut self, st: &AppState) {
         if let Some(rs) = &st.run_status {
             let bin_text = rs
                 .proc
@@ -447,7 +452,9 @@ impl SettingsPage {
                 st.settings = s.clone();
                 self.saved = self.values();
                 st.notice("[✓] 已保存".to_string());
-                // 模式切换 systemd ← direct 且进程实例运行中：自动停止（防止双实例）
+                // 模式切换 systemd ← direct 且进程实例运行中：仅 Ctrl+S（apply=false）时
+                // 自动停止（防止双实例）；apply=true 不拦截，继续走 apply 链路——
+                // mihomo-apply 的进程守卫会停掉进程实例（spec 已设计）。
                 let stop_proc = s.run_mode == RunMode::Systemd
                     && old_mode == RunMode::Direct
                     && st
@@ -456,7 +463,7 @@ impl SettingsPage {
                         .and_then(|rs| rs.proc.as_ref())
                         .map(|p| p.running)
                         .unwrap_or(false);
-                if stop_proc {
+                if stop_proc && !apply {
                     st.notice("[!] 已切换到 systemd 模式，正在停止进程实例…".to_string());
                     return Some(UiCommand::ProcAction(ProcOp::Stop));
                 }
@@ -598,6 +605,15 @@ impl Page for SettingsPage {
         self.sync_from_settings(st);
     }
 
+    /// RunStatusDone/ProcActionDone 后的状态刷新：仅覆盖 f[1]/f[2] 显示值，
+    /// 不动 focused/offset/editing/dirty（避免打断编辑或清掉未保存标记）。
+    fn refresh_state(&mut self, st: &AppState) {
+        if self.fields.len() < 3 {
+            return;
+        }
+        self.apply_status_display(st);
+    }
+
     fn handle_key(&mut self, key: KeyEvent, st: &mut AppState) -> Option<UiCommand> {
         // 未同步（未 on_enter）时无可操作字段：直接返回，防止越界 panic
         if self.fields.is_empty() {
@@ -712,10 +728,13 @@ impl Page for SettingsPage {
                     _ => {}
                 },
                 FieldKind::Action => {
-                    let op = match (self.focused, self.fields[self.focused].value.as_str()) {
-                        (3, "启动") => Some(ProcOp::Start),
-                        (4, "停止") => Some(ProcOp::Stop),
-                        (5, "重启") => Some(ProcOp::Restart),
+                    // 以 run-mode 字段（f[0]）为准判定启停可用性：f[3..6] 按钮值在
+                    // Ctrl+S 保存后不会重新生成，可能残留 direct 文案造成误派发。
+                    let direct = self.fields[0].value == "direct";
+                    let op = match self.focused {
+                        3 if direct => Some(ProcOp::Start),
+                        4 if direct => Some(ProcOp::Stop),
+                        5 if direct => Some(ProcOp::Restart),
                         _ => None,
                     };
                     if let Some(op) = op {
@@ -840,10 +859,13 @@ impl Page for SettingsPage {
                             );
                         }
                         FieldKind::Action => {
-                            let text = if field.value == "—" {
-                                field.value.clone()
-                            } else {
+                            // 禁用样式按 run-mode 字段（f[0]）判定，与分派一致；
+                            // 按钮自身值保存后可能陈旧（未重新生成）。
+                            let enabled = self.fields[0].value == "direct";
+                            let text = if enabled {
                                 format!("[ {} ]", field.value)
+                            } else {
+                                "—".to_string()
                             };
                             f.render_widget(
                                 Paragraph::new(Span::styled(text, value_style)),
@@ -1702,5 +1724,134 @@ mod tests {
             let cmd = press(&mut p2, &mut st2, ctrl('s'));
             assert!(cmd.is_none(), "未运行无需停止: {cmd:?}");
         });
+    }
+
+    /// 模式切换 systemd ← direct 且进程运行中 + Ctrl+A（apply=true）：
+    /// 不拦截返回 Stop，继续 apply 链路（mihomo-apply 的进程守卫会停掉实例）。
+    #[test]
+    fn mode_switch_to_systemd_ctrl_a_continues_to_apply() {
+        with_settings_dir(|| {
+            let mut st = test_state();
+            st.settings.run_mode = RunMode::Direct;
+            st.run_status = Some(RunStatus {
+                service_unit: Some(true),
+                service_active: Some(false),
+                proc: Some(ProcStatus {
+                    bin: Some("/usr/bin/mihomo".into()),
+                    pid: Some(42),
+                    running: true,
+                }),
+            });
+            save_settings(&st.settings).unwrap();
+            let mut p = page_with_state(&st);
+            // 切回 systemd
+            p.focused = 0;
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            ); // direct → systemd
+            let cmd = press(&mut p, &mut st, ctrl('a'));
+            assert!(
+                matches!(cmd, Some(UiCommand::ApplyConfig(_))),
+                "apply=true 应返回 ApplyConfig 而非 Stop: {cmd:?}"
+            );
+            let back = load_settings().unwrap();
+            assert_eq!(back.run_mode, RunMode::Systemd);
+        });
+    }
+
+    /// Action 分派以 run-mode 字段（f[0]）为准：切 systemd + Ctrl+S 后按钮值陈旧
+    /// （仍为“启动/停止/重启”）也不应派发 ProcAction；切回 direct 应恢复派发。
+    #[test]
+    fn action_dispatch_ignores_stale_button_values() {
+        with_settings_dir(|| {
+            let mut st = test_state();
+            st.settings.run_mode = RunMode::Direct;
+            save_settings(&st.settings).unwrap();
+            let mut p = page_with_state(&st);
+            // 切 systemd + Ctrl+S：fields[3..6] 不重新生成，保持 direct 文案
+            p.focused = 0;
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            ); // direct → systemd
+            let cmd = press(&mut p, &mut st, ctrl('s'));
+            assert!(cmd.is_none(), "仅保存不应返回命令: {cmd:?}");
+            assert_eq!(p.fields[0].value, "systemd");
+            assert_eq!(p.fields[3].value, "启动", "按钮显示值未重新生成（陈旧）");
+            // 陈旧按钮值不应触发 ProcAction
+            for idx in [3, 4, 5] {
+                p.focused = idx;
+                let cmd = press(
+                    &mut p,
+                    &mut st,
+                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                );
+                assert!(cmd.is_none(), "f[{idx}] 陈旧按钮不应派发: {cmd:?}");
+            }
+            // 切回 direct（未重新同步，按钮值仍陈旧）→ 按 f[0] 判定应恢复派发
+            p.focused = 0;
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            ); // systemd → direct
+            p.focused = 3;
+            let cmd = press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            );
+            assert!(
+                matches!(cmd, Some(UiCommand::ProcAction(ProcOp::Start))),
+                "direct 模式应派发 Start: {cmd:?}"
+            );
+        });
+    }
+
+    /// refresh_state：仅覆盖 f[1]/f[2] 显示值，不动 dirty/focused/editing；
+    /// 未同步（fields 为空）时安全无操作。
+    #[test]
+    fn refresh_state_updates_status_display_only() {
+        let mut st = test_state();
+        st.settings.run_mode = RunMode::Direct;
+        let mut p = page_with_state(&st);
+        // 进入编辑（port 追加 9）→ dirty + editing + focused 保持
+        p.focused = 9;
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE),
+        );
+        assert!(p.dirty());
+        assert!(p.editing);
+        // 状态刷新：模拟主循环 RunStatusDone → refresh_state
+        st.run_status = Some(RunStatus {
+            service_unit: Some(true),
+            service_active: Some(true),
+            proc: Some(ProcStatus {
+                bin: Some("/opt/mihomo".into()),
+                pid: Some(777),
+                running: true,
+            }),
+        });
+        p.refresh_state(&st);
+        assert_eq!(p.fields[1].value, "/opt/mihomo", "路径显示应刷新");
+        assert_eq!(p.fields[2].value, "运行中（PID 777）", "状态显示应刷新");
+        assert!(p.dirty(), "dirty 不应受影响");
+        assert!(p.editing, "editing 不应受影响");
+        assert_eq!(p.focused, 9, "focused 不应受影响");
+        assert!(p.popup.is_none());
+        // 未同步（fields 为空）时 refresh_state 安全无操作
+        let mut p2 = SettingsPage::new();
+        p2.refresh_state(&st);
+        assert!(p2.fields.is_empty());
     }
 }

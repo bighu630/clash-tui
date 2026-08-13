@@ -10,10 +10,10 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{AppState, UiCommand};
-use crate::core::models::{BUILTIN_TARGETS, UserRule};
+use crate::core::models::{UserRule, BUILTIN_TARGETS};
 use crate::core::settings::save_overrides;
 use crate::ui::widgets::{
-    centered_rect, ConfirmPopup, FormAction, FormField, FieldKind, FormPopup, MessagePopup,
+    centered_rect, ConfirmPopup, FieldKind, FormAction, FormField, FormPopup, MessagePopup,
     SelectList,
 };
 use crate::ui::Page;
@@ -209,8 +209,11 @@ impl RulesPage {
         self.pending = Some(idx);
         self.form_type = st.overrides.rules[idx].rule_type.clone();
         self.form_title = "编辑规则".to_string();
-        self.popup =
-            Some(RulePopup::Form(Self::rule_form("编辑规则", Some(&st.overrides.rules[idx]), st)));
+        self.popup = Some(RulePopup::Form(Self::rule_form(
+            "编辑规则",
+            Some(&st.overrides.rules[idx]),
+            st,
+        )));
         None
     }
 
@@ -220,7 +223,10 @@ impl RulesPage {
         let rule_type = v.first().map(|s| s.trim().to_string()).unwrap_or_default();
         // MATCH 时表单只有 [类型, 目标]；其余为 [类型, payload, 目标]
         let (payload, target) = if rule_type == "MATCH" {
-            (String::new(), v.get(1).map(|s| s.trim().to_string()).unwrap_or_default())
+            (
+                String::new(),
+                v.get(1).map(|s| s.trim().to_string()).unwrap_or_default(),
+            )
         } else {
             (
                 v.get(1).map(|s| s.trim().to_string()).unwrap_or_default(),
@@ -248,14 +254,20 @@ impl RulesPage {
             )));
             return None;
         }
-        let rule = UserRule { rule_type, payload, target };
+        let rule = UserRule {
+            rule_type,
+            payload,
+            target,
+        };
         match self.pending {
             Some(idx) if idx < st.overrides.rules.len() => st.overrides.rules[idx] = rule,
             _ => st.overrides.rules.push(rule),
         }
         if let Err(e) = save_overrides(&st.overrides) {
-            self.popup =
-                Some(RulePopup::Message(MessagePopup::new("保存失败".to_string(), vec![e.to_string()])));
+            self.popup = Some(RulePopup::Message(MessagePopup::new(
+                "保存失败".to_string(),
+                vec![e.to_string()],
+            )));
         }
         self.pending = None;
         None
@@ -278,15 +290,18 @@ impl RulesPage {
         if let Err(e) = save_overrides(&st.overrides) {
             // 落盘失败回滚内存顺序，避免内存与磁盘不一致
             st.overrides.rules.swap(idx, target);
-            self.popup =
-                Some(RulePopup::Message(MessagePopup::new("保存失败".to_string(), vec![e.to_string()])));
+            self.popup = Some(RulePopup::Message(MessagePopup::new(
+                "保存失败".to_string(),
+                vec![e.to_string()],
+            )));
             return None;
         }
         // 同步 sig 并重建，避免 render 再次重建导致选中复位；再用移动键把选中定位到目标
         self.sig = Self::sig_of(st);
         self.list = Self::rebuild_list(st);
         for _ in 0..target {
-            self.list.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            self.list
+                .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         None
     }
@@ -324,7 +339,12 @@ impl RulesPage {
 
     /// popup 打开期间：按键优先喂 popup，popup 关闭后才恢复页面按键。
     /// 类型切换为 MATCH 时隐藏 payload 字段（重建表单、保留已填值）。
-    fn handle_popup(&mut self, popup: RulePopup, key: KeyEvent, st: &mut AppState) -> Option<UiCommand> {
+    fn handle_popup(
+        &mut self,
+        popup: RulePopup,
+        key: KeyEvent,
+        st: &mut AppState,
+    ) -> Option<UiCommand> {
         match popup {
             RulePopup::Form(mut p) => match p.handle_key(key) {
                 Some(FormAction::Confirm) => self.submit_form(&mut p, st),

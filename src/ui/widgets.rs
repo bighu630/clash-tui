@@ -26,6 +26,8 @@ pub enum FieldKind {
     Number,
     /// 只读展示（如 secret）：不响应任何编辑按键
     ReadOnly,
+    /// 动作按钮（如启动/停止/重启）：Enter 触发页面定义的动作
+    Action,
 }
 
 /// 表单字段。
@@ -112,6 +114,7 @@ impl FormPopup {
                 }
                 FieldKind::Text => self.insert_char(c),
                 FieldKind::ReadOnly => {}
+                FieldKind::Action => {}
             },
             _ => {}
         }
@@ -188,13 +191,20 @@ impl FormPopup {
         self.fields.iter().map(|f| f.value.clone()).collect()
     }
 
+    /// 读取字段当前值（测试与确认流程用）。
+    pub fn value(&self, idx: usize) -> &str {
+        self.fields.get(idx).map(|f| f.value.as_str()).unwrap_or("")
+    }
+
     pub fn render(&mut self, f: &mut Frame, area: Rect) {
         let popup = centered_rect(70, 80, area);
         f.render_widget(Clear, popup);
         let block = Block::new()
             .title(Span::styled(
                 format!(" {} ", self.title),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan));
@@ -214,12 +224,18 @@ impl FormPopup {
             let y = inner.y + 1 + i as u16;
             let focused = idx == self.focused;
             let label = if (self.fields[idx].label.len() as u16) > label_w {
-                self.fields[idx].label.chars().take(label_w as usize).collect::<String>()
+                self.fields[idx]
+                    .label
+                    .chars()
+                    .take(label_w as usize)
+                    .collect::<String>()
             } else {
                 self.fields[idx].label.clone()
             };
             let label_style = if focused {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().add_modifier(Modifier::BOLD)
             };
@@ -275,11 +291,13 @@ impl FormPopup {
             "Tab/↑↓ 切换 · ←→ 编辑 · Enter 确认 · Esc 取消".to_string()
         };
         f.render_widget(
-            Paragraph::new(Span::styled(
-                hint,
-                Style::default().fg(Color::DarkGray),
-            )),
-            Rect::new(inner.x + 1, inner.y + inner.height - 1, inner.width.saturating_sub(2), 1),
+            Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
+            Rect::new(
+                inner.x + 1,
+                inner.y + inner.height - 1,
+                inner.width.saturating_sub(2),
+                1,
+            ),
         );
     }
 }
@@ -321,9 +339,7 @@ impl CheckboxList {
         self.items
             .iter()
             .enumerate()
-            .filter(|(_, name)| {
-                needle.is_empty() || name.to_lowercase().contains(&needle)
-            })
+            .filter(|(_, name)| needle.is_empty() || name.to_lowercase().contains(&needle))
             .map(|(i, _)| i)
             .collect()
     }
@@ -386,7 +402,9 @@ impl CheckboxList {
         let block = Block::new()
             .title(Span::styled(
                 format!(" {} ", self.title),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan));
@@ -435,7 +453,10 @@ impl CheckboxList {
                 Style::default()
             };
             let text = format!("{} {}", mark, self.items[idx]);
-            f.render_widget(Paragraph::new(Span::styled(text, style)), Rect::new(inner.x + 1, y, inner.width.saturating_sub(2), 1));
+            f.render_widget(
+                Paragraph::new(Span::styled(text, style)),
+                Rect::new(inner.x + 1, y, inner.width.saturating_sub(2), 1),
+            );
         }
 
         f.render_widget(
@@ -443,7 +464,12 @@ impl CheckboxList {
                 "j/k/↑↓ 移动 · Space 勾选 · Enter 确认 · Esc 取消",
                 Style::default().fg(Color::DarkGray),
             )),
-            Rect::new(inner.x + 1, inner.y + inner.height - 1, inner.width.saturating_sub(2), 1),
+            Rect::new(
+                inner.x + 1,
+                inner.y + inner.height - 1,
+                inner.width.saturating_sub(2),
+                1,
+            ),
         );
     }
 }
@@ -474,7 +500,9 @@ impl ConfirmPopup {
         let block = Block::new()
             .title(Span::styled(
                 format!(" {} ", self.title),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow));
@@ -483,14 +511,24 @@ impl ConfirmPopup {
         f.render_widget(
             Paragraph::new(Line::from(self.message.clone()))
                 .wrap(ratatui::widgets::Wrap { trim: false }),
-            Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), inner.height.saturating_sub(2)),
+            Rect::new(
+                inner.x + 1,
+                inner.y,
+                inner.width.saturating_sub(2),
+                inner.height.saturating_sub(2),
+            ),
         );
         f.render_widget(
             Paragraph::new(Span::styled(
                 "[y] 是   [n] 否",
                 Style::default().fg(Color::DarkGray),
             )),
-            Rect::new(inner.x + 1, inner.y + inner.height - 1, inner.width.saturating_sub(2), 1),
+            Rect::new(
+                inner.x + 1,
+                inner.y + inner.height - 1,
+                inner.width.saturating_sub(2),
+                1,
+            ),
         );
     }
 }
@@ -572,7 +610,9 @@ impl MessagePopup {
         let block = Block::new()
             .title(Span::styled(
                 format!(" {} ", self.title),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Magenta));
@@ -587,7 +627,10 @@ impl MessagePopup {
         }
 
         let para = Paragraph::new(Text::from(
-            self.lines.iter().map(|s| Line::raw(s.clone())).collect::<Vec<Line>>(),
+            self.lines
+                .iter()
+                .map(|s| Line::raw(s.clone()))
+                .collect::<Vec<Line>>(),
         ))
         .wrap(ratatui::widgets::Wrap { trim: false })
         .scroll((self.scroll as u16, 0));
@@ -602,13 +645,21 @@ impl MessagePopup {
         );
 
         let hint = if max_scroll > 0 {
-            format!("↑↓ 滚动（{}/{}）· Esc/Enter/q 关闭", self.scroll, max_scroll)
+            format!(
+                "↑↓ 滚动（{}/{}）· Esc/Enter/q 关闭",
+                self.scroll, max_scroll
+            )
         } else {
             "Esc/Enter/q 关闭".to_string()
         };
         f.render_widget(
             Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
-            Rect::new(inner.x + 1, inner.y + inner.height - 1, inner.width.saturating_sub(2), 1),
+            Rect::new(
+                inner.x + 1,
+                inner.y + inner.height - 1,
+                inner.width.saturating_sub(2),
+                1,
+            ),
         );
     }
 }
@@ -692,7 +743,9 @@ impl SelectList {
         if let Some(title) = &self.title {
             block = block.title(Span::styled(
                 format!(" {title} "),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         let inner = block.inner(area);
@@ -739,7 +792,9 @@ impl KeyHints {
         for (key, desc) in &self.hints {
             spans.push(Span::styled(
                 format!("[{key}] "),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::raw(format!("{desc}   ")));
         }
@@ -825,7 +880,10 @@ mod tests {
         assert_eq!(popup.handle_key(key(KeyCode::Backspace)), None);
         assert_eq!(popup.values(), vec!["a".to_string()]);
         // Enter 确认
-        assert_eq!(popup.handle_key(key(KeyCode::Enter)), Some(FormAction::Confirm));
+        assert_eq!(
+            popup.handle_key(key(KeyCode::Enter)),
+            Some(FormAction::Confirm)
+        );
         // Esc 取消
         let mut popup2 = FormPopup::new(
             "测试".into(),
@@ -835,7 +893,10 @@ mod tests {
                 kind: FieldKind::Number,
             }],
         );
-        assert_eq!(popup2.handle_key(key(KeyCode::Esc)), Some(FormAction::Cancel));
+        assert_eq!(
+            popup2.handle_key(key(KeyCode::Esc)),
+            Some(FormAction::Cancel)
+        );
     }
 
     #[test]
@@ -879,8 +940,16 @@ mod tests {
         let mut popup = FormPopup::new(
             "测试".into(),
             vec![
-                FormField { label: "a".into(), value: String::new(), kind: FieldKind::Text },
-                FormField { label: "b".into(), value: String::new(), kind: FieldKind::Text },
+                FormField {
+                    label: "a".into(),
+                    value: String::new(),
+                    kind: FieldKind::Text,
+                },
+                FormField {
+                    label: "b".into(),
+                    value: String::new(),
+                    kind: FieldKind::Text,
+                },
             ],
         );
         // 焦点在字段 0 时输入
@@ -901,10 +970,7 @@ mod tests {
 
     #[test]
     fn checkbox_list_basic() {
-        let mut list = CheckboxList::new(
-            "成员".into(),
-            vec!["a".into(), "b".into(), "c".into()],
-        );
+        let mut list = CheckboxList::new("成员".into(), vec!["a".into(), "b".into(), "c".into()]);
         assert!(list.selected_items().is_empty());
         // 勾选 a
         list.handle_key(key(KeyCode::Char(' ')));
@@ -912,19 +978,31 @@ mod tests {
         // 下移到 b 并勾选
         list.handle_key(key(KeyCode::Char('j')));
         list.handle_key(key(KeyCode::Char(' ')));
-        assert_eq!(list.selected_items(), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            list.selected_items(),
+            vec!["a".to_string(), "b".to_string()]
+        );
         // 过滤：只显示 b，勾选它（已勾选则取消）
         list.handle_key(key(KeyCode::Char('b')));
         list.handle_key(key(KeyCode::Char(' ')));
         assert_eq!(list.selected_items(), vec!["a".to_string()]);
         // 清空过滤（Esc），再按 Esc 取消
         assert_eq!(list.handle_key(key(KeyCode::Esc)), None);
-        assert_eq!(list.handle_key(key(KeyCode::Esc)), Some(CheckAction::Cancel));
+        assert_eq!(
+            list.handle_key(key(KeyCode::Esc)),
+            Some(CheckAction::Cancel)
+        );
         // Enter 确认
         list.handle_key(key(KeyCode::Char('j')));
         list.handle_key(key(KeyCode::Char(' ')));
-        assert_eq!(list.handle_key(key(KeyCode::Enter)), Some(CheckAction::Confirm));
-        assert_eq!(list.selected_items(), vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            list.handle_key(key(KeyCode::Enter)),
+            Some(CheckAction::Confirm)
+        );
+        assert_eq!(
+            list.selected_items(),
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 
     #[test]

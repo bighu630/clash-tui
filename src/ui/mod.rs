@@ -40,4 +40,8 @@ pub trait Page {
 
     /// 切页进入时的回调（默认无操作）。设置页用它从 st.settings 重新同步字段。
     fn on_enter(&mut self, _st: &AppState) {}
+
+    /// 外部状态更新后的回调（默认无操作）。设置页用它刷新路径/状态显示值，
+    /// 不动表单编辑状态（dirty/focused/editing 保留）。
+    fn refresh_state(&mut self, _st: &AppState) {}
 }

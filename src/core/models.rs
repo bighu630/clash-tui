@@ -5,6 +5,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::settings::generate_secret;
 
+/// 运行方式：systemd（systemctl 管理，默认）/ direct（TUI 直接管理进程）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RunMode {
+    /// systemd 服务管理（现状，默认）
+    #[default]
+    Systemd,
+    /// 直接进程模式：TUI 通过 mihomo-proc 启动/停止/重启
+    Direct,
+}
+
 /// 内置规则目标（不可用作组名/节点名）。
 pub const BUILTIN_TARGETS: [&str; 7] = [
     "DIRECT",
@@ -35,6 +46,9 @@ pub struct NetworkSettings {
     pub external_controller: String,
     /// 随机 32 hex（每次 Default 重新生成）
     pub secret: String,
+    /// 运行方式（TUI 侧设置，不写入 config.yaml）
+    #[serde(default)]
+    pub run_mode: RunMode,
     pub tun: TunSettings,
     pub dns: DnsSettings,
 }
@@ -51,6 +65,7 @@ impl Default for NetworkSettings {
             log_level: "info".into(),
             external_controller: "127.0.0.1:9090".into(),
             secret: generate_secret(),
+            run_mode: RunMode::Systemd,
             tun: TunSettings::default(),
             dns: DnsSettings::default(),
         }
@@ -254,5 +269,44 @@ mod tests {
     fn default_group_helpers() {
         assert_eq!(default_test_url(), "http://www.gstatic.com/generate_204");
         assert_eq!(default_group_interval(), 300);
+    }
+
+    /// RunMode 序列化：settings.toml 值为小写字符串，缺省为 systemd。
+    /// 注：toml 0.9 顶层必须是表（裸枚举 to_string 报 UnsupportedType），
+    /// 故经包装结构验证小写形式。
+    #[test]
+    fn run_mode_serde_roundtrip() {
+        use crate::core::models::RunMode;
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct Wrap {
+            run_mode: RunMode,
+        }
+        assert_eq!(
+            toml::to_string(&Wrap {
+                run_mode: RunMode::Systemd
+            })
+            .unwrap(),
+            "run_mode = \"systemd\"\n"
+        );
+        assert_eq!(
+            toml::to_string(&Wrap {
+                run_mode: RunMode::Direct
+            })
+            .unwrap(),
+            "run_mode = \"direct\"\n"
+        );
+        assert_eq!(
+            toml::from_str::<Wrap>("run_mode = \"systemd\"")
+                .unwrap()
+                .run_mode,
+            RunMode::Systemd
+        );
+        assert_eq!(
+            toml::from_str::<Wrap>("run_mode = \"direct\"")
+                .unwrap()
+                .run_mode,
+            RunMode::Direct
+        );
+        assert_eq!(RunMode::default(), RunMode::Systemd);
     }
 }

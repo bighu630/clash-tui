@@ -1,4 +1,6 @@
-//! 配置应用：`mihomo -t` 预校验（临时文件）→ `sudo [-n] /usr/local/sbin/mihomo-apply`（stdin 喂入）。
+//! 配置应用：`mihomo -t` 预校验（临时文件）→ 按运行方式分派：
+//! systemd 模式 → `sudo [-n] /usr/local/sbin/mihomo-apply`（stdin 喂入 config.yaml）；
+//! direct 模式 → `sudo [-n] /usr/local/sbin/mihomo-proc`（stdin：首行命令 + 数据）。
 //! 失败时把 mihomo/sudo 输出原样反馈给用户。
 
 use std::process::Stdio;
@@ -7,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+use crate::core::models::RunMode;
 use crate::core::settings::config_dir;
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -52,8 +55,75 @@ pub enum ApplyError {
     Io(String),
 }
 
+/// 直接进程模式的操作命令（stdin 首行）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcOp {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl ProcOp {
+    /// stdin 协议首行。
+    pub fn stdin_line(&self) -> &'static str {
+        match self {
+            ProcOp::Start => "start",
+            ProcOp::Stop => "stop",
+            ProcOp::Restart => "restart",
+        }
+    }
+}
+
+/// mihomo-proc status 输出解析结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcStatus {
+    /// 配置的二进制路径（conf 未设置/读取失败为 None）
+    pub bin: Option<String>,
+    /// 进程 PID（未运行为 None）
+    pub pid: Option<u32>,
+    /// 是否运行中
+    pub running: bool,
+}
+
+/// 模式相关的统一运行状态（设置页显示用）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunStatus {
+    /// systemd 单元是否存在（list-unit-files；无 systemd 环境为 false）
+    pub service_unit: Option<bool>,
+    /// systemd 服务是否 active
+    pub service_active: Option<bool>,
+    /// 直接进程实例状态（未安装提权组件/查询失败为 None）
+    pub proc: Option<ProcStatus>,
+}
+
+/// 解析 mihomo-proc status 行协议（key=value，未知行忽略）。
+pub fn parse_proc_status(output: &str) -> ProcStatus {
+    let mut bin = None;
+    let mut pid = None;
+    let mut running = false;
+    for line in output.lines() {
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        match k {
+            "bin" => bin = (!v.is_empty()).then(|| v.to_string()),
+            "pid" => pid = v.parse().ok(),
+            "running" => running = v == "true",
+            _ => {}
+        }
+    }
+    ProcStatus { bin, pid, running }
+}
+
+/// direct 模式 apply 的 stdin 协议体：首行 apply + 空行 + config.yaml。
+pub fn direct_apply_body(yaml: &str) -> String {
+    format!("apply\n{yaml}")
+}
+
 const VALIDATE_TMP: &str = "validate";
 const APPLY_TMP: &str = "apply";
+const PROC_TMP: &str = "proc";
+const STATUS_TMP: &str = "proc-status";
 
 /// 写临时文件 → `mihomo -t -f` 校验；失败返回 mihomo 原始 stderr。
 pub async fn validate_config(yaml: &str) -> Result<(), ApplyError> {
@@ -69,7 +139,11 @@ pub async fn validate_config(yaml: &str) -> Result<(), ApplyError> {
                 Ok(())
             } else {
                 Err(ApplyError::ValidateFailed {
-                    stderr: if stderr.trim().is_empty() { stdout } else { stderr },
+                    stderr: if stderr.trim().is_empty() {
+                        stdout
+                    } else {
+                        stderr
+                    },
                 })
             }
         }
@@ -77,19 +151,39 @@ pub async fn validate_config(yaml: &str) -> Result<(), ApplyError> {
     }
 }
 
-/// `sudo [-n] /usr/local/sbin/mihomo-apply`，stdin 喂入 yaml。
+/// 按运行方式分派提权应用：
+/// systemd → `sudo [-n] /usr/local/sbin/mihomo-apply`（stdin 喂 yaml）；
+/// direct → `sudo [-n] /usr/local/sbin/mihomo-proc`（stdin 首行 apply + yaml）。
 /// non_interactive=true 且 sudo 提示密码 → SudoNeedsPassword（交互模式重试）；
 /// 非交互且当前用户未被 sudoers 授权 → NotInSudoers（该情形交互重试也必败）。
-pub async fn apply_config(yaml: &str, non_interactive: bool) -> Result<ApplyOutcome, ApplyError> {
-    let path = tmp_path(APPLY_TMP);
-    write_secret_file(&path, yaml)
+pub async fn apply_config(
+    yaml: &str,
+    non_interactive: bool,
+    mode: RunMode,
+) -> Result<ApplyOutcome, ApplyError> {
+    let (script, body) = match mode {
+        RunMode::Systemd => ("/usr/local/sbin/mihomo-apply", yaml.to_string()),
+        RunMode::Direct => ("/usr/local/sbin/mihomo-proc", direct_apply_body(yaml)),
+    };
+    run_apply_script(script, &body, non_interactive, APPLY_TMP).await
+}
+
+/// 通用提权脚本调用：写临时文件（stdin 内容）→ sudo 执行脚本 → 分类失败原因。
+async fn run_apply_script(
+    script: &str,
+    body: &str,
+    non_interactive: bool,
+    tmp_name: &str,
+) -> Result<ApplyOutcome, ApplyError> {
+    let path = tmp_path(tmp_name);
+    write_secret_file(&path, body)
         .await
         .map_err(|e| ApplyError::Io(e.to_string()))?;
     let mut args = Vec::new();
     if non_interactive {
         args.push("-n");
     }
-    args.push("/usr/local/sbin/mihomo-apply");
+    args.push(script);
     let result = run_capture("sudo", &args, Some(path.to_str().unwrap())).await;
     let _ = tokio::fs::remove_file(&path).await;
     match result {
@@ -116,11 +210,46 @@ pub async fn apply_config(yaml: &str, non_interactive: bool) -> Result<ApplyOutc
     }
 }
 
+/// `sudo -n /usr/local/sbin/mihomo-proc`，stdin 首行 = 命令（start/stop/restart）。
+pub async fn proc_control(op: ProcOp) -> Result<ApplyOutcome, ApplyError> {
+    run_apply_script(
+        "/usr/local/sbin/mihomo-proc",
+        &format!("{}\n", op.stdin_line()),
+        true,
+        PROC_TMP,
+    )
+    .await
+}
+
+/// `sudo -n /usr/local/sbin/mihomo-proc` status：查询进程实例状态。
+pub async fn proc_status() -> Result<ProcStatus, ApplyError> {
+    let out = run_apply_script("/usr/local/sbin/mihomo-proc", "status\n", true, STATUS_TMP).await?;
+    Ok(parse_proc_status(&out.stdout))
+}
+
+/// /usr/local/sbin/mihomo-proc 是否已安装（存在且可执行）。
+/// 与 is_apply_script_installed 共用 script_installed_at 辅助。
+pub async fn is_proc_script_installed() -> bool {
+    script_installed_at("/usr/local/sbin/mihomo-proc").await
+}
+
+async fn script_installed_at(path: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::metadata(path)
+        .await
+        .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
 /// /usr/local/sbin/mihomo-apply 是否已安装（存在且可执行）。
 pub async fn is_apply_script_installed() -> bool {
+    script_installed_at("/usr/local/sbin/mihomo-apply").await
+}
+
+/// 同步版（installer 测试用）：/usr/local/sbin/mihomo-proc 是否已安装。
+pub fn is_proc_script_installed_sync() -> bool {
     use std::os::unix::fs::PermissionsExt;
-    tokio::fs::metadata("/usr/local/sbin/mihomo-apply")
-        .await
+    std::fs::metadata("/usr/local/sbin/mihomo-proc")
         .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
 }
@@ -135,14 +264,34 @@ pub async fn service_is_active() -> bool {
         .unwrap_or(false)
 }
 
-/// which mihomo。
-pub async fn mihomo_is_installed() -> bool {
-    Command::new("which")
-        .arg("mihomo")
-        .status()
+/// systemctl list-unit-files mihomo.service 是否含 mihomo.service（单元是否存在）。
+pub async fn service_unit_exists() -> bool {
+    Command::new("systemctl")
+        .args(["list-unit-files", "mihomo.service"])
+        .output()
         .await
-        .map(|s| s.success())
+        .map(|o| {
+            o.status.success() && String::from_utf8_lossy(&o.stdout).contains("mihomo.service")
+        })
         .unwrap_or(false)
+}
+
+/// which mihomo 取路径（设置页路径输入预填用；找不到返回 None）。
+pub fn find_mihomo_in_path() -> Option<String> {
+    let out = std::process::Command::new("which")
+        .arg("mihomo")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// which mihomo（存在性判断）。
+pub async fn mihomo_is_installed() -> bool {
+    find_mihomo_in_path().is_some()
 }
 
 /// 运行命令并捕获输出；stdin 可来自文件。命令不存在 → 按场景映射错误。
@@ -152,11 +301,13 @@ async fn run_capture(
     stdin_file: Option<&str>,
 ) -> Result<(std::process::ExitStatus, String, String), ApplyError> {
     let mut command = Command::new(cmd);
-    command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if let Some(path) = stdin_file {
         // 打开本地文件作为子进程 stdin（快速阻塞操作，可接受）
-        let file = std::fs::File::open(path)
-            .map_err(|e| ApplyError::Io(e.to_string()))?;
+        let file = std::fs::File::open(path).map_err(|e| ApplyError::Io(e.to_string()))?;
         command.stdin(Stdio::from(file));
     } else {
         command.stdin(Stdio::null());
@@ -173,11 +324,8 @@ async fn run_capture(
     };
     let mut stdout = child.stdout.take().expect("stdout 管道已请求");
     let mut stderr = child.stderr.take().expect("stderr 管道已请求");
-    let (out, err, status) = tokio::join!(
-        read_all(&mut stdout),
-        read_all(&mut stderr),
-        child.wait()
-    );
+    let (out, err, status) =
+        tokio::join!(read_all(&mut stdout), read_all(&mut stderr), child.wait());
     let status = status.map_err(|e| ApplyError::Io(e.to_string()))?;
     Ok((status, out, err))
 }
@@ -222,6 +370,7 @@ fn classify_sudo_failure(stderr: &str) -> SudoFailureKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::models::RunMode;
     use crate::core::settings::with_settings_dir;
 
     /// 依赖 config_dir（MIHOMO_TUI_SETTINGS_DIR）的三个用例与 settings/dashboard
@@ -259,7 +408,9 @@ mod tests {
         // 用户无 sudo 权限（CI/容器）等环境均覆盖。
         with_settings_dir(|| {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            let e = rt.block_on(apply_config("bad: [\n", true)).unwrap_err();
+            let e = rt
+                .block_on(apply_config("bad: [\n", true, RunMode::Systemd))
+                .unwrap_err();
             match &e {
                 ApplyError::SudoNeedsPassword
                 | ApplyError::SudoNotAvailable
@@ -294,7 +445,9 @@ mod tests {
             NeedsPassword
         ));
         assert!(matches!(
-            classify_sudo_failure("alice is not in the sudoers file. This incident will be reported."),
+            classify_sudo_failure(
+                "alice is not in the sudoers file. This incident will be reported."
+            ),
             NotInSudoers
         ));
         assert!(matches!(
@@ -341,5 +494,138 @@ mod tests {
     #[tokio::test]
     async fn service_is_active_smoke() {
         let _ = service_is_active().await;
+    }
+
+    /// 直接进程模式 apply 的 stdin 协议：首行 apply + 空行后接 yaml。
+    #[test]
+    fn direct_apply_stdin_protocol() {
+        let body = direct_apply_body("port: 7890\n");
+        assert!(body.starts_with("apply\nport: 7890\n"), "body: {body:?}");
+    }
+
+    /// status 行协议解析：正常/空值/乱序/未知行。
+    #[test]
+    fn parse_proc_status_lines() {
+        let s = parse_proc_status(
+            "bin=/usr/bin/mihomo\npid=1234\nrunning=true\nconfig=/etc/mihomo/config.yaml\n",
+        );
+        assert_eq!(s.bin.as_deref(), Some("/usr/bin/mihomo"));
+        assert_eq!(s.pid, Some(1234));
+        assert!(s.running);
+        // 空值
+        let s = parse_proc_status("bin=\npid=\nrunning=false\n");
+        assert_eq!(s.bin, None);
+        assert_eq!(s.pid, None);
+        assert!(!s.running);
+        // 乱序 + 未知行 + 非数字 pid
+        let s = parse_proc_status("running=true\nunknown=xyz\npid=abc\nbin=/opt/mihomo\n");
+        assert_eq!(s.bin.as_deref(), Some("/opt/mihomo"));
+        assert_eq!(s.pid, None);
+        assert!(s.running);
+        // 空输出
+        let s = parse_proc_status("");
+        assert_eq!(s.bin, None);
+        assert!(!s.running);
+    }
+
+    /// ProcOp 的命令行映射。
+    #[test]
+    fn proc_op_stdin_lines() {
+        assert_eq!(ProcOp::Start.stdin_line(), "start");
+        assert_eq!(ProcOp::Stop.stdin_line(), "stop");
+        assert_eq!(ProcOp::Restart.stdin_line(), "restart");
+    }
+
+    /// 环境自适应：apply_config direct 模式，坏 yaml 必须在脚本内预校验阶段失败
+    /// （未装脚本/sudo 无权限/需密码等环境均覆盖，无副作用）。
+    #[test]
+    fn apply_direct_bad_yaml_fails_early() {
+        with_settings_dir(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let e = rt
+                .block_on(apply_config("bad: [\n", true, RunMode::Direct))
+                .unwrap_err();
+            match &e {
+                ApplyError::SudoNeedsPassword
+                | ApplyError::SudoNotAvailable
+                | ApplyError::NotInSudoers
+                | ApplyError::CommandFailed { .. } => {}
+                other => panic!("意外错误: {other:?}"),
+            }
+        });
+    }
+
+    /// 环境自适应：systemd 模式行为不变（与既有 apply_non_interactive 测试同构）。
+    #[test]
+    fn apply_systemd_bad_yaml_fails_early() {
+        with_settings_dir(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let e = rt
+                .block_on(apply_config("bad: [\n", true, RunMode::Systemd))
+                .unwrap_err();
+            match &e {
+                ApplyError::SudoNeedsPassword
+                | ApplyError::SudoNotAvailable
+                | ApplyError::NotInSudoers
+                | ApplyError::CommandFailed { .. } => {}
+                other => panic!("意外错误: {other:?}"),
+            }
+        });
+    }
+
+    /// 环境自适应：find_mihomo_in_path 与 which mihomo 一致。
+    #[tokio::test]
+    async fn find_mihomo_in_path_matches_which() {
+        let which = tokio::process::Command::new("which")
+            .arg("mihomo")
+            .output()
+            .await
+            .unwrap();
+        let expected = if which.status.success() {
+            Some(String::from_utf8_lossy(&which.stdout).trim().to_string())
+        } else {
+            None
+        };
+        assert_eq!(find_mihomo_in_path(), expected);
+        if let Some(p) = &expected {
+            let m = tokio::fs::metadata(p).await.unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            assert!(
+                m.is_file() && m.permissions().mode() & 0o111 != 0,
+                "应返回可执行文件: {p}"
+            );
+        }
+    }
+
+    /// 环境自适应：service_unit_exists 与 systemctl list-unit-files 一致。
+    #[tokio::test]
+    async fn service_unit_exists_matches_systemctl() {
+        let out = tokio::process::Command::new("systemctl")
+            .args(["list-unit-files", "mihomo.service"])
+            .output()
+            .await
+            .unwrap();
+        let expected =
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("mihomo.service");
+        assert_eq!(service_unit_exists().await, expected);
+    }
+
+    /// 环境自适应：proc_status 失败分类正确（未装脚本 → 命令不存在或 NotInSudoers）。
+    #[tokio::test]
+    async fn proc_status_env_adaptive() {
+        match proc_status().await {
+            Ok(s) => {
+                // 已装 mihomo-proc 且免密可用：字段结构合法
+                assert!(s.bin.is_none() || s.bin.as_deref().unwrap().starts_with('/'));
+                assert!(!s.running);
+            }
+            Err(
+                ApplyError::SudoNotAvailable
+                | ApplyError::NotInSudoers
+                | ApplyError::CommandFailed { .. }
+                | ApplyError::SudoNeedsPassword,
+            ) => {}
+            Err(other) => panic!("意外错误: {other:?}"),
+        }
     }
 }

@@ -74,7 +74,12 @@ impl GroupsPage {
     /// 运行时行：`名称 | select | 当前: 节点X`
     fn row(g: &GroupInfo) -> String {
         let now = g.now.as_deref().unwrap_or("-");
-        format!("{} | {} | 当前: {}", g.name, Self::type_display(&g.group_type), now)
+        format!(
+            "{} | {} | 当前: {}",
+            g.name,
+            Self::type_display(&g.group_type),
+            now
+        )
     }
 
     /// 降级行（订阅缓存）：`名称 | select | 成员5 | 当前: -`
@@ -121,7 +126,8 @@ impl GroupsPage {
     fn rebuild_list(st: &AppState) -> SelectList {
         if !st.proxy_groups.is_empty() {
             let rows: Vec<String> = st.proxy_groups.iter().map(Self::row).collect();
-            SelectList::new(rows).with_title(" 规则组（运行时，Enter 切换 / r 测速 / R 刷新） ".to_string())
+            SelectList::new(rows)
+                .with_title(" 规则组（运行时，Enter 切换 / r 测速 / R 刷新） ".to_string())
         } else {
             let mut rows: Vec<String> = Vec::new();
             if let Some(act) = st.subs.iter().find(|s| s.active) {
@@ -221,7 +227,10 @@ impl GroupsPage {
         // 无 pending（理论上不会发生）时直接返回
         let name = self.pending.take()?;
         if st.proxy_groups.iter().any(|g| g.name == name) {
-            return Some(UiCommand::SwitchGroup { group: name, target });
+            return Some(UiCommand::SwitchGroup {
+                group: name,
+                target,
+            });
         }
         // popup 已被 take，需重新挂回提示
         self.popup = Some(GroupPopup::Message(MessagePopup::new(
@@ -231,7 +240,12 @@ impl GroupsPage {
         None
     }
 
-    fn handle_popup(&mut self, popup: GroupPopup, key: KeyEvent, st: &mut AppState) -> Option<UiCommand> {
+    fn handle_popup(
+        &mut self,
+        popup: GroupPopup,
+        key: KeyEvent,
+        st: &mut AppState,
+    ) -> Option<UiCommand> {
         match popup {
             GroupPopup::Selector(mut p) => match p.handle_key(key) {
                 Some(SelectAction::Confirm(target)) => self.confirm_select(target, st),
@@ -382,15 +396,20 @@ impl SelectorPopup {
             SortMode::Original => {}
             SortMode::Name => {
                 self.order.sort_by(|&a, &b| {
-                    self.items[a].to_lowercase().cmp(&self.items[b].to_lowercase())
+                    self.items[a]
+                        .to_lowercase()
+                        .cmp(&self.items[b].to_lowercase())
                 });
             }
             SortMode::Delay => {
                 self.order.sort_by(|&a, &b| {
                     let da = self.delays.get(&self.items[a]).copied().unwrap_or(u16::MAX);
                     let db = self.delays.get(&self.items[b]).copied().unwrap_or(u16::MAX);
-                    da.cmp(&db)
-                        .then_with(|| self.items[a].to_lowercase().cmp(&self.items[b].to_lowercase()))
+                    da.cmp(&db).then_with(|| {
+                        self.items[a]
+                            .to_lowercase()
+                            .cmp(&self.items[b].to_lowercase())
+                    })
                 });
             }
         }
@@ -443,9 +462,9 @@ impl SelectorPopup {
                 self.hint = None;
                 None
             }
-            KeyCode::Enter => {
-                Some(SelectAction::Confirm(self.items[self.order[self.selected]].clone()))
-            }
+            KeyCode::Enter => Some(SelectAction::Confirm(
+                self.items[self.order[self.selected]].clone(),
+            )),
             KeyCode::Esc => Some(SelectAction::Cancel),
             KeyCode::Char('s') => {
                 // 已发起测速：清除「请先按 s 测速」提示，避免残留到数据到达
@@ -489,7 +508,11 @@ impl SelectorPopup {
             .iter()
             .map(|&i| {
                 let n = &self.items[i];
-                let mark = if self.now.as_deref() == Some(n.as_str()) { "▶ " } else { "  " };
+                let mark = if self.now.as_deref() == Some(n.as_str()) {
+                    "▶ "
+                } else {
+                    "  "
+                };
                 let suffix = match self.delays.get(n) {
                     Some(ms) if *ms >= GROUP_DELAY_TIMEOUT_MS => "  超时".to_string(),
                     Some(ms) => format!("  {ms}ms"),
@@ -499,7 +522,11 @@ impl SelectorPopup {
             })
             .collect();
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(self.title.clone()))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(self.title.clone()),
+            )
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
         let mut state = ListState::default();
         state.select(Some(self.selected));
@@ -546,6 +573,7 @@ mod tests {
             group_delays: HashMap::new(),
             logs: VecDeque::new(),
             notices: VecDeque::new(),
+            run_status: None,
         }
     }
 
@@ -590,7 +618,10 @@ mod tests {
 
     #[test]
     fn fallback_row_format() {
-        assert_eq!(GroupsPage::fallback_row("订阅组", "select", 3), "订阅组 | select | 成员3 | 当前: -");
+        assert_eq!(
+            GroupsPage::fallback_row("订阅组", "select", 3),
+            "订阅组 | select | 成员3 | 当前: -"
+        );
     }
 
     #[test]
@@ -618,7 +649,12 @@ mod tests {
             Some(SelectAction::Cancel)
         ));
         // now 不在列表中 → 回退第一项
-        let mut p2 = SelectorPopup::new("t".into(), "g".into(), vec!["A".into(), "B".into()], Some("X".into()));
+        let mut p2 = SelectorPopup::new(
+            "t".into(),
+            "g".into(),
+            vec!["A".into(), "B".into()],
+            Some("X".into()),
+        );
         assert!(matches!(
             p2.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Some(SelectAction::Confirm(ref t)) if t == "A"
@@ -713,12 +749,7 @@ mod tests {
     /// d 无延迟数据：不排序（保持原始顺序），提示先测速，不切换模式。
     #[test]
     fn selector_popup_delay_sort_without_data_keeps_order() {
-        let mut p = SelectorPopup::new(
-            "t".into(),
-            "g".into(),
-            vec!["b".into(), "a".into()],
-            None,
-        );
+        let mut p = SelectorPopup::new("t".into(), "g".into(), vec!["b".into(), "a".into()], None);
         let _ = p.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         let names: Vec<&str> = p.order.iter().map(|&i| p.items[i].as_str()).collect();
         assert_eq!(names, vec!["b", "a"], "无数据不应排序: {names:?}");
@@ -733,16 +764,9 @@ mod tests {
     #[test]
     fn selector_popup_sync_delays_from_state() {
         let mut st = state_with_groups(Vec::new());
-        st.group_delays.insert(
-            "g".into(),
-            vec![("a".into(), 300u16), ("b".into(), 100u16)],
-        );
-        let mut p = SelectorPopup::new(
-            "t".into(),
-            "g".into(),
-            vec!["a".into(), "b".into()],
-            None,
-        );
+        st.group_delays
+            .insert("g".into(), vec![("a".into(), 300u16), ("b".into(), 100u16)]);
+        let mut p = SelectorPopup::new("t".into(), "g".into(), vec!["a".into(), "b".into()], None);
         // 先按 d：无数据 → 提示
         let _ = p.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
         assert!(p.hint.is_some());
@@ -761,7 +785,8 @@ mod tests {
     #[test]
     fn selector_popup_sync_delays_empty_clears_cache() {
         let mut st = state_with_groups(Vec::new());
-        st.group_delays.insert("g".into(), vec![("a".into(), 100u16)]);
+        st.group_delays
+            .insert("g".into(), vec![("a".into(), 100u16)]);
         let mut p = SelectorPopup::new("t".into(), "g".into(), vec!["a".into(), "b".into()], None);
         // 首次测速结果到达：延迟入缓存，按 d 进入延迟排序
         p.sync_delays(&st);
@@ -772,7 +797,10 @@ mod tests {
         st.group_delays.insert("g".into(), Vec::new());
         p.sync_delays(&st);
         assert!(p.delays.is_empty(), "过期延迟缓存应被清除");
-        assert!(matches!(p.mode, SortMode::Original), "无数据时延迟排序无意义，应重置为原始序");
+        assert!(
+            matches!(p.mode, SortMode::Original),
+            "无数据时延迟排序无意义，应重置为原始序"
+        );
         let names: Vec<&str> = p.order.iter().map(|&i| p.items[i].as_str()).collect();
         assert_eq!(names, vec!["a", "b"], "应恢复原始顺序: {names:?}");
         // d 键恢复提示
@@ -812,13 +840,15 @@ mod tests {
             .draw(|f| page.render(f, f.area(), &st))
             .expect("render 不应失败");
         let text: String = (0..frame.buffer.area.height)
-            .flat_map(|y| (0..frame.buffer.area.width).map(move |x| {
-                frame
-                    .buffer
-                    .cell((x, y))
-                    .map(|c| c.symbol().to_string())
-                    .unwrap_or_default()
-            }))
+            .flat_map(|y| {
+                (0..frame.buffer.area.width).map(move |x| {
+                    frame
+                        .buffer
+                        .cell((x, y))
+                        .map(|c| c.symbol().to_string())
+                        .unwrap_or_default()
+                })
+            })
             .collect::<String>()
             .chars()
             .filter(|c| !c.is_whitespace())
@@ -839,7 +869,10 @@ mod tests {
         }]);
         let cmd = page.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut st);
         assert!(cmd.is_none(), "弹窗打开阶段不发命令");
-        assert!(matches!(page.popup, Some(GroupPopup::Selector(_))), "应弹单选弹窗");
+        assert!(
+            matches!(page.popup, Some(GroupPopup::Selector(_))),
+            "应弹单选弹窗"
+        );
     }
 
     /// 确认切换：按组名定位成功 → 发 SwitchGroup 命令并关闭弹窗。
@@ -880,7 +913,10 @@ mod tests {
         st.proxy_groups.clear();
         let cmd = page.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut st);
         assert!(cmd.is_none(), "列表变化后不应发切换命令");
-        assert!(matches!(page.popup, Some(GroupPopup::Message(_))), "应提示重试");
+        assert!(
+            matches!(page.popup, Some(GroupPopup::Message(_))),
+            "应提示重试"
+        );
         // Esc 关闭提示
         let _ = page.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut st);
         assert!(!page.popup_open(), "Esc 应关闭提示");

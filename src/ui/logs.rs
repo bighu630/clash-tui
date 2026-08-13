@@ -152,12 +152,18 @@ impl Page for LogsPage {
             " 日志  [{}]  {} 条 {} ",
             self.level.as_str(),
             st.logs.len(),
-            if self.follow { "跟随中" } else { "已暂停" }
+            if self.follow {
+                "跟随中"
+            } else {
+                "已暂停"
+            }
         );
         let block = Block::new()
             .title(Span::styled(
                 title,
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL);
         let inner = block.inner(area);
@@ -215,7 +221,10 @@ mod tests {
     #[test]
     fn level_style_maps() {
         assert_eq!(LogsPage::level_style(LogLevel::Error).fg, Some(Color::Red));
-        assert_eq!(LogsPage::level_style(LogLevel::Warning).fg, Some(Color::Yellow));
+        assert_eq!(
+            LogsPage::level_style(LogLevel::Warning).fg,
+            Some(Color::Yellow)
+        );
         assert_eq!(LogsPage::level_style(LogLevel::Info).fg, None);
         assert_eq!(LogsPage::level_style(LogLevel::Debug).fg, Some(Color::Gray));
     }

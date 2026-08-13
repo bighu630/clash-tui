@@ -8,7 +8,9 @@ use crate::core::parsers::{b64_decode, err, parse_query, pct_decode, ParseError}
 /// 解析 ssr 链接，返回 (名称, yaml 映射)。
 /// 名称优先级：fragment（#）> remarks 参数。
 pub fn parse(line: &str) -> Result<(String, Mapping), ParseError> {
-    let body = line.strip_prefix("ssr://").ok_or_else(|| err("不是 ssr 链接"))?;
+    let body = line
+        .strip_prefix("ssr://")
+        .ok_or_else(|| err("不是 ssr 链接"))?;
     let (body, frag) = match body.split_once('#') {
         Some((b, f)) => (b, Some(f)),
         None => (body, None),
@@ -63,8 +65,14 @@ pub fn parse(line: &str) -> Result<(String, Mapping), ParseError> {
     m.insert(Value::String("password".into()), Value::String(password));
     m.insert(Value::String("protocol".into()), Value::String(protocol));
     m.insert(Value::String("obfs".into()), Value::String(obfs));
-    m.insert(Value::String("protocol-param".into()), Value::String(param("protoparam")));
-    m.insert(Value::String("obfs-param".into()), Value::String(param("obfsparam")));
+    m.insert(
+        Value::String("protocol-param".into()),
+        Value::String(param("protoparam")),
+    );
+    m.insert(
+        Value::String("obfs-param".into()),
+        Value::String(param("obfsparam")),
+    );
     m.insert(Value::String("udp".into()), Value::Bool(true));
 
     Ok((name, m))

@@ -3,7 +3,7 @@
 
 use serde_yaml::{Mapping, Value};
 
-use crate::core::models::{BUILTIN_TARGETS, NetworkSettings, Overrides, Subscription};
+use crate::core::models::{NetworkSettings, Overrides, Subscription, BUILTIN_TARGETS};
 
 /// 兜底自动组名。
 pub const AUTO_GROUP_NAME: &str = "🚀 节点选择";
@@ -177,13 +177,21 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
     kv(&mut root, "mode", s.mode.clone());
     kv(&mut root, "ipv6", s.ipv6);
     kv(&mut root, "log-level", s.log_level.clone());
-    kv(&mut root, "external-controller", s.external_controller.clone());
+    kv(
+        &mut root,
+        "external-controller",
+        s.external_controller.clone(),
+    );
     kv(&mut root, "secret", s.secret.clone());
     let mut tun = Mapping::new();
     kv(&mut tun, "enable", s.tun.enable);
     kv(&mut tun, "stack", s.tun.stack.clone());
     kv(&mut tun, "auto-route", s.tun.auto_route);
-    kv(&mut tun, "dns-hijack", str_seq(s.tun.dns_hijack.iter().cloned()));
+    kv(
+        &mut tun,
+        "dns-hijack",
+        str_seq(s.tun.dns_hijack.iter().cloned()),
+    );
     kv(&mut tun, "mtu", s.tun.mtu);
     kv(&mut root, "tun", Value::Mapping(tun));
     let mut dns = Mapping::new();
@@ -191,10 +199,26 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
     kv(&mut dns, "listen", s.dns.listen.clone());
     kv(&mut dns, "enhanced-mode", s.dns.enhanced_mode.clone());
     kv(&mut dns, "fake-ip-range", s.dns.fake_ip_range.clone());
-    kv(&mut dns, "nameserver", str_seq(s.dns.nameserver.iter().cloned()));
-    kv(&mut dns, "default-nameserver", str_seq(s.dns.default_nameserver.iter().cloned()));
-    kv(&mut dns, "fallback", str_seq(s.dns.fallback.iter().cloned()));
-    kv(&mut dns, "fake-ip-filter", str_seq(s.dns.fake_ip_filter.iter().cloned()));
+    kv(
+        &mut dns,
+        "nameserver",
+        str_seq(s.dns.nameserver.iter().cloned()),
+    );
+    kv(
+        &mut dns,
+        "default-nameserver",
+        str_seq(s.dns.default_nameserver.iter().cloned()),
+    );
+    kv(
+        &mut dns,
+        "fallback",
+        str_seq(s.dns.fallback.iter().cloned()),
+    );
+    kv(
+        &mut dns,
+        "fake-ip-filter",
+        str_seq(s.dns.fake_ip_filter.iter().cloned()),
+    );
     kv(&mut root, "dns", Value::Mapping(dns));
     // select 组选择持久化：重启后保持运行时切换的节点
     let mut profile = Mapping::new();
@@ -211,8 +235,9 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
         kv(&mut root, "proxies", Value::Sequence(nodes));
     }
 
-    let config = serde_yaml::to_string(&Value::Mapping(root))
-        .map_err(|e| MergeError { message: format!("YAML 序列化失败: {e}") })?;
+    let config = serde_yaml::to_string(&Value::Mapping(root)).map_err(|e| MergeError {
+        message: format!("YAML 序列化失败: {e}"),
+    })?;
     Ok(MergeOutput { config, warnings })
 }
 
@@ -220,7 +245,7 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
 mod tests {
     use super::*;
     use crate::core::models::{
-        Overrides, ProxyNode, Subscription, SubscriptionCache, TunSettings, UserRule,
+        Overrides, ProxyNode, RunMode, Subscription, SubscriptionCache, TunSettings, UserRule,
     };
     use serde_yaml::{Mapping, Value};
 
@@ -228,7 +253,10 @@ mod tests {
         let mut m = Mapping::new();
         m.insert(Value::String("name".into()), Value::String(name.into()));
         m.insert(Value::String("type".into()), Value::String("ss".into()));
-        m.insert(Value::String("server".into()), Value::String("1.2.3.4".into()));
+        m.insert(
+            Value::String("server".into()),
+            Value::String("1.2.3.4".into()),
+        );
         m.insert(Value::String("port".into()), Value::Number(8388.into()));
         ProxyNode {
             name: name.into(),
@@ -327,8 +355,20 @@ mod tests {
         // 顶层键顺序
         let keys = top_keys(&v);
         let want = [
-            "port", "socks-port", "mixed-port", "allow-lan", "mode", "ipv6", "log-level",
-            "external-controller", "secret", "tun", "dns", "profile", "proxy-groups", "rules",
+            "port",
+            "socks-port",
+            "mixed-port",
+            "allow-lan",
+            "mode",
+            "ipv6",
+            "log-level",
+            "external-controller",
+            "secret",
+            "tun",
+            "dns",
+            "profile",
+            "proxy-groups",
+            "rules",
             "proxies",
         ];
         assert_eq!(keys, want, "顶层键顺序");
@@ -338,7 +378,10 @@ mod tests {
         assert_eq!(v["mode"], Value::String("rule".into()));
         assert_eq!(v["tun"]["stack"], Value::String("mixed".into()));
         assert_eq!(v["dns"]["enhanced-mode"], Value::String("fake-ip".into()));
-        assert_eq!(v["dns"]["nameserver"][0], Value::String("https://doh.pub/dns-query".into()));
+        assert_eq!(
+            v["dns"]["nameserver"][0],
+            Value::String("https://doh.pub/dns-query".into())
+        );
         assert_eq!(v["secret"].as_str().unwrap().len(), 32);
 
         // select 组选择持久化
@@ -352,7 +395,10 @@ mod tests {
 
         // 规则顺序：自定义规则在前
         let rs = v["rules"].as_sequence().unwrap();
-        assert_eq!(rs[0], Value::String("DOMAIN-SUFFIX,example.com,订阅组".into()));
+        assert_eq!(
+            rs[0],
+            Value::String("DOMAIN-SUFFIX,example.com,订阅组".into())
+        );
         assert_eq!(rs[1], Value::String("DOMAIN,test.com,订阅组".into()));
         assert_eq!(rs[2], Value::String("MATCH,订阅组".into()));
 
@@ -391,7 +437,10 @@ mod tests {
     fn sub_group_name_same_as_node_passthrough() {
         let s = sub(
             vec![node("冲突节点")],
-            vec![sub_group("冲突节点", &[]), sub_group("正常组", &["冲突节点"])],
+            vec![
+                sub_group("冲突节点", &[]),
+                sub_group("正常组", &["冲突节点"]),
+            ],
             vec!["MATCH,正常组".into()],
         );
         let out = do_merge(Overrides::default(), Some(s));
@@ -435,10 +484,16 @@ mod tests {
         assert_eq!(members[1], Value::String("节点2".into()));
         let rs = v["rules"].as_sequence().unwrap();
         assert_eq!(
-            rs.iter().map(|r| r.as_str().unwrap().to_string()).collect::<Vec<_>>(),
+            rs.iter()
+                .map(|r| r.as_str().unwrap().to_string())
+                .collect::<Vec<_>>(),
             DEFAULT_RULES.to_vec()
         );
-        assert!(out.warnings.len() >= 2, "应有自动组+默认规则两条警告: {:?}", out.warnings);
+        assert!(
+            out.warnings.len() >= 2,
+            "应有自动组+默认规则两条警告: {:?}",
+            out.warnings
+        );
     }
 
     // ---- 8. 无激活订阅 → 仅网络 + 自定义规则（无组） ----
@@ -451,8 +506,14 @@ mod tests {
         assert!(out.warnings.is_empty(), "警告: {:?}", out.warnings);
         let v = parse_out(&out);
         let keys = top_keys(&v);
-        assert!(!keys.contains(&"proxy-groups".to_string()), "不应有 proxy-groups 键: {keys:?}");
-        assert!(!keys.contains(&"proxies".to_string()), "不应有 proxies 键: {keys:?}");
+        assert!(
+            !keys.contains(&"proxy-groups".to_string()),
+            "不应有 proxy-groups 键: {keys:?}"
+        );
+        assert!(
+            !keys.contains(&"proxies".to_string()),
+            "不应有 proxies 键: {keys:?}"
+        );
         assert!(keys.len() <= 13, "不应注入模板: {keys:?}");
         let rs = v["rules"].as_sequence().unwrap();
         assert_eq!(rs[0], Value::String("MATCH,DIRECT".into()));
@@ -497,7 +558,10 @@ mod tests {
         let rs = v["rules"].as_sequence().unwrap();
         assert_eq!(rs.len(), BUILTIN_TARGETS.len());
         // 兜底默认规则不应注入（已有自定义规则）
-        assert_eq!(rs[0], Value::String(format!("MATCH,{}", BUILTIN_TARGETS[0])));
+        assert_eq!(
+            rs[0],
+            Value::String(format!("MATCH,{}", BUILTIN_TARGETS[0]))
+        );
     }
 
     // ---- 12. MATCH 规则序列化无 payload ----
@@ -540,7 +604,9 @@ mod tests {
         // 默认规则注入且自动组存在 → 无悬空引用
         let rs = v["rules"].as_sequence().unwrap();
         assert_eq!(
-            rs.iter().map(|r| r.as_str().unwrap().to_string()).collect::<Vec<_>>(),
+            rs.iter()
+                .map(|r| r.as_str().unwrap().to_string())
+                .collect::<Vec<_>>(),
             DEFAULT_RULES.to_vec()
         );
         let gs = v["proxy-groups"].as_sequence().unwrap();
@@ -568,7 +634,11 @@ mod tests {
         let s = sub(
             vec![node("节点1")],
             vec![],
-            vec!["DOMAIN,x.com,节点1".into(), "DOMAIN,x.com,节点1".into(), "DOMAIN,y.com,节点1".into()],
+            vec![
+                "DOMAIN,x.com,节点1".into(),
+                "DOMAIN,x.com,节点1".into(),
+                "DOMAIN,y.com,节点1".into(),
+            ],
         );
         let out = do_merge(o, Some(s));
         let v = parse_out(&out);
@@ -721,7 +791,8 @@ mod tests {
         assert!(
             out.warnings
                 .iter()
-                .any(|w| w.contains("IP-CIDR,8.8.8.8/32,不存在组,no-resolve") && w.contains("已丢弃")),
+                .any(|w| w.contains("IP-CIDR,8.8.8.8/32,不存在组,no-resolve")
+                    && w.contains("已丢弃")),
             "应警告丢弃: {:?}",
             out.warnings
         );
@@ -763,6 +834,7 @@ mod tests {
                 enable: true,
                 ..Default::default()
             },
+            run_mode: RunMode::Systemd,
             ..Default::default()
         };
         let out = merge(MergeContext {
@@ -786,13 +858,17 @@ mod tests {
             vec![
                 sub_group("重名组", &["节点1"]),
                 sub_group("重名组", &["节点2"]), // 重名保留（mihomo -t 兜底）
-                sub_group("空组", &[]),         // 空组保留
+                sub_group("空组", &[]),          // 空组保留
                 sub_group("幽灵组", &["不存在"]), // 失效成员保留
             ],
             vec!["MATCH,幽灵组".into()],
         );
         let out = do_merge(Overrides::default(), Some(s));
-        assert!(out.warnings.is_empty(), "透传不应有警告: {:?}", out.warnings);
+        assert!(
+            out.warnings.is_empty(),
+            "透传不应有警告: {:?}",
+            out.warnings
+        );
         let v = parse_out(&out);
         let gs = v["proxy-groups"].as_sequence().unwrap();
         assert_eq!(gs.len(), 4, "全部组原样保留: {gs:?}");
@@ -835,16 +911,29 @@ mod tests {
     fn sub_group_url_test_extra_fields_passthrough() {
         // url-test 组带 url/interval/tolerance 等扩展字段：原样输出不丢字段
         let mut m = Mapping::new();
-        m.insert(Value::String("name".into()), Value::String("自动选择".into()));
-        m.insert(Value::String("type".into()), Value::String("url-test".into()));
-        m.insert(Value::String("url".into()), Value::String("http://x/generate_204".into()));
+        m.insert(
+            Value::String("name".into()),
+            Value::String("自动选择".into()),
+        );
+        m.insert(
+            Value::String("type".into()),
+            Value::String("url-test".into()),
+        );
+        m.insert(
+            Value::String("url".into()),
+            Value::String("http://x/generate_204".into()),
+        );
         m.insert(Value::String("interval".into()), Value::Number(120.into()));
         m.insert(Value::String("tolerance".into()), Value::Number(50.into()));
         m.insert(
             Value::String("proxies".into()),
             Value::Sequence(vec![Value::String("节点1".into())]),
         );
-        let s = sub(vec![node("节点1")], vec![Value::Mapping(m)], vec!["MATCH,自动选择".into()]);
+        let s = sub(
+            vec![node("节点1")],
+            vec![Value::Mapping(m)],
+            vec!["MATCH,自动选择".into()],
+        );
         let out = do_merge(Overrides::default(), Some(s));
         let v = parse_out(&out);
         let gs = v["proxy-groups"].as_sequence().unwrap();

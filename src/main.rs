@@ -4,8 +4,10 @@
 use std::io;
 
 use crossterm::cursor::Show;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::execute;
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 
 fn main() -> Result<(), mihomo_tui::app::BoxError> {
     install_panic_hook();

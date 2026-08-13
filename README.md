@@ -100,6 +100,9 @@ Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订�
 
 ```
 ┌ 设置 ──────────────────────────────────────────────────────────────────────┐
+│ ── 运行方式 ──                                                             │
+│ run-mode: ◀ systemd ▶    mihomo-bin: /usr/bin/mihomo（Enter 修改）         │
+│ mihomo-status: 服务运行中（Enter 刷新）   [ 启动 ] [ 停止 ] [ 重启 ]        │
 │ ── 网络 ──                                                                 │
 │ mode: ◀ rule ▶       ipv6: ◀ 否 ▶       allow-lan: ◀ 否 ▶                  │
 │ ── 端口 ──                                                                 │
@@ -111,18 +114,27 @@ Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订�
 │ tun.mtu: 9000        tun.dns-hijack: any:53                                │
 │ ── DNS ──                                                                  │
 │ dns.enable: ◀ 是 ▶   dns.listen: 0.0.0.0:1053                              │
-│ ...（其余区块与字段：DNS 8 项 / 其他 2 项，共 22 个字段）                  │
+│ ...（其余区块与字段：DNS 8 项 / 其他 2 项；共 28 个字段）                  │
 └────────────────────────────────────────────────────────────────────────────┘
-[未保存][编辑中] ↑↓ 移动 · Enter 编辑/循环 · Ctrl+S 保存 · Ctrl+A 保存并应用
+[未保存][编辑中] ↑↓ 移动 · Enter 编辑/循环/执行 · Ctrl+S 保存 · Ctrl+A 保存并应用
 ```
 
-- 区块：网络（mode/ipv6/allow-lan）、端口（port/socks-port/mixed-port）、日志（log-level）、
-  TUN（enable/stack/auto-route/mtu/dns-hijack）、DNS（enable/listen/enhanced-mode/
-  fake-ip-range/nameserver/default-nameserver/fallback/fake-ip-filter）、其他
-  （external-controller/secret）——共 22 个字段，即 settings.toml 全部可配置项
+- 区块：运行方式（run-mode/mihomo-bin/mihomo-status/启动/停止/重启）、网络（mode/ipv6/allow-lan）、
+  端口（port/socks-port/mixed-port）、日志（log-level）、TUN（enable/stack/auto-route/mtu/
+  dns-hijack）、DNS（enable/listen/enhanced-mode/fake-ip-range/nameserver/
+  default-nameserver/fallback/fake-ip-filter）、其他（external-controller/secret）——
+  共 28 个字段：运行方式区块 6 个为 TUI 自身设置（不写入 config.yaml），其余 22 个即
+  settings.toml 全部可配置项
+- 首区块「运行方式」：`run-mode` 下拉循环切换 systemd / direct（`Ctrl+S` 持久化；切回
+  systemd 时若进程实例仍在运行会自动停止）；`mihomo-bin` 显示当前二进制路径，`Enter` 打开
+  输入弹窗——自动预填已有路径，否则搜索 `which mihomo`（PATH）结果，确认后**交互式提权**
+  保存到 root 侧 `/etc/mihomo-tui/mihomo.conf`；`mihomo-status` 显示运行状态，`Enter` 按状态
+  分派：刷新 / 一键启动 systemd 服务 / 查看安装指引（详见「两种运行方式与安全设计」）；
+  启动/停止/重启为动作按钮，direct 模式下 `Enter` 执行（systemd 模式下显示 `—`，由
+  systemctl 管理）
 - `↑↓` 移动字段，`Enter` 编辑文本/数字字段（`Esc` 退出编辑；编辑态内 `←→` 移动光标）、
-  下拉字段上按 `Enter` 循环选项、secret 只读字段上按 `Enter` 重新生成 32 位密钥；
-  `Tab`/`←→`/`1`-`6` 与其他页一样切换页面
+  下拉字段上按 `Enter` 循环选项、动作按钮上按 `Enter` 执行、secret 只读字段上按 `Enter`
+  重新生成 32 位密钥；`Tab`/`←→`/`1`-`6` 与其他页一样切换页面
 - `Ctrl+S` 仅保存 settings.toml（不重启不断网）；`Ctrl+A` 保存并应用——合并生成
   config.yaml → `mihomo -t` 校验 → 提权重启。校验失败弹窗提示并保留已填内容
 - 与仪表盘热切的关系：仪表盘 `m`/`t`/`6` 是运行时立即生效（同时写回 settings.toml）；
@@ -144,8 +156,8 @@ cargo build --release
 ./target/release/mihomo-tui
 
 # 3. 首次启动：检测到缺少提权组件会弹确认框，回车确认后退出 raw 模式、
-#    交互式输入一次 sudo 密码，自动完成 mihomo-apply 脚本 + sudoers 规则 +
-#    mihomo-admin 组成员三步安装（步骤见「安装与手动配置」）
+#    交互式输入一次 sudo 密码，自动完成 mihomo-apply / mihomo-proc 两个提权脚本 +
+#    sudoers 规则 + mihomo-admin 组成员安装（步骤见「安装与手动配置」）
 #    **重新登录终端**使组权限生效（此后应用配置不再要密码）
 
 # 4. 订阅页按 a 添加订阅（名称 + 订阅 URL）→ 自动拉取并解析；
@@ -165,9 +177,9 @@ cargo build --release
   `PATCH /configs` 热切换，立即生效、不重启（TUN 需进程持有 `CAP_NET_ADMIN`，见「前提」）
 - `r`：手动刷新出口 IP（每 60s 自动刷新；应用配置成功后自动立即重测一次）；出口 IP 经代理探测，
   同时返回国家/地区（ip-api.com / cloudflare / ipwho.is 优先，纯 IP 端点兜底）
-- `s`：跳转设置页（tab 6）——集中编辑全部 22 个网络字段（port / socks-port /
-  mixed-port / allow-lan / log-level / tun.stack · auto-route · mtu · dns-hijack /
-  dns.enable · listen · nameserver 等），见「功能总览 · 设置页」
+- `s`：跳转设置页（tab 6）——集中编辑全部 28 个字段（运行方式 6 + 网络 22：port /
+  socks-port / mixed-port / allow-lan / log-level / tun.stack · auto-route · mtu ·
+  dns-hijack / dns.enable · listen · nameserver 等），见「功能总览 · 设置页」
 - 出口 IP 获取失败时弹出诊断弹窗（见 FAQ），恢复成功自动关闭陈旧弹窗并通知（恢复通知含国家名）
 
 ### 订阅管理
@@ -211,7 +223,7 @@ cargo build --release
 ## 前提
 
 - **Arch Linux**（或任何能装 mihomo 的 Linux 发行版；Arch 上 `sudo pacman -S mihomo`）
-- mihomo 已安装并作为 **systemd 服务**存在（安装器要求 `systemctl list-unit-files` 中出现 `mihomo.service`）
+- mihomo 已安装并作为 **systemd 服务**存在（安装器要求 `systemctl list-unit-files` 中出现 `mihomo.service`）；也可在设置页切换「直接进程」运行方式，不依赖 systemd 服务（见「两种运行方式与安全设计」）
 - 如需 **TUN 模式**：进程须持有 root 或 `CAP_NET_ADMIN`（+`CAP_NET_RAW`）能力，且内核有 `/dev/net/tun`。官方 unit 已通过 `AmbientCapabilities` 提供，见下文「官方 mihomo.service unit」
 
 ### 编译
@@ -227,12 +239,57 @@ cargo build --release
 1. 校验 mihomo 二进制与 systemd 单元
 2. 创建系统组 `mihomo-admin`（已存在则跳过）
 3. 安装提权脚本 `/usr/local/sbin/mihomo-apply`（root:root 0755）
-4. 写入 `/etc/sudoers.d/99-mihomo`（0440，`visudo -cf` 校验通过才生效）
-5. 将当前用户加入 `mihomo-admin` 组
-6. 结果弹窗提示 `sudo systemctl enable --now mihomo`（不自动执行，由你决定）
+4. 安装提权脚本 `/usr/local/sbin/mihomo-proc`（root:root 0755，direct 模式用）
+5. 写入 `/etc/sudoers.d/99-mihomo`（0440，两条无参规则，`visudo -cf` 校验通过才生效）
+6. 将当前用户加入 `mihomo-admin` 组
+7. 结果弹窗提示 `sudo systemctl enable --now mihomo`（不自动执行，由你决定）
 
 > **重新登录终端**后组成员资格生效，此后 `sudo -n` 免密调用提权脚本。
 > 拒绝安装后可在仪表盘按 `i` 重新发起安装。
+
+### 两种运行方式与安全设计
+
+mihomo 由谁管理有两种方式，在设置页「运行方式」区块切换（持久化于 settings.toml）：
+
+| 模式 | 管理方式 | 特点 |
+|---|---|---|
+| `systemd`（默认） | `systemctl start/stop/restart`，由系统服务管理器管理 | 开机自启、崩溃自动重启（`Restart=always`） |
+| `direct`（直接进程） | TUI 经提权脚本 `/usr/local/sbin/mihomo-proc` 自行启动/停止/重启进程 | 不依赖 systemd 服务；无开机自启 |
+
+**无参脚本不变式**：sudoers 两条规则（`mihomo-apply` + `mihomo-proc`）均为**无参授权**，
+一切数据走 stdin——脚本不接收命令行参数，stdin 首行命令白名单匹配（apply/start/stop/
+restart/status），非白即拒。两条规则是两个单一职责脚本的并集，各自可独立审计，
+**授权面不扩大**。
+
+**路径唯一事实源**：mihomo 二进制路径存于 root 侧配置文件
+`/etc/mihomo-tui/mihomo.conf`（root:root 0600，单行 `mihomo_bin=<path>`）。脚本启动时
+只读该文件并二次校验（绝对路径 + 字符集白名单 + 存在 + 可执行）；**TUI 不会把路径传给脚本**。
+修改路径走**交互式提权**（退出 raw 模式输入 sudo 密码，`sudo tee` 写入）——**不进 NOPASSWD
+授权面**：即使 TUI 被攻破，攻击者也无法通过换路径 + 触发启动来执行任意命令。
+
+**setsid 守护化**：direct 模式启动的 mihomo 以 `setsid` 进入**新会话**（`</dev/null`
+重定向，日志追加 `/var/log/mihomo/mihomo.log`，root:root 0600），脱离 TUI/sudo 的进程组与
+控制终端——**TUI 退出、终端关闭后服务继续运行**（被 init 收养，不会收到 SIGHUP）。PID
+记录于 `/run/mihomo-tui/mihomo.pid`（root 拥有的目录，普通用户无法伪造）：
+
+- **防多实例**：PID 文件存在且进程存活时重复 `start` 被拒绝；进程已死的残留 PID 文件自动清理
+- **防误杀**：kill 前校验 `/proc/<pid>/cmdline` 首字段 == 配置的二进制路径，伪造 PID 文件
+  不会误杀其他进程
+
+**模式切换行为**：
+
+- direct → systemd：保存切换时若进程实例仍在运行，TUI 自动停止（mihomo-apply 内另有 PID
+  文件守卫兜底竞态窗口）——防止双实例抢占端口
+- systemd → direct：启动进程实例时若 systemd 服务运行中，脚本自动先停服务（同样防端口冲突）
+- systemd 服务不可用：TUI 启动时异步检测并提示；设置页状态行 `Enter` 可一键**交互式**启动
+  服务（`systemctl start` 走交互式 sudo 密码，不进 NOPASSWD 授权面），单元缺失时弹创建指引，
+  或直接设置 mihomo 路径切换 direct 模式
+
+**已知取舍**（direct 模式）：
+
+- 无开机自启（设置页状态行提示，重启系统后需手动启动；后续可按需加 systemd user unit / rc 脚本）
+- 日志无轮转（`/var/log/mihomo/mihomo.log` 持续追加，可用 logrotate 按需管理）
+- mihomo 路径不允许空白/特殊字符（字符集白名单 `[A-Za-z0-9_.+/-]`——以协议零转义换取安全）
 
 ## 安装与手动配置（等价步骤）
 
@@ -249,7 +306,7 @@ sudo systemctl enable --now mihomo
 # 2. 创建授权组
 sudo groupadd --system mihomo-admin
 
-# 3. 安装提权脚本（内容与仓库 resources/mihomo-apply.sh 相同）
+# 3. 安装提权脚本 mihomo-apply（内容与仓库 resources/mihomo-apply.sh 相同）
 sudo tee /usr/local/sbin/mihomo-apply > /dev/null <<'SCRIPT'
 #!/usr/bin/env bash
 # ...（resources/mihomo-apply.sh 全文，见仓库）
@@ -257,18 +314,36 @@ SCRIPT
 sudo chown root:root /usr/local/sbin/mihomo-apply
 sudo chmod 755 /usr/local/sbin/mihomo-apply
 
-# 4. 写入 sudoers 规则
+# 4. 安装提权脚本 mihomo-proc（direct 模式进程生命周期控制；内容与仓库 resources/mihomo-proc.sh 相同）
+sudo tee /usr/local/sbin/mihomo-proc > /dev/null <<'SCRIPT'
+#!/usr/bin/env bash
+# ...（resources/mihomo-proc.sh 全文，见仓库）
+SCRIPT
+sudo chown root:root /usr/local/sbin/mihomo-proc
+sudo chmod 755 /usr/local/sbin/mihomo-proc
+
+# 5. 写入 sudoers 规则（两条无参规则，与脚本安装路径强绑定）
 sudo tee /etc/sudoers.d/99-mihomo > /dev/null <<'EOF'
 %mihomo-admin ALL=(root) NOPASSWD: /usr/local/sbin/mihomo-apply
+%mihomo-admin ALL=(root) NOPASSWD: /usr/local/sbin/mihomo-proc
 EOF
 sudo chmod 0440 /etc/sudoers.d/99-mihomo
 sudo visudo -cf /etc/sudoers.d/99-mihomo
 
-# 5. 当前用户入组（重新登录后生效）
+# 6. 当前用户入组（重新登录后生效）
 sudo usermod -aG mihomo-admin "$USER"
+
+# 7.（direct 模式可选）保存 mihomo 二进制路径到 root 侧配置文件（root:root 0600）：
+#    内容为单行 mihomo_bin=<绝对路径>；也可在设置页「运行方式」区块 Enter mihomo-bin
+#    输入路径，由 TUI 交互式提权保存（效果相同，且带存在/可执行/版本探测校验）
+sudo mkdir -p /etc/mihomo-tui
+echo 'mihomo_bin=/usr/bin/mihomo' | sudo tee /etc/mihomo-tui/mihomo.conf
+sudo chown root:root /etc/mihomo-tui/mihomo.conf
+sudo chmod 600 /etc/mihomo-tui/mihomo.conf
 ```
 
-**验证**：重新登录后 `sudo -n /usr/local/sbin/mihomo-apply < /tmp/config.yaml` 应免密执行。
+**验证**：重新登录后 `sudo -n /usr/local/sbin/mihomo-apply < /tmp/config.yaml` 应免密执行；
+`printf 'status\n' | sudo -n /usr/local/sbin/mihomo-proc` 应输出 `bin=…` / `running=…` 状态行。
 
 ### 官方 mihomo.service unit
 
@@ -328,7 +403,7 @@ WantedBy=multi-user.target
 
 **日志页**：`e` / `c` / `f` / `End` / `↑↓` / `PgUp` / `PgDn` —— 切换级别 / 清空 / 恢复跟随 / 滚动回溯
 
-**设置页**：`↑↓` 移动字段 · `Enter` 编辑文本/数字（`Esc` 退出；编辑态内 `←→` 移动光标）/ 循环下拉选项 / secret 上重新生成密钥 · `Ctrl+S` 仅保存 · `Ctrl+A` 保存并应用
+**设置页**：`↑↓` 移动字段 · `Enter` 编辑文本/数字（`Esc` 退出；编辑态内 `←→` 移动光标）/ 循环下拉选项 / 执行动作按钮 / secret 上重新生成密钥 · `Ctrl+S` 仅保存 · `Ctrl+A` 保存并应用
 
 弹窗通用：
 
@@ -352,11 +427,13 @@ src/
     client.rs     REST 客户端（/version /configs /proxies /group/{name}/delay /traffic /memory）
     exit_ip.rs    出口 IP+国家探测（多代理端口 × 多端点降级，失败分类 + 中文提示）
     country.rs    国家/地区代码→中文名映射（ISO 3166-1 alpha-2）
-    apply.rs      mihomo -t 预校验 + sudo 提权应用（非交互失败分类）
+    apply.rs      mihomo -t 预校验 + sudo 提权应用（按运行方式分派 mihomo-apply/mihomo-proc，
+                  非交互失败分类）
   service/
-    installer.rs 首装检测与提权组件安装（脚本 + sudoers + 组）
+    installer.rs 首装检测与提权组件安装（双脚本 + sudoers 双规则 + 组）
 resources/
-  mihomo-apply.sh  提权脚本（root 侧：校验→原子替换→重启→回滚）
+  mihomo-apply.sh  提权脚本（systemd 模式：校验→原子替换→重启→回滚，含进程实例守卫）
+  mihomo-proc.sh   提权脚本（direct 模式：setsid 启动/停止/重启/状态/回滚）
 examples/
   merge_sample.rs  加载本地三配置文件 → 合并输出 config.yaml（可管道给 mihomo -t 校验）
 ```
@@ -394,7 +471,7 @@ examples/
 | 变更类型 | 生效方式 |
 |---|---|
 | mode / tun.enable / ipv6（仪表盘 `m`/`t`/`6`） | **PATCH 热切**：`PATCH /configs` 即时生效，不重载、不重启 |
-| 订阅切换 / 规则 / 设置页 `Ctrl+A` 保存并应用的网络设置（端口、allow-lan、log-level、TUN/DNS 等） | **结构性重启**：合并 → `mihomo -t` 预校验 → 提权脚本原子替换 → `systemctl restart` → 失败自动回滚 |
+| 订阅切换 / 规则 / 设置页 `Ctrl+A` 保存并应用的网络设置（端口、allow-lan、log-level、TUN/DNS 等） | **结构性重启**：合并 → `mihomo -t` 预校验 → 提权脚本原子替换 → `systemctl restart`（direct 模式为进程重启）→ 失败自动回滚 |
 | 设置页 `Ctrl+S` 仅保存（settings.toml） | **暂不生效**：落盘待下次 `Ctrl+A` 保存并应用或重启后生效 |
 | external-controller / secret 修改 | 进程重启（设置页编辑/重新生成 secret 并 `Ctrl+S` 落盘后，重启 mihomo 与本程序） |
 
@@ -413,6 +490,7 @@ examples/
 **settings.toml**（示例）：
 
 ```toml
+run_mode = "systemd"   # systemd | direct（运行方式，见「两种运行方式与安全设计」）
 mode = "rule"        # rule | global | direct
 ipv6 = false         # 默认关
 allow_lan = false

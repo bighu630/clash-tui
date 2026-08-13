@@ -29,7 +29,9 @@ pub fn parse(line: &str) -> Result<(String, Mapping), ParseError> {
     m.insert(Value::String("password".into()), Value::String(password));
     m.insert(Value::String("udp".into()), Value::Bool(true));
 
-    let insecure = get("allowInsecure").or_else(|| get("skip-cert-verify")).unwrap_or_default();
+    let insecure = get("allowInsecure")
+        .or_else(|| get("skip-cert-verify"))
+        .unwrap_or_default();
     m.insert(
         Value::String("skip-cert-verify".into()),
         Value::Bool(insecure == "1" || insecure.eq_ignore_ascii_case("true")),

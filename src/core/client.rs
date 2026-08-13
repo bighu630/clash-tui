@@ -55,8 +55,16 @@ impl FromStr for GroupInfo {
         let v: serde_json::Value =
             serde_json::from_str(s).map_err(|e| ApiError::Json(e.to_string()))?;
         Ok(Self {
-            name: v.get("name").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
-            group_type: v.get("type").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+            name: v
+                .get("name")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            group_type: v
+                .get("type")
+                .and_then(|x| x.as_str())
+                .unwrap_or_default()
+                .to_string(),
             now: v
                 .get("now")
                 .and_then(|x| x.as_str())
@@ -299,7 +307,12 @@ impl FromStr for ConnSnapshot {
 /// 单条连接解析：非对象元素或 start 非法时该字段置默认/None，不整条丢弃。
 fn parse_conn(c: &serde_json::Value) -> Option<ConnInfo> {
     let obj = c.as_object()?;
-    let get = |key: &str| obj.get(key).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+    let get = |key: &str| {
+        obj.get(key)
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
     let start = obj
         .get("start")
         .and_then(|x| x.as_str())
@@ -505,7 +518,10 @@ impl Client {
         if let Some(auth) = self.auth_header() {
             req = req.header(AUTHORIZATION, auth);
         }
-        let resp = req.send().await.map_err(|e| ApiError::Conn(e.to_string()))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ApiError::Conn(e.to_string()))?;
         let status = resp.status();
         let text = resp
             .text()
@@ -548,15 +564,13 @@ impl Client {
 
     /// GET /connections → 连接快照（全量，一次返回）。
     pub async fn get_connections(&self) -> Result<ConnSnapshot, ApiError> {
-        let body = self.request_text(reqwest::Method::GET, "/connections").await?;
+        let body = self
+            .request_text(reqwest::Method::GET, "/connections")
+            .await?;
         body.parse()
     }
 
-    async fn request_text(
-        &self,
-        method: reqwest::Method,
-        path: &str,
-    ) -> Result<String, ApiError> {
+    async fn request_text(&self, method: reqwest::Method, path: &str) -> Result<String, ApiError> {
         let mut req = self
             .http
             .request(method, self.url(path))
@@ -564,7 +578,10 @@ impl Client {
         if let Some(auth) = self.auth_header() {
             req = req.header(AUTHORIZATION, auth);
         }
-        let resp = req.send().await.map_err(|e| ApiError::Conn(e.to_string()))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ApiError::Conn(e.to_string()))?;
         let status = resp.status();
         let text = resp
             .text()
@@ -576,15 +593,15 @@ impl Client {
         Ok(text)
     }
 
-    async fn stream_response(
-        &self,
-        path: &str,
-    ) -> Result<reqwest::Response, ApiError> {
+    async fn stream_response(&self, path: &str) -> Result<reqwest::Response, ApiError> {
         let mut req = self.http.get(self.url(path));
         if let Some(auth) = self.auth_header() {
             req = req.header(AUTHORIZATION, auth);
         }
-        let resp = req.send().await.map_err(|e| ApiError::Conn(e.to_string()))?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ApiError::Conn(e.to_string()))?;
         if !resp.status().is_success() {
             return Err(ApiError::Status(resp.status().as_u16()));
         }
@@ -683,7 +700,8 @@ mod tests {
 
     #[test]
     fn runtime_config_from_json() {
-        let rc = RuntimeConfig::from_str(r#"{"mode":"global","ipv6":true,"tun":{"enable":true}}"#).unwrap();
+        let rc = RuntimeConfig::from_str(r#"{"mode":"global","ipv6":true,"tun":{"enable":true}}"#)
+            .unwrap();
         assert_eq!(rc.mode, "global");
         assert!(rc.ipv6);
         assert!(rc.tun_enable);
@@ -699,7 +717,8 @@ mod tests {
 
     #[test]
     fn traffic_frame_from_json() {
-        let f = TrafficFrame::from_str(r#"{"up":123,"down":456,"upTotal":789,"downTotal":1011}"#).unwrap();
+        let f = TrafficFrame::from_str(r#"{"up":123,"down":456,"upTotal":789,"downTotal":1011}"#)
+            .unwrap();
         assert_eq!(f.up, 123);
         assert_eq!(f.down, 456);
         assert_eq!(f.up_total, 789);
@@ -794,7 +813,9 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             loop {
-                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let mut buf = Vec::new();
@@ -995,7 +1016,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
             let mut buf = Vec::new();
             let mut tmp = [0u8; 4096];
             let mut headers_end = false;
@@ -1019,18 +1042,17 @@ mod tests {
             .patch_configs(serde_json::json!({"mode": "direct"}))
             .await
             .unwrap_err();
-        assert!(matches!(e, ApiError::Status(500)), "期望 Status(500)，实际: {e}");
+        assert!(
+            matches!(e, ApiError::Status(500)),
+            "期望 Status(500)，实际: {e}"
+        );
     }
 
     #[tokio::test]
     async fn traffic_stream_frames() {
         let (port, _rx) = spawn_api_server().await;
         let stream = client_on(port).traffic_stream().await.unwrap();
-        let frames: Vec<TrafficFrame> = stream
-            .take(2)
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let frames: Vec<TrafficFrame> = stream.take(2).map(|r| r.unwrap()).collect().await;
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].up, 1);
         assert_eq!(frames[0].down_total, 4);
@@ -1061,10 +1083,7 @@ mod tests {
         assert_eq!(entries[2].message, "not-json-at-all");
         // 请求行应带 ?level= 查询参数与 Bearer 鉴权
         let req = rx.recv().await.expect("服务器应收到请求");
-        assert!(
-            req.starts_with("GET /logs?level=warning"),
-            "请求行: {req}"
-        );
+        assert!(req.starts_with("GET /logs?level=warning"), "请求行: {req}");
         let req_lower = req.to_lowercase();
         assert!(
             req_lower.contains("authorization: bearer testsecret"),
@@ -1200,8 +1219,8 @@ mod tests {
 
     #[test]
     fn group_info_empty_now_is_none() {
-        let gi = GroupInfo::from_str(r#"{"name":"g","type":"Selector","now":"","all":["a"]}"#)
-            .unwrap();
+        let gi =
+            GroupInfo::from_str(r#"{"name":"g","type":"Selector","now":"","all":["a"]}"#).unwrap();
         assert_eq!(gi.now, None, "空串 now 应视为 None");
         assert_eq!(gi.name, "g");
         assert_eq!(gi.group_type, "Selector");
@@ -1213,7 +1232,11 @@ mod tests {
         let (port, _rx) = spawn_api_server().await;
         let groups = client_on(port).get_proxies().await.unwrap();
         let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
-        assert_eq!(names, vec!["手动选择", "自动选择"], "节点应被过滤: {names:?}");
+        assert_eq!(
+            names,
+            vec!["手动选择", "自动选择"],
+            "节点应被过滤: {names:?}"
+        );
         assert_eq!(groups[0].group_type, "Selector");
         assert_eq!(groups[0].now.as_deref(), Some("节点B"));
         assert_eq!(groups[0].all.len(), 3);
@@ -1230,16 +1253,23 @@ mod tests {
         let req = rx.recv().await.expect("服务器应收到请求");
         assert!(req.starts_with("PUT /proxies/"), "请求行: {req}");
         assert!(
-            req.to_lowercase().contains("authorization: bearer testsecret"),
+            req.to_lowercase()
+                .contains("authorization: bearer testsecret"),
             "应带 Bearer 鉴权: {req}"
         );
-        assert!(req.contains(r#"{"name":"节点A"}"#), "body 应为选择目标: {req}");
+        assert!(
+            req.contains(r#"{"name":"节点A"}"#),
+            "body 应为选择目标: {req}"
+        );
     }
 
     #[tokio::test]
     async fn switch_group_encodes_unicode_name() {
         let (port, mut rx) = spawn_api_server().await;
-        client_on(port).switch_group("🚀 节点选择", "DIRECT").await.unwrap();
+        client_on(port)
+            .switch_group("🚀 节点选择", "DIRECT")
+            .await
+            .unwrap();
         let req = rx.recv().await.expect("服务器应收到请求");
         let first_line = req.lines().next().unwrap_or("");
         assert!(
@@ -1255,7 +1285,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
             let mut buf = Vec::new();
             let mut tmp = [0u8; 4096];
             while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -1283,7 +1315,10 @@ mod tests {
         // 扁平格式（实测 mihomo v1.19.x 返回 {节点: ms}）：直接解析节点→延迟映射
         let (port, _rx) = spawn_api_server().await;
         let list = client_on(port).test_group_delay("自动选择").await.unwrap();
-        assert_eq!(list, vec![("节点A".to_string(), 123), ("节点B".to_string(), 8000)]);
+        assert_eq!(
+            list,
+            vec![("节点A".to_string(), 123), ("节点B".to_string(), 8000)]
+        );
     }
 
     #[tokio::test]
@@ -1316,7 +1351,9 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
-            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
             let mut buf = Vec::new();
             let mut tmp = [0u8; 4096];
             while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -1327,13 +1364,18 @@ mod tests {
                 }
             }
             let _ = sock
-                .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
                 .await;
         });
         let e = client_on(port)
             .switch_group("不存在", "x")
             .await
             .unwrap_err();
-        assert!(matches!(e, ApiError::Status(400)), "期望 Status(400)，实际: {e}");
+        assert!(
+            matches!(e, ApiError::Status(400)),
+            "期望 Status(400)，实际: {e}"
+        );
     }
 }

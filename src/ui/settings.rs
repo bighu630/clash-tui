@@ -415,7 +415,8 @@ impl SettingsPage {
         self.apply_status_display(st);
     }
 
-    /// 用 st.run_status 覆盖 f[1]/f[2]（路径/状态）显示值。
+    /// 用 st.run_status 覆盖 f[1]/f[2]（路径/状态）显示值，并同步光标数组
+    /// （光标是字节位置，值被覆盖后不更新会导致渲染时切片越界 panic）。
     /// sync_from_settings（全量同步）与 refresh_state（仅显示刷新）共用。
     fn apply_status_display(&mut self, st: &AppState) {
         if let Some(rs) = &st.run_status {
@@ -426,6 +427,8 @@ impl SettingsPage {
                 .unwrap_or_else(|| "未设置（Enter 设置）".to_string());
             self.fields[1].value = bin_text;
             self.fields[2].value = run_status_text(st.settings.run_mode, rs);
+            self.cursor[1] = self.fields[1].value.len();
+            self.cursor[2] = self.fields[2].value.len();
         }
     }
 
@@ -873,7 +876,9 @@ impl Page for SettingsPage {
                             );
                         }
                         _ => {
-                            let cur_chars = field.value[..self.cursor[*idx]].chars().count();
+                            // 光标字节位置按值长度钳位（值可能被状态刷新覆盖，防御越界）
+                            let cur = self.cursor[*idx].min(field.value.len());
+                            let cur_chars = field.value[..cur].chars().count();
                             let start_c = cur_chars.saturating_sub(vw as usize - 1);
                             let shown: String = field
                                 .value
@@ -1845,6 +1850,15 @@ mod tests {
         p.refresh_state(&st);
         assert_eq!(p.fields[1].value, "/opt/mihomo", "路径显示应刷新");
         assert_eq!(p.fields[2].value, "运行中（PID 777）", "状态显示应刷新");
+        // 回归：值被覆盖后光标数组必须同步（否则渲染切片越界 panic，
+        // 曾因占位值 27 字节被刷新为 15 字节路径而崩溃）
+        assert_eq!(p.cursor[1], p.fields[1].value.len(), "cursor[1] 应与新值同步");
+        assert_eq!(p.cursor[2], p.fields[2].value.len(), "cursor[2] 应与新值同步");
+        // 渲染路径不再越界：模拟 render 的光标切片计算
+        for i in 0..FIELD_COUNT {
+            let cur = p.cursor[i].min(p.fields[i].value.len());
+            let _ = p.fields[i].value[..cur].chars().count();
+        }
         assert!(p.dirty(), "dirty 不应受影响");
         assert!(p.editing, "editing 不应受影响");
         assert_eq!(p.focused, 9, "focused 不应受影响");

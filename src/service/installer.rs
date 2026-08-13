@@ -12,10 +12,13 @@
 //! 安装器由 app 在恢复终端后调用（见计划 §3 apply 交互流程），避免 TUI raw 模式
 //! 与 sudo 密码提示互相干扰。sudoers 写入一律走 `sudo tee`，避免 shell 注入。
 
+#![cfg(not(windows))]
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
+use crate::core::mihomo_bin::validate_mihomo_bin;
 use crate::core::settings::config_dir;
 
 /// 提权脚本安装路径（sudoers 授权即针对此路径）
@@ -359,51 +362,6 @@ fn current_user() -> String {
         .unwrap_or_default()
 }
 
-/// 校验 mihomo 二进制路径：绝对路径 + 字符集白名单 + 存在 + 可执行 + `-v` 版本探测。
-/// 供设置页路径保存与提权保存双重校验（防御纵深）。
-pub fn validate_mihomo_bin(path: &str) -> Result<(), String> {
-    if path.is_empty() {
-        return Err("路径不能为空".to_string());
-    }
-    if !path.starts_with('/') {
-        return Err("路径必须为绝对路径（以 / 开头）".to_string());
-    }
-    if !path
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '+' | '-' | '/'))
-    {
-        return Err("路径含不允许的字符（仅允许字母数字与 _ . + - /）".to_string());
-    }
-    if !Path::new(path).exists() {
-        return Err(format!("文件不存在: {path}"));
-    }
-    use std::os::unix::fs::PermissionsExt;
-    let mode = Path::new(path)
-        .metadata()
-        .map_err(|e| format!("无法读取文件信息: {e}"))?
-        .permissions()
-        .mode();
-    if mode & 0o111 == 0 {
-        return Err(format!("文件不可执行: {path}"));
-    }
-    // 版本探测：`<path> -v` 输出应含 mihomo 字样
-    let out = Command::new(path)
-        .arg("-v")
-        .output()
-        .map_err(|e| format!("执行 {path} -v 失败: {e}"))?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if !text.to_lowercase().contains("mihomo") {
-        return Err(format!(
-            "{path} -v 输出不含 mihomo 字样，可能不是 mihomo 二进制:\n{text}"
-        ));
-    }
-    Ok(())
-}
-
 /// 交互式提权保存 mihomo 路径：校验 → 建目录 → sudo tee 写 conf → chown/chmod。
 /// 由 app 在恢复终端后调用（需用户输入 sudo 密码——不进 NOPASSWD 授权面）。
 pub async fn save_mihomo_bin(path: &str) -> Result<Vec<String>, InstallError> {
@@ -607,43 +565,6 @@ mod tests {
                 Path::new(APPLY_SCRIPT),
                 Path::new("/nonexistent/installed.marker")
             ));
-        }
-    }
-
-    /// validate_mihomo_bin 各分支。
-    #[test]
-    fn validate_mihomo_bin_cases() {
-        // 空/相对路径/非法字符
-        assert!(validate_mihomo_bin("").is_err());
-        assert!(
-            validate_mihomo_bin("usr/bin/mihomo").is_err(),
-            "相对路径应拒绝"
-        );
-        assert!(
-            validate_mihomo_bin("/usr/bin/mihomo; rm -rf /").is_err(),
-            "特殊字符应拒绝"
-        );
-        assert!(validate_mihomo_bin("/tmp/a b").is_err(), "空白应拒绝");
-        // 不存在
-        assert!(validate_mihomo_bin("/nonexistent/mihomo").is_err());
-        // 存在但不可执行（/etc/passwd 常规存在且 644）
-        if std::path::Path::new("/etc/passwd").exists() {
-            assert!(
-                validate_mihomo_bin("/etc/passwd").is_err(),
-                "不可执行应拒绝"
-            );
-        }
-        // 存在且可执行但 -v 输出不含 mihomo：用 /bin/true 或 /usr/bin/true
-        for probe in ["/bin/true", "/usr/bin/true"] {
-            if std::path::Path::new(probe).exists() {
-                let e = validate_mihomo_bin(probe).unwrap_err();
-                assert!(e.contains("mihomo"), "非 mihomo 二进制应拒绝: {e}");
-                break;
-            }
-        }
-        // 环境自适应：本机 /usr/bin/mihomo 存在则校验通过
-        if std::path::Path::new("/usr/bin/mihomo").exists() {
-            validate_mihomo_bin("/usr/bin/mihomo").unwrap();
         }
     }
 

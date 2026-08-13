@@ -12,9 +12,9 @@ use ratatui::Frame;
 use crate::app::{AppState, UiCommand};
 use crate::core::apply::{find_mihomo_in_path, ProcOp, RunStatus};
 use crate::core::merger::{merge, MergeContext};
+use crate::core::mihomo_bin::validate_mihomo_bin;
 use crate::core::models::{DnsSettings, NetworkSettings, RunMode, TunSettings};
 use crate::core::settings::{generate_secret, save_settings};
-use crate::service::installer::validate_mihomo_bin;
 use crate::ui::widgets::{FieldKind, FormAction, FormField, FormPopup, MessagePopup};
 use crate::ui::Page;
 

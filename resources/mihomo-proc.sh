@@ -122,7 +122,7 @@ stop_proc() {
     sleep 0.5
   done
   echo "ERROR: 无法停止进程 (PID $pid)" >&2
-  exit 1
+  return 1
 }
 
 # systemd 服务守卫：服务 active 时先停（防端口冲突；切换模式后的兜底）
@@ -142,23 +142,24 @@ health_check() {
   return 1
 }
 
-# 启动进程：setsid 新会话 + 日志重定向 + PID 文件 + 初检
+# 启动进程：setsid 新会话 + 日志重定向 + PID 文件 + 初检。
+# 失败统一 return 1（顶层调用由 set -e 退出；apply 分支捕获后执行回滚）。
 start_proc() {
   local bin=$1
   if [ ! -d "$RUN_DIR" ]; then
-    mkdir -p "$RUN_DIR" || { echo "ERROR: 创建 $RUN_DIR 失败" >&2; exit 1; }
-    chmod 755 "$RUN_DIR"
+    mkdir -p "$RUN_DIR" || { echo "ERROR: 创建 $RUN_DIR 失败" >&2; return 1; }
+    chmod 755 "$RUN_DIR" || return 1
   fi
-  mkdir -p "$(dirname "$LOG_FILE")" || { echo "ERROR: 创建日志目录失败" >&2; exit 1; }
-  touch "$LOG_FILE" || { echo "ERROR: 无法创建日志文件 $LOG_FILE" >&2; exit 1; }
-  chmod 600 "$LOG_FILE"
+  mkdir -p "$(dirname "$LOG_FILE")" || { echo "ERROR: 创建日志目录失败" >&2; return 1; }
+  touch "$LOG_FILE" || { echo "ERROR: 无法创建日志文件 $LOG_FILE" >&2; return 1; }
+  chmod 600 "$LOG_FILE" || return 1
   setsid "$bin" -d "$CONFIG_DIR" </dev/null >>"$LOG_FILE" 2>&1 &
   local pid=$!
   echo "$pid" > "$PID_FILE"
   sleep 0.5
   if ! health_check "$bin" "$pid"; then
     rm -f "$PID_FILE"
-    exit 1
+    return 1
   fi
   echo "OK: mihomo 已启动 (PID $pid, 配置 $CONFIG)"
 }
@@ -177,7 +178,10 @@ case "$cmd" in
     if [ -f "$CONFIG" ]; then
       cp -a "$CONFIG" "$BACKUP"
     fi
-    chown root:root "$TMP"
+    # 生产（sudo root）下锁属主 root:root；测试钩子非 root 跑时跳过（chown 会 EPERM）
+    if [ "$(id -u)" = 0 ]; then
+      chown root:root "$TMP"
+    fi
     chmod 600 "$TMP"
     mv -f "$TMP" "$CONFIG"
     ensure_service_stopped
@@ -195,14 +199,15 @@ case "$cmd" in
     pid=$(cat "$PID_FILE")
     for _ in $(seq 1 9); do
       sleep 0.5
-      if proc_alive "$bin" "$pid"; then
+      if proc_alive "$pid" "$bin"; then
         echo "OK: config applied, mihomo restarted (PID $pid)"
         exit 0
       fi
     done
     echo "ERROR: mihomo failed to start after apply, rolling back to previous config" >&2
     tail -n 5 "$LOG_FILE" >&2 || true
-    rm -f "$PID_FILE"
+    # 先 stop_proc 再回滚：read_pid 自行处理残留/缺失 PID 文件；
+    # 若先删 PID 文件，运行中的实例将无法定位停止（防双实例）。
     stop_proc "$bin" >/dev/null 2>&1 || true
     if [ -f "$BACKUP" ]; then
       mv -f "$BACKUP" "$CONFIG"

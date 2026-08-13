@@ -221,6 +221,19 @@ const TABS: [&str; 6] = ["仪表盘", "订阅", "规则组", "规则", "日志",
 
 const TRAFFIC_HISTORY: usize = 120;
 
+/// 设置页停留时的运行状态轮询间隔（systemctl/sudo 查询开销小，2s 足够及时）。
+const STATUS_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+/// 进程状态查询超时（防止 sudo 异常卡住阻塞状态刷新）。
+const PROC_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 是否需要发起运行状态刷新：从未刷新过或距上次刷新已超过间隔。
+pub fn should_refresh_status(last: Option<Instant>, now: Instant) -> bool {
+    match last {
+        None => true,
+        Some(t) => now.duration_since(t) >= STATUS_REFRESH_INTERVAL,
+    }
+}
+
 /// 连接列表保留上限（快照替换天然有界，此处防御性截断）。
 const CONNECTIONS_KEEP: usize = 200;
 /// /connections 轮询间隔。
@@ -330,6 +343,8 @@ struct App<B: Backend> {
     exit_ip_was_error: bool,
     /// 上次 API 状态通知时间（去抖用）
     api_notice_at: Option<Instant>,
+    /// 上次设置页运行状态刷新时间（停留时周期轮询）
+    last_status_refresh: Option<Instant>,
     tick_count: u64,
     quit: bool,
     terminal: Terminal<B>,
@@ -453,6 +468,7 @@ where
             let st = &self.state;
             self.pages[idx].on_enter(st);
             let _ = self.cmd_tx.send(UiCommand::RefreshStatus);
+            self.last_status_refresh = Some(Instant::now());
         }
     }
 
@@ -597,6 +613,14 @@ where
                     self.tick_count += 1;
                     if self.tick_count % 5 == 0 || !self.state.api_ok {
                         let _ = self.cmd_tx.send(UiCommand::ReloadConfigs);
+                    }
+                    // 设置页停留：周期性刷新运行状态（用户在终端 systemctl start/stop
+                    // 后切回 TUI 时状态行能及时反映，无需重新进入页面）
+                    if self.current == 5
+                        && should_refresh_status(self.last_status_refresh, Instant::now())
+                    {
+                        let _ = self.cmd_tx.send(UiCommand::RefreshStatus);
+                        self.last_status_refresh = Some(Instant::now());
                     }
                     self.draw()?;
                 }
@@ -1070,8 +1094,11 @@ where
                 tokio::spawn(async move {
                     let unit = service_unit_exists().await;
                     let active = service_is_active().await;
-                    // 进程实例查询失败（未装脚本/未授权）静默置 None，设置页显示"查询失败"
-                    let proc = proc_status().await.ok();
+                    // 进程实例查询失败（未装脚本/未授权/超时）静默置 None，设置页显示"查询失败"
+                    let proc = tokio::time::timeout(PROC_STATUS_TIMEOUT, proc_status())
+                        .await
+                        .ok()
+                        .and_then(|r| r.ok());
                     let _ = ui_tx.send(UiEvent::RunStatusDone(Ok(RunStatus {
                         service_unit: Some(unit),
                         service_active: Some(active),
@@ -1532,6 +1559,7 @@ pub async fn run() -> Result<(), BoxError> {
         result_popup: None,
         exit_ip_was_error: false,
         api_notice_at: None,
+        last_status_refresh: None,
         tick_count: 0,
         quit: false,
         terminal,
@@ -1759,6 +1787,7 @@ mod tests {
             result_popup: None,
             exit_ip_was_error: false,
             api_notice_at: None,
+            last_status_refresh: None,
             tick_count: 0,
             quit: false,
             terminal: Terminal::new(TestBackend::new(w, h)).unwrap(),
@@ -2250,6 +2279,21 @@ mod tests {
         assert_eq!(d, old_err + NOTICE_ERR_TTL);
         // 空组：None
         assert_eq!(notice_deadline(&[]), None);
+    }
+
+    /// 状态刷新节流：未刷新过 → 立即；间隔内 → 不刷；超过间隔 → 刷。
+    #[test]
+    fn should_refresh_status_throttles() {
+        let now = Instant::now();
+        assert!(should_refresh_status(None, now), "从未刷新应立即刷新");
+        assert!(
+            !should_refresh_status(Some(now), now),
+            "刚刷新过不应立即再刷"
+        );
+        let t1 = now + Duration::from_millis(1900);
+        assert!(!should_refresh_status(Some(now), t1), "间隔内不应刷新");
+        let t2 = now + Duration::from_secs(2) + Duration::from_millis(50);
+        assert!(should_refresh_status(Some(now), t2), "超过间隔应刷新");
     }
 
     /// 过期整组在 draw 时同时清除（不留半组）。

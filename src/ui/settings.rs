@@ -573,8 +573,9 @@ pub(crate) fn run_status_text(mode: RunMode, rs: &RunStatus) -> String {
     match mode {
         RunMode::Systemd => {
             let svc = match (rs.service_unit, rs.service_active) {
-                (Some(false), _) => return "未安装 mihomo.service（Enter 查看指引）".to_string(),
+                // 服务 active 是最强证据（active 必然意味着单元存在），优先于单元检测
                 (_, Some(true)) => "服务运行中".to_string(),
+                (Some(false), _) => "未安装 mihomo.service（Enter 查看指引）".to_string(),
                 (_, _) => "服务未运行（Enter 启动）".to_string(),
             };
             match rs.proc.as_ref() {
@@ -1816,6 +1817,52 @@ mod tests {
         });
     }
 
+    /// run_status_text 判定顺序：服务 active 优先于单元检测（active 即单元存在的最强证据）。
+    #[test]
+    fn run_status_text_active_beats_unit_missing() {
+        // 单元检测异常为 false 但服务实际 active → 显示运行中（回归：曾优先显示"未安装"）
+        let rs = RunStatus {
+            service_unit: Some(false),
+            service_active: Some(true),
+            proc: None,
+        };
+        assert_eq!(run_status_text(RunMode::Systemd, &rs), "服务运行中");
+        // 单元缺失 + 服务未运行 → 指引
+        let rs = RunStatus {
+            service_unit: Some(false),
+            service_active: Some(false),
+            proc: None,
+        };
+        assert_eq!(
+            run_status_text(RunMode::Systemd, &rs),
+            "未安装 mihomo.service（Enter 查看指引）"
+        );
+        // 单元存在 + 未运行 → 可启动
+        let rs = RunStatus {
+            service_unit: Some(true),
+            service_active: Some(false),
+            proc: None,
+        };
+        assert_eq!(
+            run_status_text(RunMode::Systemd, &rs),
+            "服务未运行（Enter 启动）"
+        );
+        // direct 模式：未设置路径
+        let rs = RunStatus {
+            service_unit: Some(true),
+            service_active: Some(true),
+            proc: Some(ProcStatus {
+                bin: None,
+                pid: None,
+                running: false,
+            }),
+        };
+        assert_eq!(
+            run_status_text(RunMode::Direct, &rs),
+            "未设置路径（Enter 设置）"
+        );
+    }
+
     /// refresh_state：仅覆盖 f[1]/f[2] 显示值，不动 dirty/focused/editing；
     /// 未同步（fields 为空）时安全无操作。
     #[test]
@@ -1852,8 +1899,16 @@ mod tests {
         assert_eq!(p.fields[2].value, "运行中（PID 777）", "状态显示应刷新");
         // 回归：值被覆盖后光标数组必须同步（否则渲染切片越界 panic，
         // 曾因占位值 27 字节被刷新为 15 字节路径而崩溃）
-        assert_eq!(p.cursor[1], p.fields[1].value.len(), "cursor[1] 应与新值同步");
-        assert_eq!(p.cursor[2], p.fields[2].value.len(), "cursor[2] 应与新值同步");
+        assert_eq!(
+            p.cursor[1],
+            p.fields[1].value.len(),
+            "cursor[1] 应与新值同步"
+        );
+        assert_eq!(
+            p.cursor[2],
+            p.fields[2].value.len(),
+            "cursor[2] 应与新值同步"
+        );
         // 渲染路径不再越界：模拟 render 的光标切片计算
         for i in 0..FIELD_COUNT {
             let cur = p.cursor[i].min(p.fields[i].value.len());

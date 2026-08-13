@@ -22,7 +22,9 @@ fn tmp_path(name: &str) -> std::path::PathBuf {
 /// 写临时文件（0600：内容含代理密码/secret，不能按默认 0644 落盘）。
 async fn write_secret_file(path: &std::path::Path, body: &str) -> std::io::Result<()> {
     let mut opts = tokio::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true).mode(0o600);
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    opts.mode(0o600);
     let mut f = opts.open(path).await?;
     f.write_all(body.as_bytes()).await?;
     f.sync_all().await?;
@@ -129,22 +131,28 @@ pub fn parse_proc_status(output: &str) -> ProcStatus {
 }
 
 /// direct 模式 apply 的 stdin 协议体：首行 apply + 空行 + config.yaml。
+#[cfg(not(windows))]
 pub fn direct_apply_body(yaml: &str) -> String {
     format!("apply\n{yaml}")
 }
 
 const VALIDATE_TMP: &str = "validate";
+#[cfg(not(windows))]
 const APPLY_TMP: &str = "apply";
+#[cfg(not(windows))]
 const PROC_TMP: &str = "proc";
+#[cfg(not(windows))]
 const STATUS_TMP: &str = "proc-status";
 
 /// 写临时文件 → `mihomo -t -f` 校验；失败返回 mihomo 原始 stderr。
-pub async fn validate_config(yaml: &str) -> Result<(), ApplyError> {
+/// bin=None 时走 PATH 查找 `mihomo`（Linux 现状）；Some(bin) 用配置的二进制路径（Windows）。
+pub async fn validate_config(yaml: &str, bin: Option<&str>) -> Result<(), ApplyError> {
     let path = tmp_path(VALIDATE_TMP);
     write_secret_file(&path, yaml)
         .await
         .map_err(|e| ApplyError::Io(e.to_string()))?;
-    let result = run_capture("mihomo", &["-t", "-f", path.to_str().unwrap()], None).await;
+    let probe = bin.unwrap_or("mihomo");
+    let result = run_capture(probe, &["-t", "-f", path.to_str().unwrap()], None).await;
     let _ = tokio::fs::remove_file(&path).await;
     match result {
         Ok((status, stdout, stderr)) => {
@@ -174,14 +182,23 @@ pub async fn apply_config(
     non_interactive: bool,
     mode: RunMode,
 ) -> Result<ApplyOutcome, ApplyError> {
-    let (script, body) = match mode {
-        RunMode::Systemd => ("/usr/local/sbin/mihomo-apply", yaml.to_string()),
-        RunMode::Direct => ("/usr/local/sbin/mihomo-proc", direct_apply_body(yaml)),
-    };
-    run_apply_script(script, &body, non_interactive, APPLY_TMP).await
+    #[cfg(windows)]
+    {
+        let _ = (non_interactive, mode);
+        crate::service::process::apply(yaml).await
+    }
+    #[cfg(not(windows))]
+    {
+        let (script, body) = match mode {
+            RunMode::Systemd => ("/usr/local/sbin/mihomo-apply", yaml.to_string()),
+            RunMode::Direct => ("/usr/local/sbin/mihomo-proc", direct_apply_body(yaml)),
+        };
+        run_apply_script(script, &body, non_interactive, APPLY_TMP).await
+    }
 }
 
 /// 通用提权脚本调用：写临时文件（stdin 内容）→ sudo 执行脚本 → 分类失败原因。
+#[cfg(not(windows))]
 async fn run_apply_script(
     script: &str,
     body: &str,
@@ -226,32 +243,48 @@ async fn run_apply_script(
 /// `sudo -n /usr/local/sbin/mihomo-proc`，stdin 首行 = 命令（start/stop/restart）。
 /// 脚本未安装时直接返回 ProcScriptMissing（明确引导重装，避免 sudo 裸报"找不到命令"）。
 pub async fn proc_control(op: ProcOp) -> Result<ApplyOutcome, ApplyError> {
-    if !is_proc_script_installed().await {
-        return Err(ApplyError::ProcScriptMissing);
+    #[cfg(windows)]
+    {
+        return crate::service::process::control(op).await;
     }
-    run_apply_script(
-        "/usr/local/sbin/mihomo-proc",
-        &format!("{}\n", op.stdin_line()),
-        true,
-        PROC_TMP,
-    )
-    .await
+    #[cfg(not(windows))]
+    {
+        if !is_proc_script_installed().await {
+            return Err(ApplyError::ProcScriptMissing);
+        }
+        run_apply_script(
+            "/usr/local/sbin/mihomo-proc",
+            &format!("{}\n", op.stdin_line()),
+            true,
+            PROC_TMP,
+        )
+        .await
+    }
 }
 
 /// `sudo -n /usr/local/sbin/mihomo-proc` status：查询进程实例状态。
 /// 脚本未安装时返回 ProcScriptMissing（调用方决定静默或提示）。
 pub async fn proc_status() -> Result<ProcStatus, ApplyError> {
-    if !is_proc_script_installed().await {
-        return Err(ApplyError::ProcScriptMissing);
+    #[cfg(windows)]
+    {
+        return crate::service::process::status().await;
     }
-    let out = run_apply_script("/usr/local/sbin/mihomo-proc", "status\n", true, STATUS_TMP).await?;
-    Ok(parse_proc_status(&out.stdout))
+    #[cfg(not(windows))]
+    {
+        if !is_proc_script_installed().await {
+            return Err(ApplyError::ProcScriptMissing);
+        }
+        let out =
+            run_apply_script("/usr/local/sbin/mihomo-proc", "status\n", true, STATUS_TMP).await?;
+        Ok(parse_proc_status(&out.stdout))
+    }
 }
 
 /// systemd 模式服务操作：`pkexec systemctl <action> mihomo`。
 /// pkexec 经桌面 polkit 代理弹系统密码框（无需 tty、无需退出 TUI raw 模式；
 /// 裸 systemctl 无 tty 时 polkit 拒绝交互认证，不会弹窗）。
 /// 无桌面代理/未授权 → SystemdAuthFailed（含手动 sudo 指引）。
+#[cfg(not(windows))]
 pub async fn systemctl_control(op: ProcOp) -> Result<ApplyOutcome, ApplyError> {
     let action = match op {
         ProcOp::Start => "start",
@@ -276,6 +309,7 @@ pub async fn systemctl_control(op: ProcOp) -> Result<ApplyOutcome, ApplyError> {
 }
 
 /// 分类 systemctl 失败：polkit 认证类错误 → SystemdAuthFailed（引导）；其余 → CommandFailed。
+#[cfg(not(windows))]
 fn classify_systemctl_failure(action: &str, stdout: &str, stderr: &str) -> ApplyError {
     let combined = format!("{stdout}\n{stderr}").to_lowercase();
     if combined.contains("interactive authentication required")
@@ -300,10 +334,12 @@ fn classify_systemctl_failure(action: &str, stdout: &str, stderr: &str) -> Apply
 
 /// /usr/local/sbin/mihomo-proc 是否已安装（存在且可执行）。
 /// 与 is_apply_script_installed 共用 script_installed_at 辅助。
+#[cfg(not(windows))]
 pub async fn is_proc_script_installed() -> bool {
     script_installed_at("/usr/local/sbin/mihomo-proc").await
 }
 
+#[cfg(not(windows))]
 async fn script_installed_at(path: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     tokio::fs::metadata(path)
@@ -313,11 +349,13 @@ async fn script_installed_at(path: &str) -> bool {
 }
 
 /// /usr/local/sbin/mihomo-apply 是否已安装（存在且可执行）。
+#[cfg(not(windows))]
 pub async fn is_apply_script_installed() -> bool {
     script_installed_at("/usr/local/sbin/mihomo-apply").await
 }
 
 /// 同步版（installer 测试用）：/usr/local/sbin/mihomo-proc 是否已安装。
+#[cfg(not(windows))]
 pub fn is_proc_script_installed_sync() -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata("/usr/local/sbin/mihomo-proc")
@@ -326,6 +364,7 @@ pub fn is_proc_script_installed_sync() -> bool {
 }
 
 /// systemctl is-active --quiet mihomo。
+#[cfg(not(windows))]
 pub async fn service_is_active() -> bool {
     Command::new("systemctl")
         .args(["is-active", "--quiet", "mihomo"])
@@ -336,6 +375,7 @@ pub async fn service_is_active() -> bool {
 }
 
 /// systemctl list-unit-files mihomo.service 是否含 mihomo.service（单元是否存在）。
+#[cfg(not(windows))]
 pub async fn service_unit_exists() -> bool {
     Command::new("systemctl")
         .args(["list-unit-files", "mihomo.service"])
@@ -411,6 +451,7 @@ async fn read_all<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> String {
 }
 
 /// sudo 失败原因分类（兼容中英文 locale）。
+#[cfg(not(windows))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SudoFailureKind {
     /// sudo 要求输入密码（非交互模式会失败）
@@ -427,6 +468,7 @@ enum SudoFailureKind {
 /// `proxy 0: '' has unset fields: cipher, password`，若裸词 "password" 也作判定依据
 /// 就会命中，导致对必然失败的交互重试再弹一次确认框。因此裸词 "password" 不再作为
 /// 判定依据；"passwd" 与 "password" 是不同子串（互不包含），保留 "passwd" 判定无碍。
+#[cfg(not(windows))]
 fn classify_sudo_failure(stderr: &str) -> SudoFailureKind {
     let s = stderr.to_lowercase();
     if s.contains("a password is required") || s.contains("需要密码") || s.contains("passwd") {
@@ -441,27 +483,32 @@ fn classify_sudo_failure(stderr: &str) -> SudoFailureKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(windows))]
     use crate::core::models::RunMode;
+    #[cfg(not(windows))]
     use crate::core::settings::with_settings_dir;
 
     /// 依赖 config_dir（MIHOMO_TUI_SETTINGS_DIR）的三个用例与 settings/dashboard
     /// 测试共用 SETTINGS_DIR_LOCK（with_settings_dir）串行执行，消除 env 并行读写
     /// 竞态。with_settings_dir 为同步闭包，内部以独立 Runtime block_on 驱动异步体。
+    /// 依赖真实 mihomo/sudo 环境，windows-latest CI 无 → 仅 Linux。
+    #[cfg(not(windows))]
     #[test]
     fn validate_ok_minimal_config() {
         with_settings_dir(|| {
             let rt = tokio::runtime::Runtime::new().unwrap();
             // 本机已装 mihomo（计划验收环境）
-            rt.block_on(validate_config("port: 7890\n")).unwrap();
+            rt.block_on(validate_config("port: 7890\n", None)).unwrap();
         });
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn validate_bad_yaml_fails_with_stderr() {
         with_settings_dir(|| {
             let rt = tokio::runtime::Runtime::new().unwrap();
             let e = rt
-                .block_on(validate_config("port: 7890\nproxies: [\n"))
+                .block_on(validate_config("port: 7890\nproxies: [\n", None))
                 .unwrap_err();
             match e {
                 ApplyError::ValidateFailed { stderr } => {
@@ -472,6 +519,7 @@ mod tests {
         });
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn apply_non_interactive_password_or_validation_failure() {
         // 环境自适应且无副作用：无效 YAML 在脚本内 mihomo -t 预校验阶段即失败，
@@ -504,6 +552,7 @@ mod tests {
     }
 
     /// 失败分类规则：需密码 / 不在 sudoers / 其他（中英文 locale）。
+    #[cfg(not(windows))]
     #[test]
     fn classify_sudo_failure_rules() {
         use SudoFailureKind::*;
@@ -538,6 +587,7 @@ mod tests {
         ));
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn script_installed_flag_matches_fs() {
         let installed = std::path::Path::new("/usr/local/sbin/mihomo-apply")
@@ -550,6 +600,7 @@ mod tests {
         assert_eq!(is_apply_script_installed().await, installed);
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn mihomo_installed_flag_matches_fs() {
         let which = tokio::process::Command::new("which")
@@ -562,12 +613,14 @@ mod tests {
         assert_eq!(mihomo_is_installed().await, which);
     }
 
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn service_is_active_smoke() {
         let _ = service_is_active().await;
     }
 
     /// 直接进程模式 apply 的 stdin 协议：首行 apply + 空行后接 yaml。
+    #[cfg(not(windows))]
     #[test]
     fn direct_apply_stdin_protocol() {
         let body = direct_apply_body("port: 7890\n");
@@ -609,6 +662,8 @@ mod tests {
 
     /// 环境自适应：apply_config direct 模式，坏 yaml 必须在脚本内预校验阶段失败
     /// （未装脚本/sudo 无权限/需密码等环境均覆盖，无副作用）。
+    /// Windows 上 apply_config 走 process::apply（BinNotConfigured），不适用。
+    #[cfg(not(windows))]
     #[test]
     fn apply_direct_bad_yaml_fails_early() {
         with_settings_dir(|| {
@@ -627,6 +682,8 @@ mod tests {
     }
 
     /// 环境自适应：systemd 模式行为不变（与既有 apply_non_interactive 测试同构）。
+    /// Windows 上 apply_config 走 process::apply（BinNotConfigured），不适用。
+    #[cfg(not(windows))]
     #[test]
     fn apply_systemd_bad_yaml_fails_early() {
         with_settings_dir(|| {
@@ -645,6 +702,8 @@ mod tests {
     }
 
     /// 环境自适应：find_mihomo_in_path 与 which mihomo 一致。
+    /// Windows 无 which；幂等分支由 mihomo_installed_flag_matches_fs 之外的其他用例覆盖。
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn find_mihomo_in_path_matches_which() {
         let which = tokio::process::Command::new("which")
@@ -669,6 +728,7 @@ mod tests {
     }
 
     /// 环境自适应：service_unit_exists 与 systemctl list-unit-files 一致。
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn service_unit_exists_matches_systemctl() {
         let out = tokio::process::Command::new("systemctl")
@@ -702,6 +762,7 @@ mod tests {
     }
 
     /// systemctl 失败分类：polkit 认证类 → SystemdAuthFailed；其余 → CommandFailed。
+    #[cfg(not(windows))]
     #[test]
     fn classify_systemctl_failure_rules() {
         let e = classify_systemctl_failure(
@@ -745,6 +806,7 @@ mod tests {
 
     /// 环境自适应：systemctl_control 直接执行（无 sudo）。
     /// 桌面有 polkit 代理时可能成功；无代理/未授权 → SystemdAuthFailed 或 CommandFailed。
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn systemctl_control_env_adaptive() {
         match systemctl_control(ProcOp::Start).await {
@@ -760,6 +822,8 @@ mod tests {
 
     /// 环境自适应：mihomo-proc 未安装时 proc_control/proc_status 直接返回
     /// ProcScriptMissing（明确引导重装，而非 sudo 裸报"找不到命令"）。
+    /// Linux 专属（is_proc_script_installed 已门控）。
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn proc_ops_report_missing_script_with_guidance() {
         if !is_proc_script_installed().await {

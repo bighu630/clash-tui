@@ -1525,9 +1525,12 @@ mod tests {
         p.fields[1].value = "/usr/bin/mihomo".into();
         p.fields[2].value = "运行中（PID 1234）".into();
         assert!(!p.dirty(), "状态字段变化不应触发未保存标记");
-        // 但 run-mode 变化会
-        p.fields[0].value = "direct".into();
-        assert!(p.dirty());
+        // 但 run-mode 变化会（Windows 仅 direct 一项，无变化可言）
+        #[cfg(not(windows))]
+        {
+            p.fields[0].value = "direct".into();
+            assert!(p.dirty());
+        }
     }
 
     /// 路径字段 Enter → 打开路径输入弹窗（预填 which 结果或已有路径）。
@@ -1830,6 +1833,7 @@ mod tests {
     /// 模式切换 systemd ← direct 且进程运行中 + Ctrl+A（apply=true）：
     /// 不拦截返回 Stop，继续 apply 链路（mihomo-apply 的进程守卫会停掉实例）。
     #[test]
+    #[cfg(not(windows))] // Windows 无 systemd 模式，下拉仅 direct 一项，direct→systemd 切换不存在
     fn mode_switch_to_systemd_ctrl_a_continues_to_apply() {
         with_settings_dir(|| {
             let mut st = test_state();
@@ -1865,6 +1869,7 @@ mod tests {
     /// Action 分派以 run-mode 字段（f[0]）为准：切 systemd + Ctrl+S 后按钮值陈旧
     /// （仍为“启动/停止/重启”）也不应派发 ProcAction；切回 direct 应恢复派发。
     #[test]
+    #[cfg(not(windows))] // 核心断言依赖 systemd 可切换（Windows 无 systemd 模式）
     fn action_dispatch_ignores_stale_button_values() {
         with_settings_dir(|| {
             let mut st = test_state();

@@ -3,6 +3,10 @@
 # 由 /etc/sudoers.d/99-mihomo 授权 %mihomo-admin 组免密调用。以 root 运行。
 set -euo pipefail
 
+# 严格权限：TMP 从创建起即 0600，避免校验失败/中途退出时以默认 umask
+# （0644）残留含代理密码/订阅密钥的配置。
+umask 077
+
 CONFIG_DIR=/etc/mihomo
 CONFIG="$CONFIG_DIR/config.yaml"
 BACKUP="$CONFIG_DIR/config.yaml.bak"

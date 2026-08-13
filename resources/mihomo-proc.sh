@@ -16,6 +16,10 @@
 #   sudo env_reset 清空环境，真实调用（sudo -n）恒用固定路径，钩子不构成注入面。
 set -euo pipefail
 
+# 严格权限：TMP 等文件从创建起即 0600，避免校验失败/中途退出时
+# 以 umask 默认权限（0644）残留含代理密码/订阅密钥的配置。
+umask 077
+
 CONFIG_DIR=${MIHOMO_TUI_TEST_CONFIG_DIR:-/etc/mihomo}
 CONFIG="$CONFIG_DIR/config.yaml"
 BACKUP="$CONFIG_DIR/config.yaml.bak"
@@ -44,6 +48,9 @@ read_bin() {
   line=$(cat "$CONF_FILE") || { echo "ERROR: 读取 $CONF_FILE 失败" >&2; exit 1; }
   bin=${line#mihomo_bin=}
   if [ "$bin" = "$line" ]; then
+    # 无 mihomo_bin= 前缀（含空文件）：status 场景视为未配置（输出空 bin），
+    # 其余场景（allow_missing=0）报格式错误。
+    if [ "$allow_missing" = 1 ]; then echo ""; return 0; fi
     echo "ERROR: $CONF_FILE 格式错误（期望单行 mihomo_bin=<path>）" >&2
     exit 1
   fi
@@ -166,15 +173,15 @@ start_proc() {
 
 case "$cmd" in
   apply)
-    # 读 stdin 剩余内容（config.yaml）→ 校验 → 备份 → 原子替换 → 停旧 → 启新 → 健康轮询 → 回滚
+    # 读 stdin 剩余内容（config.yaml）→ 校验（用 conf 配置的二进制，与执行一致）→ 备份 → 原子替换 → 停旧 → 启新 → 健康轮询 → 回滚
     rm -f "$TMP"
     cat > "$TMP"
-    if ! mihomo -t -f "$TMP"; then
-      echo "ERROR: mihomo -t validation failed" >&2
+    bin=$(read_bin 0) || { rm -f "$TMP"; exit 1; }
+    if ! "$bin" -t -f "$TMP"; then
+      echo "ERROR: $bin -t validation failed" >&2
       rm -f "$TMP"
       exit 1
     fi
-    bin=$(read_bin 0)
     if [ -f "$CONFIG" ]; then
       cp -a "$CONFIG" "$BACKUP"
     fi
@@ -185,7 +192,14 @@ case "$cmd" in
     chmod 600 "$TMP"
     mv -f "$TMP" "$CONFIG"
     ensure_service_stopped
-    stop_proc "$bin" >/dev/null
+    # 停旧进程失败（SIGKILL 超时，旧进程仍存活）：新配置已替换，恢复备份避免不一致
+    if ! stop_proc "$bin" >/dev/null; then
+      echo "ERROR: 停止旧进程失败，回滚上一份配置" >&2
+      if [ -f "$BACKUP" ]; then
+        mv -f "$BACKUP" "$CONFIG"
+      fi
+      exit 1
+    fi
     if ! start_proc "$bin" >/dev/null 2>&1; then
       echo "ERROR: mihomo 启动失败，回滚上一份配置" >&2
       tail -n 5 "$LOG_FILE" >&2 || true
@@ -231,6 +245,8 @@ case "$cmd" in
     ;;
   restart)
     bin=$(read_bin 0)
+    # 与 start 语义一致：先停 systemd 服务（防端口冲突）再停进程实例
+    ensure_service_stopped
     stop_proc "$bin"
     start_proc "$bin"
     ;;

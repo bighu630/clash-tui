@@ -27,7 +27,9 @@ use crate::core::client::{
     TrafficFrame,
 };
 use crate::core::exit_ip::{self, ExitInfo, ProxyPorts};
-use crate::core::models::{NetworkSettings, Overrides, RunMode, Subscription, SubscriptionCache};
+#[cfg(not(windows))]
+use crate::core::models::RunMode;
+use crate::core::models::{NetworkSettings, Overrides, Subscription, SubscriptionCache};
 use crate::core::settings::{
     load_overrides, load_settings, load_subscriptions, save_overrides, save_subscriptions,
 };

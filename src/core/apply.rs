@@ -245,7 +245,7 @@ async fn run_apply_script(
 pub async fn proc_control(op: ProcOp) -> Result<ApplyOutcome, ApplyError> {
     #[cfg(windows)]
     {
-        return crate::service::process::control(op).await;
+        crate::service::process::control(op).await
     }
     #[cfg(not(windows))]
     {
@@ -267,7 +267,7 @@ pub async fn proc_control(op: ProcOp) -> Result<ApplyOutcome, ApplyError> {
 pub async fn proc_status() -> Result<ProcStatus, ApplyError> {
     #[cfg(windows)]
     {
-        return crate::service::process::status().await;
+        crate::service::process::status().await
     }
     #[cfg(not(windows))]
     {

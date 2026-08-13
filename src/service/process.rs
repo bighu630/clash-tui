@@ -5,10 +5,11 @@
 
 use std::ffi::c_void;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
-use tokio::process::{Command, Stdio};
+use tokio::process::Command;
 
 use crate::core::apply::{ApplyError, ApplyOutcome, ProcOp, ProcStatus};
 use crate::core::mihomo_bin::validate_mihomo_bin;
@@ -176,7 +177,9 @@ async fn start_unlocked() -> Result<ApplyOutcome, ApplyError> {
         .open(log_path())
         .await
         .map_err(|e| ApplyError::Io(format!("打开日志文件 {LOG_FILE} 失败: {e}")))?;
-    let log_out = log
+    // tokio::fs::File → std::fs::File（std::process::Stdio 只接受 std File；into_std 是 async）
+    let log_std = log.into_std().await;
+    let log_out = log_std
         .try_clone()
         .map_err(|e| ApplyError::Io(format!("复制日志句柄失败: {e}")))?;
     let mut cmd = Command::new(&bin);
@@ -188,7 +191,7 @@ async fn start_unlocked() -> Result<ApplyOutcome, ApplyError> {
     ])
     .stdin(Stdio::null())
     .stdout(Stdio::from(log_out))
-    .stderr(Stdio::from(log))
+    .stderr(Stdio::from(log_std))
     .creation_flags(CREATE_NO_WINDOW);
     let child = cmd
         .spawn()

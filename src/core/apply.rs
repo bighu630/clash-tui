@@ -47,6 +47,8 @@ pub enum ApplyError {
          或检查 /etc/sudoers.d/99-mihomo 与 /etc/sudoers 的 @includedir /etc/sudoers.d 配置"
     )]
     NotInSudoers,
+    #[error("未设置 mihomo 路径：请先在设置页 Enter mihomo-bin 设置 mihomo 可执行文件路径")]
+    BinNotConfigured,
     #[error(
         "缺少提权脚本 /usr/local/sbin/mihomo-proc（直接进程模式需要）。\n\
          请重新安装提权组件：仪表盘页按 i，或手动安装 resources/mihomo-proc.sh 并更新 sudoers"

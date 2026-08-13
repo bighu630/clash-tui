@@ -75,3 +75,30 @@ jobs:
           include: README.md,LICENSE
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  # 3) Windows 产物：windows-latest 原生构建（MSVC），zip 打包上传
+  upload-assets-windows:
+    name: Build & Upload (x86_64-pc-windows-msvc)
+    needs: create-release
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      # 产物命名：mihomo-tui-v0.1.0-x86_64-pc-windows-msvc.zip
+      # include 同 Linux（README + LICENSE）；checksum 生成 .sha256
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: mihomo-tui
+          target: x86_64-pc-windows-msvc
+          archive: $bin-$tag-$target
+          include: README.md,LICENSE
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}

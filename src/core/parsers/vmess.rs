@@ -18,10 +18,15 @@ pub fn parse(line: &str) -> Result<(String, Mapping), ParseError> {
     // 部分客户端会在 base64 后追加 ?ed=2048 等查询参数
     let b64part = body.split('?').next().unwrap_or(body);
     let decoded = b64_decode(b64part).ok_or_else(|| err("vmess base64 解码失败"))?;
-    let json: serde_json::Value = serde_json::from_slice(&decoded)
-        .map_err(|e| err(format!("vmess 配置无效: {e}")))?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&decoded).map_err(|e| err(format!("vmess 配置无效: {e}")))?;
 
-    let get = |k: &str| json.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let get = |k: &str| {
+        json.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
 
     let name = pct_decode(frag.unwrap_or(""));
     let name = if name.is_empty() { get("ps") } else { name };
@@ -39,7 +44,11 @@ pub fn parse(line: &str) -> Result<(String, Mapping), ParseError> {
     let cipher = get("scy");
     m.insert(
         Value::String("cipher".into()),
-        Value::String(if cipher.is_empty() { "auto".into() } else { cipher }),
+        Value::String(if cipher.is_empty() {
+            "auto".into()
+        } else {
+            cipher
+        }),
     );
     m.insert(Value::String("udp".into()), Value::Bool(true));
 
@@ -89,7 +98,9 @@ pub fn parse(line: &str) -> Result<(String, Mapping), ParseError> {
         m.insert(
             Value::String("alpn".into()),
             Value::Sequence(
-                alpn.split(',').map(|s| Value::String(s.trim().to_string())).collect(),
+                alpn.split(',')
+                    .map(|s| Value::String(s.trim().to_string()))
+                    .collect(),
             ),
         );
     }
@@ -143,7 +154,9 @@ mod tests {
         assert!(!b(&m, "tls"));
         assert_eq!(s(&m, "network"), "tcp");
         assert!(m.get(serde_yaml::Value::String("ws-opts".into())).is_none());
-        assert!(m.get(serde_yaml::Value::String("servername".into())).is_none());
+        assert!(m
+            .get(serde_yaml::Value::String("servername".into()))
+            .is_none());
     }
 
     #[test]

@@ -23,7 +23,10 @@ pub fn parse(line: &str) -> Result<(String, Mapping), ParseError> {
     let get = |k: &str| q.iter().find(|(x, _)| x == k).map(|(_, v)| v.clone());
 
     let mut m = Mapping::new();
-    m.insert(Value::String("type".into()), Value::String("hysteria2".into()));
+    m.insert(
+        Value::String("type".into()),
+        Value::String("hysteria2".into()),
+    );
     m.insert(Value::String("server".into()), Value::String(host));
     m.insert(Value::String("port".into()), Value::Number(port.into()));
     m.insert(Value::String("password".into()), Value::String(password));

@@ -52,36 +52,139 @@ pub(crate) fn split_csv(s: &str) -> Vec<String> {
 
 /// 模型 → 表单字段（22 个，顺序与 SECTIONS 一致）。
 pub(crate) fn field_values(s: &NetworkSettings) -> Vec<FormField> {
-    let yn = |b: bool| if b { "是".to_string() } else { "否".to_string() };
+    let yn = |b: bool| {
+        if b {
+            "是".to_string()
+        } else {
+            "否".to_string()
+        }
+    };
     let csv = |v: &[String]| v.join(",");
     vec![
-        FormField { label: "mode".into(), value: s.mode.clone(), kind: FieldKind::Dropdown(vec!["rule".into(), "global".into(), "direct".into()]) },
-        FormField { label: "ipv6".into(), value: yn(s.ipv6), kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]) },
-        FormField { label: "allow-lan".into(), value: yn(s.allow_lan), kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]) },
-        FormField { label: "port".into(), value: s.port.to_string(), kind: FieldKind::Number },
-        FormField { label: "socks-port".into(), value: s.socks_port.to_string(), kind: FieldKind::Number },
-        FormField { label: "mixed-port".into(), value: s.mixed_port.to_string(), kind: FieldKind::Number },
-        FormField { label: "log-level".into(), value: s.log_level.clone(), kind: FieldKind::Dropdown(vec!["silent".into(), "error".into(), "warning".into(), "info".into(), "debug".into()]) },
-        FormField { label: "tun.enable".into(), value: yn(s.tun.enable), kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]) },
-        FormField { label: "tun.stack".into(), value: s.tun.stack.clone(), kind: FieldKind::Dropdown(vec!["system".into(), "gvisor".into(), "mixed".into()]) },
-        FormField { label: "tun.auto-route".into(), value: yn(s.tun.auto_route), kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]) },
-        FormField { label: "tun.mtu".into(), value: s.tun.mtu.to_string(), kind: FieldKind::Number },
-        FormField { label: "tun.dns-hijack".into(), value: csv(&s.tun.dns_hijack), kind: FieldKind::Text },
-        FormField { label: "dns.enable".into(), value: yn(s.dns.enable), kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]) },
-        FormField { label: "dns.listen".into(), value: s.dns.listen.clone(), kind: FieldKind::Text },
-        FormField { label: "dns.enhanced-mode".into(), value: s.dns.enhanced_mode.clone(), kind: FieldKind::Dropdown(vec!["fake-ip".into(), "redir-host".into()]) },
-        FormField { label: "dns.fake-ip-range".into(), value: s.dns.fake_ip_range.clone(), kind: FieldKind::Text },
-        FormField { label: "dns.nameserver".into(), value: csv(&s.dns.nameserver), kind: FieldKind::Text },
-        FormField { label: "dns.default-nameserver".into(), value: csv(&s.dns.default_nameserver), kind: FieldKind::Text },
-        FormField { label: "dns.fallback".into(), value: csv(&s.dns.fallback), kind: FieldKind::Text },
-        FormField { label: "dns.fake-ip-filter".into(), value: csv(&s.dns.fake_ip_filter), kind: FieldKind::Text },
-        FormField { label: "external-controller".into(), value: s.external_controller.clone(), kind: FieldKind::Text },
-        FormField { label: "secret".into(), value: s.secret.clone(), kind: FieldKind::ReadOnly },
+        FormField {
+            label: "mode".into(),
+            value: s.mode.clone(),
+            kind: FieldKind::Dropdown(vec!["rule".into(), "global".into(), "direct".into()]),
+        },
+        FormField {
+            label: "ipv6".into(),
+            value: yn(s.ipv6),
+            kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]),
+        },
+        FormField {
+            label: "allow-lan".into(),
+            value: yn(s.allow_lan),
+            kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]),
+        },
+        FormField {
+            label: "port".into(),
+            value: s.port.to_string(),
+            kind: FieldKind::Number,
+        },
+        FormField {
+            label: "socks-port".into(),
+            value: s.socks_port.to_string(),
+            kind: FieldKind::Number,
+        },
+        FormField {
+            label: "mixed-port".into(),
+            value: s.mixed_port.to_string(),
+            kind: FieldKind::Number,
+        },
+        FormField {
+            label: "log-level".into(),
+            value: s.log_level.clone(),
+            kind: FieldKind::Dropdown(vec![
+                "silent".into(),
+                "error".into(),
+                "warning".into(),
+                "info".into(),
+                "debug".into(),
+            ]),
+        },
+        FormField {
+            label: "tun.enable".into(),
+            value: yn(s.tun.enable),
+            kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]),
+        },
+        FormField {
+            label: "tun.stack".into(),
+            value: s.tun.stack.clone(),
+            kind: FieldKind::Dropdown(vec!["system".into(), "gvisor".into(), "mixed".into()]),
+        },
+        FormField {
+            label: "tun.auto-route".into(),
+            value: yn(s.tun.auto_route),
+            kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]),
+        },
+        FormField {
+            label: "tun.mtu".into(),
+            value: s.tun.mtu.to_string(),
+            kind: FieldKind::Number,
+        },
+        FormField {
+            label: "tun.dns-hijack".into(),
+            value: csv(&s.tun.dns_hijack),
+            kind: FieldKind::Text,
+        },
+        FormField {
+            label: "dns.enable".into(),
+            value: yn(s.dns.enable),
+            kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]),
+        },
+        FormField {
+            label: "dns.listen".into(),
+            value: s.dns.listen.clone(),
+            kind: FieldKind::Text,
+        },
+        FormField {
+            label: "dns.enhanced-mode".into(),
+            value: s.dns.enhanced_mode.clone(),
+            kind: FieldKind::Dropdown(vec!["fake-ip".into(), "redir-host".into()]),
+        },
+        FormField {
+            label: "dns.fake-ip-range".into(),
+            value: s.dns.fake_ip_range.clone(),
+            kind: FieldKind::Text,
+        },
+        FormField {
+            label: "dns.nameserver".into(),
+            value: csv(&s.dns.nameserver),
+            kind: FieldKind::Text,
+        },
+        FormField {
+            label: "dns.default-nameserver".into(),
+            value: csv(&s.dns.default_nameserver),
+            kind: FieldKind::Text,
+        },
+        FormField {
+            label: "dns.fallback".into(),
+            value: csv(&s.dns.fallback),
+            kind: FieldKind::Text,
+        },
+        FormField {
+            label: "dns.fake-ip-filter".into(),
+            value: csv(&s.dns.fake_ip_filter),
+            kind: FieldKind::Text,
+        },
+        FormField {
+            label: "external-controller".into(),
+            value: s.external_controller.clone(),
+            kind: FieldKind::Text,
+        },
+        FormField {
+            label: "secret".into(),
+            value: s.secret.clone(),
+            kind: FieldKind::ReadOnly,
+        },
     ]
 }
 
 fn err<T>(label: &str, message: &str) -> Result<T, ValidationError> {
-    Err(ValidationError { label: label.into(), message: message.into() })
+    Err(ValidationError {
+        label: label.into(),
+        message: message.into(),
+    })
 }
 
 fn nonempty(label: &str, v: &str) -> Result<String, ValidationError> {
@@ -97,7 +200,10 @@ fn parse_u16(label: &str, v: &str) -> Result<u16, ValidationError> {
     if t.is_empty() {
         return err(label, "不能为空");
     }
-    t.parse().map_err(|_| ValidationError { label: label.into(), message: format!("数值无效: {v}") })
+    t.parse().map_err(|_| ValidationError {
+        label: label.into(),
+        message: format!("数值无效: {v}"),
+    })
 }
 
 fn parse_csv(label: &str, v: &str) -> Result<Vec<String>, ValidationError> {
@@ -136,7 +242,11 @@ pub(crate) fn apply_values(f: &[FormField]) -> Result<NetworkSettings, Validatio
         port: parse_u16("port", &f[3].value)?,
         socks_port: parse_u16("socks-port", &f[4].value)?,
         mixed_port: parse_u16("mixed-port", &f[5].value)?,
-        log_level: parse_dropdown("log-level", &f[6].value, &["silent", "error", "warning", "info", "debug"])?,
+        log_level: parse_dropdown(
+            "log-level",
+            &f[6].value,
+            &["silent", "error", "warning", "info", "debug"],
+        )?,
         tun: TunSettings {
             enable: parse_yn("tun.enable", &f[7].value)?,
             stack: parse_dropdown("tun.stack", &f[8].value, &["system", "gvisor", "mixed"])?,
@@ -147,7 +257,11 @@ pub(crate) fn apply_values(f: &[FormField]) -> Result<NetworkSettings, Validatio
         dns: DnsSettings {
             enable: parse_yn("dns.enable", &f[12].value)?,
             listen: nonempty("dns.listen", &f[13].value)?,
-            enhanced_mode: parse_dropdown("dns.enhanced-mode", &f[14].value, &["fake-ip", "redir-host"])?,
+            enhanced_mode: parse_dropdown(
+                "dns.enhanced-mode",
+                &f[14].value,
+                &["fake-ip", "redir-host"],
+            )?,
             fake_ip_range: nonempty("dns.fake-ip-range", &f[15].value)?,
             nameserver: parse_csv("dns.nameserver", &f[16].value)?,
             default_nameserver: parse_csv("dns.default-nameserver", &f[17].value)?,
@@ -245,10 +359,7 @@ impl SettingsPage {
                 if let Some(i) = self.fields.iter().position(|f| f.label == e.label) {
                     self.focused = i;
                 }
-                self.popup = Some(MessagePopup::new(
-                    "校验失败".into(),
-                    vec![e.to_string()],
-                ));
+                self.popup = Some(MessagePopup::new("校验失败".into(), vec![e.to_string()]));
                 None
             }
             Ok(s) => {
@@ -465,10 +576,7 @@ impl Page for SettingsPage {
             Color::DarkGray
         };
         f.render_widget(
-            Paragraph::new(Span::styled(
-                status_text,
-                Style::default().fg(status_fg),
-            )),
+            Paragraph::new(Span::styled(status_text, Style::default().fg(status_fg))),
             status,
         );
 
@@ -502,7 +610,9 @@ impl Page for SettingsPage {
                     f.render_widget(
                         Paragraph::new(Span::styled(
                             format!("── {name} ──"),
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
                         )),
                         Rect::new(body.x, y, body.width, 1),
                     );
@@ -511,12 +621,18 @@ impl Page for SettingsPage {
                     let focused = *idx == self.focused;
                     let field = &self.fields[*idx];
                     let label = if field.label.len() as u16 > label_w {
-                        field.label.chars().take(label_w as usize).collect::<String>()
+                        field
+                            .label
+                            .chars()
+                            .take(label_w as usize)
+                            .collect::<String>()
                     } else {
                         field.label.clone()
                     };
                     let label_style = if focused {
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().add_modifier(Modifier::BOLD)
                     };
@@ -650,7 +766,10 @@ mod tests {
     /// 默认值往返（用固定 secret 避免 Default 随机）。
     #[test]
     fn default_settings_roundtrip() {
-        let s = NetworkSettings { secret: "b".repeat(32), ..NetworkSettings::default() };
+        let s = NetworkSettings {
+            secret: "b".repeat(32),
+            ..NetworkSettings::default()
+        };
         let back = apply_values(&field_values(&s)).expect("默认值应通过校验");
         assert_eq!(back.secret, "b".repeat(32));
         assert_eq!(back.port, 7890);
@@ -709,11 +828,11 @@ mod tests {
 
     // ---- SettingsPage 整页表单 ----
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use crate::app::{AppState, UiCommand};
     use crate::core::client::RuntimeConfig;
     use crate::core::settings::{load_settings, save_settings, with_settings_dir};
     use crate::ui::Page;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use std::collections::{HashMap, VecDeque};
 
     /// 构造最小 AppState（参照 dashboard 测试 test_state）。
@@ -767,8 +886,16 @@ mod tests {
         let mut p = page_with_state(&st);
         // 编辑 port 字段：选中 → Enter 进编辑 → 输入 9
         p.focused = 3;
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE),
+        );
         assert!(p.dirty());
         // st.settings 被外部改动（如仪表盘热切）后 on_enter 不应覆盖编辑
         st.settings.port = 7777;
@@ -784,14 +911,34 @@ mod tests {
             save_settings(&st.settings).unwrap();
             let mut p = page_with_state(&st);
             p.focused = 3;
-            press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            );
             // 编辑模式为追加：先清空原值（7890）再输入新端口
             for _ in 0..4 {
-                press(&mut p, &mut st, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+                press(
+                    &mut p,
+                    &mut st,
+                    KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                );
             }
-            press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
-            press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
-            press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE));
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE),
+            );
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE),
+            );
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE),
+            );
             let cmd = press(&mut p, &mut st, ctrl('s'));
             assert!(cmd.is_none(), "仅保存不应返回命令");
             let back = load_settings().unwrap();
@@ -810,13 +957,33 @@ mod tests {
             save_settings(&st.settings).unwrap();
             let mut p = page_with_state(&st);
             p.focused = 3;
-            press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            );
             for _ in 0..4 {
-                press(&mut p, &mut st, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+                press(
+                    &mut p,
+                    &mut st,
+                    KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                );
             }
-            press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
-            press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
-            press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE));
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE),
+            );
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE),
+            );
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Char('8'), KeyModifiers::NONE),
+            );
             let cmd = press(&mut p, &mut st, ctrl('a'));
             match cmd {
                 Some(UiCommand::ApplyConfig(yaml)) => {
@@ -839,9 +1006,17 @@ mod tests {
             let mut p = page_with_state(&st);
             // 清空 port
             p.focused = 3;
-            press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            );
             for _ in 0..4 {
-                press(&mut p, &mut st, KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+                press(
+                    &mut p,
+                    &mut st,
+                    KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                );
             }
             let cmd = press(&mut p, &mut st, ctrl('s'));
             assert!(cmd.is_none());
@@ -851,7 +1026,11 @@ mod tests {
             let back = load_settings().unwrap();
             assert_eq!(back.port, 7890, "失败时不应落盘");
             // 关闭弹窗后仍可继续编辑（内容未丢）
-            press(&mut p, &mut st, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            );
             assert!(p.popup.is_none());
         });
     }
@@ -865,7 +1044,11 @@ mod tests {
             let old = st.settings.secret.clone();
             let mut p = page_with_state(&st);
             p.focused = FIELD_COUNT - 1;
-            press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            );
             let new_secret = p.fields[FIELD_COUNT - 1].value.clone();
             assert_eq!(new_secret.len(), 32);
             assert!(new_secret.chars().all(|c| c.is_ascii_hexdigit()));
@@ -884,12 +1067,24 @@ mod tests {
         let mut p = page_with_state(&st);
         assert_eq!(p.focused, 0);
         // mode → global → direct（Enter 循环）
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
         assert_eq!(p.fields[0].value, "global");
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
         assert_eq!(p.fields[0].value, "direct");
         // ↓ 走到下一个字段
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+        );
         assert_eq!(p.focused, 1);
     }
 
@@ -900,13 +1095,37 @@ mod tests {
         let mut p = page_with_state(&st);
         // dns.listen（index 13）进入编辑后追加端口
         p.focused = 13;
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
         assert!(p.editing, "Enter 应进入编辑模式");
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+        );
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+        );
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE),
+        );
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
+        );
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
         assert_eq!(p.fields[13].value, "0.0.0.0:1053:15");
         assert!(!p.editing, "Esc 退出编辑模式");
     }
@@ -917,19 +1136,50 @@ mod tests {
         let mut st = test_state();
         let mut p = page_with_state(&st);
         p.focused = 3; // port
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        );
         assert_eq!(p.fields[3].value, "7890", "非数字不应插入");
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE));
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE),
+        );
         assert_eq!(p.fields[3].value, "7890", "符号也不应插入");
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
+        );
         assert_eq!(p.fields[3].value, "78905", "数字应插入");
         // Text 字段不受限（数字字母均可）
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
         p.focused = 13;
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        press(&mut p, &mut st, KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-        assert_eq!(p.fields[13].value, "0.0.0.0:1053a", "Text 字段任意字符可插入");
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        );
+        assert_eq!(
+            p.fields[13].value, "0.0.0.0:1053a",
+            "Text 字段任意字符可插入"
+        );
     }
 
     /// 未同步（fields 为空，未 on_enter）时 handle_key 安全返回 None（P3 守卫）。

@@ -52,7 +52,9 @@ impl DashboardPage {
             Err(e) => {
                 self.popup = Some(MessagePopup::new(
                     "保存失败".into(),
-                    vec![format!("「{label}」将尝试热切换，但设置保存失败：{e}（重启后会丢失）")],
+                    vec![format!(
+                        "「{label}」将尝试热切换，但设置保存失败：{e}（重启后会丢失）"
+                    )],
                 ));
                 UiCommand::PatchConfigs {
                     patch,
@@ -187,21 +189,44 @@ fn render_status(f: &mut Frame, area: Rect, st: &AppState) {
     };
     let spans = vec![
         Span::raw("模式: "),
-        Span::styled(mode, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            mode,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" [m]  "),
         Span::raw("TUN: "),
-        Span::styled(tun, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            tun,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" [t]  "),
         Span::raw("IPv6: "),
-        Span::styled(ipv6, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            ipv6,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" [6]  "),
         Span::raw("出口IP: "),
-        Span::styled(ip, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            ip,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         // 国家段：有国家 → 「中国香港」；无国家信息（IP 正常）→ 「未知」；IP 也未获取 → 不显示
         Span::raw(country_segment(country, st.exit_ip.is_some())),
         Span::raw(" [r]  "),
         Span::raw("API: "),
-        Span::styled(api_text, Style::default().fg(api_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            api_text,
+            Style::default().fg(api_color).add_modifier(Modifier::BOLD),
+        ),
     ];
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -217,7 +242,12 @@ fn render_right(f: &mut Frame, area: Rect, st: &AppState) {
 /// 网络框：上行/下行速率（左对齐）+ 累计流量（右对齐）同排，双 Sparkline。
 fn render_network(f: &mut Frame, area: Rect, st: &AppState) {
     let block = Block::new()
-        .title(Span::styled(" 网络 ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " 网络 ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
@@ -240,19 +270,35 @@ fn render_network(f: &mut Frame, area: Rect, st: &AppState) {
     .areas(inner);
 
     f.render_widget(
-        Paragraph::new(rate_row("↑ 上行", up_rate, up_total, Color::Green, inner.width)),
+        Paragraph::new(rate_row(
+            "↑ 上行",
+            up_rate,
+            up_total,
+            Color::Green,
+            inner.width,
+        )),
         l1,
     );
     f.render_widget(
-        Sparkline::default().data(&up_data).style(Style::default().fg(Color::Green)),
+        Sparkline::default()
+            .data(&up_data)
+            .style(Style::default().fg(Color::Green)),
         s1,
     );
     f.render_widget(
-        Paragraph::new(rate_row("↓ 下行", down_rate, down_total, Color::Blue, inner.width)),
+        Paragraph::new(rate_row(
+            "↓ 下行",
+            down_rate,
+            down_total,
+            Color::Blue,
+            inner.width,
+        )),
         l2,
     );
     f.render_widget(
-        Sparkline::default().data(&down_data).style(Style::default().fg(Color::Blue)),
+        Sparkline::default()
+            .data(&down_data)
+            .style(Style::default().fg(Color::Blue)),
         s2,
     );
 }
@@ -274,7 +320,12 @@ fn rate_row(label: &str, rate: u64, total: u64, color: Color, inner_width: u16) 
 /// 左列：最近连接列表（start 降序，已在 app 层排序）。
 fn render_connections(f: &mut Frame, area: Rect, st: &AppState) {
     let block = Block::new()
-        .title(Span::styled(" 连接 ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " 连接 ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
@@ -349,7 +400,12 @@ fn conn_host(c: &ConnInfo) -> String {
 /// 内存框：inuse 数值 + Sparkline。
 fn render_memory(f: &mut Frame, area: Rect, st: &AppState) {
     let block = Block::new()
-        .title(Span::styled(" 内存 ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            " 内存 ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
     let inner = block.inner(area);
@@ -361,14 +417,18 @@ fn render_memory(f: &mut Frame, area: Rect, st: &AppState) {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 crate::ui::widgets::format_bytes(inuse),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" inuse", Style::default().fg(Color::DarkGray)),
         ])),
         m1,
     );
     f.render_widget(
-        Sparkline::default().data(&mem_data).style(Style::default().fg(Color::Magenta)),
+        Sparkline::default()
+            .data(&mem_data)
+            .style(Style::default().fg(Color::Magenta)),
         m2,
     );
 }
@@ -404,7 +464,11 @@ mod tests {
         };
         assert_eq!(conn_host(&c), "example.com");
 
-        c.meta = ConnMeta { host: String::new(), sniff_host: "sniffed.dev".into(), ..ConnMeta::default() };
+        c.meta = ConnMeta {
+            host: String::new(),
+            sniff_host: "sniffed.dev".into(),
+            ..ConnMeta::default()
+        };
         assert_eq!(conn_host(&c), "sniffed.dev");
 
         c.meta = ConnMeta {
@@ -453,8 +517,16 @@ mod tests {
     /// UDP 连接行含 UDP 标；TCP 行含 TCP 标。
     #[test]
     fn conn_line_kind_marker() {
-        let tcp = ConnInfo { meta: meta("a.com", "tcp"), upload: 1024, download: 2048, ..ConnInfo::default() };
-        let udp = ConnInfo { meta: meta("b.com", "udp"), ..ConnInfo::default() };
+        let tcp = ConnInfo {
+            meta: meta("a.com", "tcp"),
+            upload: 1024,
+            download: 2048,
+            ..ConnInfo::default()
+        };
+        let udp = ConnInfo {
+            meta: meta("b.com", "udp"),
+            ..ConnInfo::default()
+        };
         let line_tcp = conn_line(&tcp);
         let line_udp = conn_line(&udp);
         assert!(line_tcp.to_string().contains("TCP"));
@@ -498,7 +570,11 @@ mod tests {
     /// 断言返回 PatchConfigs 并解构出 (patch, saved, label)。
     fn expect_patch(cmd: &UiCommand) -> (&serde_json::Value, bool, &str) {
         match cmd {
-            UiCommand::PatchConfigs { patch, saved, label } => (patch, *saved, label),
+            UiCommand::PatchConfigs {
+                patch,
+                saved,
+                label,
+            } => (patch, *saved, label),
             _ => panic!("期望 PatchConfigs"),
         }
     }

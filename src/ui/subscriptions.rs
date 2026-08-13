@@ -14,7 +14,7 @@ use crate::core::merger::{merge, MergeContext};
 use crate::core::models::Subscription;
 use crate::core::settings::save_subscriptions;
 use crate::ui::widgets::{
-    centered_rect, ConfirmPopup, FormAction, FormField, FieldKind, FormPopup, MessagePopup,
+    centered_rect, ConfirmPopup, FieldKind, FormAction, FormField, FormPopup, MessagePopup,
     SelectList,
 };
 use crate::ui::Page;
@@ -217,7 +217,10 @@ impl SubscriptionsPage {
             Err(e) => {
                 // 显示 MergeError 全文
                 let lines: Vec<String> = e.to_string().lines().map(String::from).collect();
-                self.popup = Some(SubPopup::Message(MessagePopup::new("合并失败".to_string(), lines)));
+                self.popup = Some(SubPopup::Message(MessagePopup::new(
+                    "合并失败".to_string(),
+                    lines,
+                )));
                 None
             }
         }
@@ -324,10 +327,7 @@ impl Page for SubscriptionsPage {
         let sig = Self::sig_of(st);
         if sig != self.sig {
             // 重建列表时按名称恢复选中（缓存更新等导致 sig 变化时避免选中跳回顶部）
-            let prev_name = st
-                .subs
-                .get(self.list.selected())
-                .map(|s| s.name.clone());
+            let prev_name = st.subs.get(self.list.selected()).map(|s| s.name.clone());
             self.sig = sig;
             self.list = Self::rebuild_list(st);
             if let Some(name) = prev_name {

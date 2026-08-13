@@ -137,7 +137,9 @@ pub async fn install() -> Result<Vec<String>, InstallError> {
     // h. 本地安装标记：安装成功后写入，供无特权启动检测识别（不因标记失败而中断安装）。
     match write_install_marker() {
         Ok(()) => logs.push("✓ 已写入本地安装标记（启动检测将识别为已安装）".to_string()),
-        Err(e) => logs.push(format!("⚠ 无法写入本地安装标记（系统侧组件已装好，不影响使用）：{e}")),
+        Err(e) => logs.push(format!(
+            "⚠ 无法写入本地安装标记（系统侧组件已装好，不影响使用）：{e}"
+        )),
     }
 
     // g. 询问式 enable：不自动执行，仅给出提示（UI 侧可在安装成功后询问用户）
@@ -315,8 +317,7 @@ pub fn session_has_admin_group() -> bool {
         .args(["-nG"])
         .output()
         .map(|o| {
-            o.status.success()
-                && groups_contain(&String::from_utf8_lossy(&o.stdout), ADMIN_GROUP)
+            o.status.success() && groups_contain(&String::from_utf8_lossy(&o.stdout), ADMIN_GROUP)
         })
         .unwrap_or(false)
 }
@@ -446,7 +447,10 @@ mod tests {
     #[test]
     fn is_installed_false_when_nothing_present() {
         let dir = test_dir("nothing");
-        assert!(!is_installed_with(&dir.join("mihomo-apply"), &dir.join("installed.marker")));
+        assert!(!is_installed_with(
+            &dir.join("mihomo-apply"),
+            &dir.join("installed.marker")
+        ));
         cleanup_dir(&dir);
     }
 
@@ -480,7 +484,10 @@ mod tests {
                 "标记内容应含版本号: {content}"
             );
             // 无提权脚本时，仅凭标记即判定已安装
-            assert!(is_installed_with(Path::new("/nonexistent/mihomo-apply"), &marker));
+            assert!(is_installed_with(
+                Path::new("/nonexistent/mihomo-apply"),
+                &marker
+            ));
         });
     }
 

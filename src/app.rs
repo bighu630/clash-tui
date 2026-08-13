@@ -17,11 +17,11 @@ use ratatui::{CompletedFrame, Terminal};
 use tokio::sync::mpsc;
 
 use crate::core::apply::{apply_config, validate_config, ApplyOutcome};
+use crate::core::client::GROUP_DELAY_TIMEOUT_MS;
 use crate::core::client::{
     Client, ConnInfo, ConnSnapshot, GroupInfo, LogEntry, LogLevel, MemoryFrame, RuntimeConfig,
     TrafficFrame,
 };
-use crate::core::client::GROUP_DELAY_TIMEOUT_MS;
 use crate::core::exit_ip::{self, ExitInfo, ProxyPorts};
 use crate::core::models::{NetworkSettings, Overrides, Subscription, SubscriptionCache};
 use crate::core::settings::{
@@ -138,10 +138,16 @@ pub enum UiCommand {
     /// 拉取运行时策略组（GET /proxies）
     RefreshGroups,
     /// 切换 select 组当前节点（PUT /proxies）
-    SwitchGroup { group: String, target: String },
+    SwitchGroup {
+        group: String,
+        target: String,
+    },
     /// 整组延迟测试（GET /group/{name}/delay）；silent=true 为弹窗内测速
     /// （结果只进 AppState.group_delays 供弹窗展示/排序，不弹结果弹窗）
-    TestGroupDelay { group: String, silent: bool },
+    TestGroupDelay {
+        group: String,
+        silent: bool,
+    },
     /// 日志页切换显示级别：主循环转发给 logs 后台任务触发 ?level= 重连。
     SetLogLevel(LogLevel),
 }
@@ -224,7 +230,9 @@ fn notice_ttl(text: &str) -> Duration {
 /// （锚定"时间最长的一条"，不管新旧）；空组返回 None。
 /// 调用方以 `deadline > now` 判定整组是否可见，到期整组同时消失。
 /// 入参为通知引用迭代器（&[(Instant, String)] / &VecDeque 均可）。
-fn notice_deadline<'a>(notices: impl IntoIterator<Item = &'a (Instant, String)>) -> Option<Instant> {
+fn notice_deadline<'a>(
+    notices: impl IntoIterator<Item = &'a (Instant, String)>,
+) -> Option<Instant> {
     notices
         .into_iter()
         .map(|(at, text)| {
@@ -343,7 +351,9 @@ where
             let block = Block::new()
                 .title(Span::styled(
                     " mihomo-tui ",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ))
                 .borders(Borders::ALL);
             f.render_widget(block, top);
@@ -355,7 +365,9 @@ where
                 Tabs::new(tabs.iter().map(|t| Line::raw(t.clone())))
                     .select(current)
                     .highlight_style(
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     )
                     .divider(" │ "),
                 tabs_area,
@@ -370,7 +382,13 @@ where
             // 通知最多占到底栏高度-1 行（最后一行是按键提示）；终端过小时直接截断，
             // 避免 y 超出 buffer 导致 ratatui Buffer::index_of panic
             let (notice_rows, hint_y) = bottom_bar_rows(bottom, area.height);
-            for (i, (_, text)) in st.notices.iter().rev().take(notice_rows as usize).enumerate() {
+            for (i, (_, text)) in st
+                .notices
+                .iter()
+                .rev()
+                .take(notice_rows as usize)
+                .enumerate()
+            {
                 let style = if text.starts_with("[✓]") {
                     Style::default().fg(Color::Green)
                 } else if text.starts_with("[!]") {
@@ -384,8 +402,10 @@ where
                 );
             }
             if let Some(hint_y) = hint_y {
-                KeyHints { hints: hints.clone() }
-                    .render(f, Rect::new(bottom.x, hint_y, bottom.width, 1));
+                KeyHints {
+                    hints: hints.clone(),
+                }
+                .render(f, Rect::new(bottom.x, hint_y, bottom.width, 1));
             }
 
             // 全局弹窗置顶
@@ -678,7 +698,8 @@ where
             UiEvent::ApplyDone(res) => match res {
                 Ok(outcome) => {
                     // 网络配置已变：刷新代理端口快照并立即重测一次出口 IP
-                    *self.exit_ports.lock().unwrap() = ProxyPorts::from_settings(&self.state.settings);
+                    *self.exit_ports.lock().unwrap() =
+                        ProxyPorts::from_settings(&self.state.settings);
                     let _ = self.exit_trigger.send(());
                     let stdout = outcome.stdout.trim().to_string();
                     let stderr = outcome.stderr.trim().to_string();
@@ -716,9 +737,9 @@ where
                             cache.rules.len()
                         )),
                         // 拉取期间订阅被删除：不显示空名通知，明确提示
-                        None => self.state.notice(
-                            "[!] 订阅拉取完成，但该订阅已被删除（缓存已丢弃）".to_string(),
-                        ),
+                        None => self
+                            .state
+                            .notice("[!] 订阅拉取完成，但该订阅已被删除（缓存已丢弃）".to_string()),
                     }
                     // 订阅内容变化可能影响规则组：当前在规则组页则刷新
                     if self.current == 2 {
@@ -795,7 +816,11 @@ where
                 // API 连接失败已有独立通知（set_api_ok），此处静默清空降级到订阅缓存展示
                 Err(_) => self.state.proxy_groups.clear(),
             },
-            UiEvent::GroupSwitched { group, target, result } => match result {
+            UiEvent::GroupSwitched {
+                group,
+                target,
+                result,
+            } => match result {
                 Ok(()) => {
                     self.state
                         .notice(format!("[✓] 已切换「{group}」→「{target}」"));
@@ -803,7 +828,11 @@ where
                 }
                 Err(e) => self.popup_error("切换失败", e),
             },
-            UiEvent::GroupDelayDone { group, silent, result } => match result {
+            UiEvent::GroupDelayDone {
+                group,
+                silent,
+                result,
+            } => match result {
                 Ok(list) => {
                     // 弹窗内测速（silent）只更新缓存供弹窗展示/排序，不弹结果弹窗
                     self.state.group_delays.insert(group.clone(), list.clone());
@@ -824,20 +853,24 @@ where
 
     fn popup_error(&mut self, title: &str, msg: String) {
         self.result_popup = Some(MessagePopup::new(title.into(), vec![msg.clone()]));
-        self.state.notice(format!("[✗] {}", msg.lines().next().unwrap_or("")));
+        self.state
+            .notice(format!("[✗] {}", msg.lines().next().unwrap_or("")));
     }
 
     /// 分发 UiCommand：spawn 异步任务。
     fn spawn_command(&mut self, cmd: UiCommand) {
         let ui_tx = self.ui_tx.clone();
-        let client = self.client.clone();        match cmd {
-            UiCommand::PatchConfigs { patch, saved, label } => {
+        let client = self.client.clone();
+        match cmd {
+            UiCommand::PatchConfigs {
+                patch,
+                saved,
+                label,
+            } => {
                 tokio::spawn(async move {
-                    let res = tokio::time::timeout(
-                        Duration::from_secs(5),
-                        client.patch_configs(patch),
-                    )
-                    .await;
+                    let res =
+                        tokio::time::timeout(Duration::from_secs(5), client.patch_configs(patch))
+                            .await;
                     let res = match res {
                         Ok(Ok(())) => Ok(()),
                         Ok(Err(e)) => Err(e.to_string()),
@@ -919,7 +952,11 @@ where
                         .switch_group(&group, &target)
                         .await
                         .map_err(|e| e.to_string());
-                    let _ = ui_tx.send(UiEvent::GroupSwitched { group, target, result: res });
+                    let _ = ui_tx.send(UiEvent::GroupSwitched {
+                        group,
+                        target,
+                        result: res,
+                    });
                 });
             }
             UiCommand::TestGroupDelay { group, silent } => {
@@ -929,7 +966,11 @@ where
                         .test_group_delay(&group)
                         .await
                         .map_err(|e| e.to_string());
-                    let _ = ui_tx.send(UiEvent::GroupDelayDone { group, silent, result: res });
+                    let _ = ui_tx.send(UiEvent::GroupDelayDone {
+                        group,
+                        silent,
+                        result: res,
+                    });
                 });
             }
             UiCommand::InstallSetup => {
@@ -953,19 +994,17 @@ where
         let _ = crossterm::execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen);
 
         let result = match task {
-            InteractiveTask::Apply(yaml) => apply_config(&yaml, false)
-                .await
-                .map_err(|e| e.to_string()),
-            InteractiveTask::Install => {
-                crate::service::installer::install()
-                    .await
-                    .map(|lines| ApplyOutcome {
-                        success: true,
-                        stdout: lines.join("\n"),
-                        stderr: String::new(),
-                    })
-                    .map_err(|e| e.to_string())
+            InteractiveTask::Apply(yaml) => {
+                apply_config(&yaml, false).await.map_err(|e| e.to_string())
             }
+            InteractiveTask::Install => crate::service::installer::install()
+                .await
+                .map(|lines| ApplyOutcome {
+                    success: true,
+                    stdout: lines.join("\n"),
+                    stderr: String::new(),
+                })
+                .map_err(|e| e.to_string()),
         };
 
         crossterm::terminal::enable_raw_mode()?;
@@ -992,7 +1031,8 @@ where
             }
             Err(e) => {
                 self.result_popup = Some(MessagePopup::new("操作失败".into(), vec![e.clone()]));
-                self.state.notice(format!("[✗] {}", e.lines().next().unwrap_or("")));
+                self.state
+                    .notice(format!("[✗] {}", e.lines().next().unwrap_or("")));
             }
         }
         Ok(())
@@ -1111,7 +1151,9 @@ fn migrate_legacy_groups(overrides: &mut Overrides) -> Option<String> {
     }
     let n = overrides.groups.len();
     overrides.groups.clear();
-    Some(format!("[!] 已清空 {n} 个旧版自定义规则组（规则组页现只读展示订阅内容）"))
+    Some(format!(
+        "[!] 已清空 {n} 个旧版自定义规则组（规则组页现只读展示订阅内容）"
+    ))
 }
 
 fn now_rfc3339() -> String {
@@ -1124,7 +1166,8 @@ fn sort_connections(conns: &mut [ConnInfo]) {
     conns.sort_by(|a, b| {
         let ka = a.start.map(|t| t.timestamp()).unwrap_or(i64::MIN);
         let kb = b.start.map(|t| t.timestamp()).unwrap_or(i64::MIN);
-        kb.cmp(&ka).then_with(|| (b.upload + b.download).cmp(&(a.upload + a.download)))
+        kb.cmp(&ka)
+            .then_with(|| (b.upload + b.download).cmp(&(a.upload + a.download)))
     });
 }
 
@@ -1381,11 +1424,18 @@ mod tests {
                 ])
                 .areas(area);
                 let (notice_rows, hint_y) = bottom_bar_rows(bottom, h);
-                assert!(notice_rows <= h, "n={n} h={h}: notice_rows {notice_rows} > 高度");
+                assert!(
+                    notice_rows <= h,
+                    "n={n} h={h}: notice_rows {notice_rows} > 高度"
+                );
                 match hint_y {
                     Some(y) => {
                         assert!(y < h, "n={n} h={h}: hint_y {y} >= 高度");
-                        assert!(y >= bottom.y, "n={n} h={h}: hint_y {y} < bottom.y {}", bottom.y);
+                        assert!(
+                            y >= bottom.y,
+                            "n={n} h={h}: hint_y {y} < bottom.y {}",
+                            bottom.y
+                        );
                         assert_eq!(
                             y - bottom.y,
                             notice_rows,
@@ -1498,7 +1548,10 @@ mod tests {
     }
 
     /// 同 `test_app`，但可指定终端宽度（用于连接框可见/隐藏两条布局路径）。
-    fn test_app_with_width(w: u16, h: u16) -> (App<TestBackend>, mpsc::UnboundedReceiver<UiCommand>) {
+    fn test_app_with_width(
+        w: u16,
+        h: u16,
+    ) -> (App<TestBackend>, mpsc::UnboundedReceiver<UiCommand>) {
         let state = AppState {
             settings: NetworkSettings::default(),
             subs: Vec::new(),
@@ -1609,8 +1662,14 @@ mod tests {
         let text = buffer_text(&mut app);
         assert!(text.contains("已保存到配置"), "弹窗应含已保存提示: {text}");
         // 换行可能截断短语（如“下次应用配置时生/效）”），断言用不跨行的片段
-        assert!(text.contains("下次应用配置"), "弹窗应含下次应用配置生效提示: {text}");
-        assert!(!text.contains("重启后生效"), "文案不应再误导为裸重启即生效: {text}");
+        assert!(
+            text.contains("下次应用配置"),
+            "弹窗应含下次应用配置生效提示: {text}"
+        );
+        assert!(
+            !text.contains("重启后生效"),
+            "文案不应再误导为裸重启即生效: {text}"
+        );
         // 失败后立即拉真实运行态
         assert!(
             matches!(rx.try_recv(), Ok(UiCommand::ReloadConfigs)),
@@ -1629,7 +1688,10 @@ mod tests {
         });
         assert_eq!(app.result_popup.as_ref().unwrap().title(), "操作失败");
         let text = buffer_text(&mut app);
-        assert!(text.contains("且设置未能保存"), "弹窗应含未保存提示: {text}");
+        assert!(
+            text.contains("且设置未能保存"),
+            "弹窗应含未保存提示: {text}"
+        );
         assert!(
             matches!(rx.try_recv(), Ok(UiCommand::ReloadConfigs)),
             "失败后应立即发送 ReloadConfigs"
@@ -1641,13 +1703,15 @@ mod tests {
     fn buffer_text(app: &mut App<TestBackend>) -> String {
         let frame = app.draw().expect("draw 应成功");
         (0..frame.buffer.area.height)
-            .flat_map(|y| (0..frame.buffer.area.width).map(move |x| {
-                frame
-                    .buffer
-                    .cell((x, y))
-                    .map(|c| c.symbol().to_string())
-                    .unwrap_or_default()
-            }))
+            .flat_map(|y| {
+                (0..frame.buffer.area.width).map(move |x| {
+                    frame
+                        .buffer
+                        .cell((x, y))
+                        .map(|c| c.symbol().to_string())
+                        .unwrap_or_default()
+                })
+            })
             .collect::<String>()
             .chars()
             .filter(|c| !c.is_whitespace())
@@ -1668,23 +1732,35 @@ mod tests {
         );
         assert!(app.state.exit_ip.is_none());
         // 恢复：陈旧弹窗关闭 + 通知恢复
-        app.on_ui_event(UiEvent::ExitIp(Ok(ExitInfo { ip: "1.2.3.4".into(), country: None })));
+        app.on_ui_event(UiEvent::ExitIp(Ok(ExitInfo {
+            ip: "1.2.3.4".into(),
+            country: None,
+        })));
         assert!(app.result_popup.is_none(), "恢复成功后应关闭陈旧错误弹窗");
         assert_eq!(
             app.state.exit_ip.as_ref().map(|e| e.ip.as_str()),
             Some("1.2.3.4")
         );
         assert_eq!(
-            app.state.exit_ip.as_ref().and_then(|e| e.country.as_deref()),
+            app.state
+                .exit_ip
+                .as_ref()
+                .and_then(|e| e.country.as_deref()),
             None
         );
         assert!(
-            app.state.notices.iter().any(|(_, t)| t.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
+            app.state
+                .notices
+                .iter()
+                .any(|(_, t)| t.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
             "应通知恢复: {:?}",
             app.state.notices
         );
         // 再次成功：无失败历史，静默更新不重复通知
-        app.on_ui_event(UiEvent::ExitIp(Ok(ExitInfo { ip: "5.6.7.8".into(), country: None })));
+        app.on_ui_event(UiEvent::ExitIp(Ok(ExitInfo {
+            ip: "5.6.7.8".into(),
+            country: None,
+        })));
         assert_eq!(
             app.state.exit_ip.as_ref().map(|e| e.ip.as_str()),
             Some("5.6.7.8")
@@ -1704,11 +1780,11 @@ mod tests {
         assert!(app.exit_ip_was_error, "失败应置位 exit_ip_was_error");
         // 用户随后打开了另一个弹窗
         app.result_popup = Some(MessagePopup::new("应用结果".into(), vec!["x".into()]));
-        app.on_ui_event(UiEvent::ExitIp(Ok(ExitInfo { ip: "1.2.3.4".into(), country: None })));
-        assert!(
-            app.result_popup.is_some(),
-            "非出口 IP 弹窗不应被关闭"
-        );
+        app.on_ui_event(UiEvent::ExitIp(Ok(ExitInfo {
+            ip: "1.2.3.4".into(),
+            country: None,
+        })));
+        assert!(app.result_popup.is_some(), "非出口 IP 弹窗不应被关闭");
         assert_eq!(
             app.result_popup.as_ref().unwrap().title(),
             "应用结果",
@@ -1716,7 +1792,10 @@ mod tests {
         );
         assert!(!app.exit_ip_was_error, "恢复后应清除失败标记");
         assert!(
-            app.state.notices.iter().any(|(_, t)| t.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
+            app.state
+                .notices
+                .iter()
+                .any(|(_, t)| t.contains("[✓] 出口 IP 恢复: 1.2.3.4")),
             "应通知恢复: {:?}",
             app.state.notices
         );
@@ -1785,7 +1864,10 @@ mod tests {
             result: Ok(()),
         });
         assert!(
-            app.state.notices.iter().any(|n| n.1.contains("已切换「手动选择」→「节点A」")),
+            app.state
+                .notices
+                .iter()
+                .any(|n| n.1.contains("已切换「手动选择」→「节点A」")),
             "应通知切换成功: {:?}",
             app.state.notices
         );
@@ -1809,10 +1891,7 @@ mod tests {
     #[test]
     fn group_delay_done_popup_and_refresh() {
         let (mut app, mut rx) = test_app(24);
-        let list = vec![
-            ("节点B".to_string(), 8000),
-            ("节点A".to_string(), 123),
-        ];
+        let list = vec![("节点B".to_string(), 8000), ("节点A".to_string(), 123)];
         app.on_ui_event(UiEvent::GroupDelayDone {
             group: "自动选择".into(),
             silent: false,
@@ -1820,7 +1899,11 @@ mod tests {
         });
         let popup = app.result_popup.as_ref().expect("应有结果弹窗");
         assert_eq!(popup.title(), "延迟测试：自动选择");
-        assert_eq!(app.state.group_delays.get("自动选择"), Some(&list), "结果应缓存");
+        assert_eq!(
+            app.state.group_delays.get("自动选择"),
+            Some(&list),
+            "结果应缓存"
+        );
         let _ = rx.try_recv().expect("应发送刷新命令");
     }
 
@@ -1835,9 +1918,16 @@ mod tests {
             result: Ok(list.clone()),
         });
         assert!(app.result_popup.is_none(), "静默测速不应弹结果弹窗");
-        assert_eq!(app.state.group_delays.get("手动选择"), Some(&list), "结果应入缓存");
+        assert_eq!(
+            app.state.group_delays.get("手动选择"),
+            Some(&list),
+            "结果应入缓存"
+        );
         assert!(
-            app.state.notices.iter().any(|n| n.1.contains("延迟测试完成")),
+            app.state
+                .notices
+                .iter()
+                .any(|n| n.1.contains("延迟测试完成")),
             "应有完成通知: {:?}",
             app.state.notices
         );
@@ -1855,7 +1945,11 @@ mod tests {
         ]);
         assert_eq!(
             lines,
-            vec!["A  123ms".to_string(), "C  超时".to_string(), "B  超时".to_string()],
+            vec![
+                "A  123ms".to_string(),
+                "C  超时".to_string(),
+                "B  超时".to_string()
+            ],
             "升序 + 超时标记: {lines:?}"
         );
     }
@@ -1929,11 +2023,8 @@ mod tests {
         assert_eq!(d, now + NOTICE_ERR_TTL);
         // 旧成功 + 新错误：锚定新错误的 10s
         let old = now - Duration::from_secs(3);
-        let d = notice_deadline(&[
-            (old, "[✓] old".to_string()),
-            (now, "[✗] new".to_string()),
-        ])
-        .unwrap();
+        let d =
+            notice_deadline(&[(old, "[✓] old".to_string()), (now, "[✗] new".to_string())]).unwrap();
         assert_eq!(d, now + NOTICE_ERR_TTL);
         // 旧错误 + 新成功：仍锚定错误（到达早，但时长最长）
         let old_err = now - Duration::from_secs(2);
@@ -2038,12 +2129,18 @@ mod tests {
             app.switch_page(5);
             // Down×13：focused 0 → 13（dns.listen，Text 字段）
             for _ in 0..13 {
-                assert!(app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)).is_none());
+                assert!(app
+                    .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                    .is_none());
             }
             // Enter 进入编辑（Enter/Down 不在全局 match，走 _ 兜底到页面）
-            assert!(app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).is_none());
+            assert!(app
+                .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+                .is_none());
             // 编辑模式：x 是输入字符，不触发任何全局键
-            assert!(app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)).is_none());
+            assert!(app
+                .handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+                .is_none());
             // Esc 必须退出编辑模式而非退出程序
             assert!(!matches!(
                 app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -2053,15 +2150,14 @@ mod tests {
             assert!(!app.quit, "Esc 不应退出程序");
             // 已退出编辑：再按 x 不再插入；Ctrl+S（经 app.handle_key）落盘验证
             // 值只含编辑期插入的一个 x（"0.0.0.0:1053x"）
-            assert!(app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)).is_none());
+            assert!(app
+                .handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+                .is_none());
             assert!(app
                 .handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
                 .is_none());
             let loaded = crate::core::settings::load_settings().unwrap();
-            assert_eq!(
-                loaded.dns.listen, "0.0.0.0:1053x",
-                "Esc 后 x 不应再插入"
-            );
+            assert_eq!(loaded.dns.listen, "0.0.0.0:1053x", "Esc 后 x 不应再插入");
         });
     }
 
@@ -2073,15 +2169,21 @@ mod tests {
         app.switch_page(5);
         assert_eq!(app.current, 5);
         // Tab：设置页 → 仪表盘（index 0）
-        assert!(app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)).is_none());
+        assert!(app
+            .handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .is_none());
         assert_eq!(app.current, 0, "设置页导航态 Tab 应全局切页");
         // 回到设置页，Left：→ 日志（index 4）
         app.switch_page(5);
-        assert!(app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)).is_none());
+        assert!(app
+            .handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .is_none());
         assert_eq!(app.current, 4, "设置页导航态 Left 应全局切页");
         // 回到设置页，'3'：→ 规则组（index 2）
         app.switch_page(5);
-        assert!(app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)).is_none());
+        assert!(app
+            .handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE))
+            .is_none());
         assert_eq!(app.current, 2, "设置页导航态数字键应全局切页");
     }
 
@@ -2137,13 +2239,19 @@ mod tests {
     fn settings_status_line_shows_editing_marker() {
         let (mut app, _rx) = test_app_with_width(120, 24);
         app.switch_page(5);
-        assert!(!buffer_text(&mut app).contains("编辑中"), "导航态不应显示编辑中");
+        assert!(
+            !buffer_text(&mut app).contains("编辑中"),
+            "导航态不应显示编辑中"
+        );
         // Down×3 聚焦 port（Text/Number 字段）再 Enter 进编辑态
         for _ in 0..3 {
             app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(buffer_text(&mut app).contains("编辑中"), "编辑态状态行应含 [编辑中] 标记");
+        assert!(
+            buffer_text(&mut app).contains("编辑中"),
+            "编辑态状态行应含 [编辑中] 标记"
+        );
     }
 
     /// 日志页 handle_key('e') 发 SetLogLevel 命令并循环级别

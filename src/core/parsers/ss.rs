@@ -7,7 +7,9 @@ use crate::core::parsers::{b64_decode, err, parse_query, pct_decode, split_host_
 
 /// 解析 ss 链接，返回 (名称, yaml 映射)。名称来自 fragment（#）。
 pub fn parse(line: &str) -> Result<(String, Mapping), ParseError> {
-    let body = line.strip_prefix("ss://").ok_or_else(|| err("不是 ss 链接"))?;
+    let body = line
+        .strip_prefix("ss://")
+        .ok_or_else(|| err("不是 ss 链接"))?;
     let (body, frag) = match body.split_once('#') {
         Some((b, f)) => (b, Some(f)),
         None => (body, None),
@@ -18,7 +20,8 @@ pub fn parse(line: &str) -> Result<(String, Mapping), ParseError> {
         None => (body, None),
     };
 
-    let (method, password, server, port) = if let Some((userinfo, hostport)) = main.split_once('@') {
+    let (method, password, server, port) = if let Some((userinfo, hostport)) = main.split_once('@')
+    {
         // 新格式：userinfo 为 base64(method:password)
         let (method, password) = decode_userinfo(userinfo)?;
         let (server, port) = split_host_port(hostport)?;
@@ -47,8 +50,14 @@ pub fn parse(line: &str) -> Result<(String, Mapping), ParseError> {
         .map(|(_, v)| v)
     {
         if let Some((name, opts)) = plugin.split_once(';') {
-            m.insert(Value::String("plugin".into()), Value::String(name.to_string()));
-            m.insert(Value::String("plugin-opts".into()), Value::String(opts.to_string()));
+            m.insert(
+                Value::String("plugin".into()),
+                Value::String(name.to_string()),
+            );
+            m.insert(
+                Value::String("plugin-opts".into()),
+                Value::String(opts.to_string()),
+            );
         } else if !plugin.is_empty() {
             m.insert(Value::String("plugin".into()), Value::String(plugin));
         }
@@ -77,7 +86,10 @@ mod tests {
 
     #[test]
     fn new_format() {
-        let line = format!("ss://{}@1.2.3.4:8388#SS节点", base64_encode("aes-128-gcm:pass123"));
+        let line = format!(
+            "ss://{}@1.2.3.4:8388#SS节点",
+            base64_encode("aes-128-gcm:pass123")
+        );
         let (name, m) = parse(&line).unwrap();
         assert_eq!(name, "SS节点");
         assert_eq!(s(&m, "type"), "ss");

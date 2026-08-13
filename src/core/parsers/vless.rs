@@ -124,7 +124,9 @@ mod tests {
         let line = format!("vless://{UUID}@1.2.3.4:443?security=none&type=tcp");
         let (_name, m) = parse(&line).unwrap();
         assert!(!b(&m, "tls"));
-        assert!(m.get(serde_yaml::Value::String("servername".into())).is_none());
+        assert!(m
+            .get(serde_yaml::Value::String("servername".into()))
+            .is_none());
         assert_eq!(s(&m, "network"), "tcp");
     }
 

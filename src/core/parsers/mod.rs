@@ -67,7 +67,9 @@ pub(crate) fn err(msg: impl Into<String>) -> ParseError {
 pub(crate) fn split_host_port(s: &str) -> Result<(String, u16), ParseError> {
     let s = s.trim();
     let (host, port) = if let Some(rest) = s.strip_prefix('[') {
-        let end = rest.find(']').ok_or_else(|| err(format!("无效地址: {s}")))?;
+        let end = rest
+            .find(']')
+            .ok_or_else(|| err(format!("无效地址: {s}")))?;
         let port = rest[end + 1..]
             .strip_prefix(':')
             .ok_or_else(|| err(format!("无效地址: {s}")))?;
@@ -88,7 +90,10 @@ pub(crate) fn parse_query(s: Option<&str>) -> Vec<(String, String)> {
     s.map(|q| {
         q.split('&')
             .filter(|p| !p.is_empty())
-            .filter_map(|p| p.split_once('=').map(|(k, v)| (pct_decode(k), pct_decode(v))))
+            .filter_map(|p| {
+                p.split_once('=')
+                    .map(|(k, v)| (pct_decode(k), pct_decode(v)))
+            })
             .collect()
     })
     .unwrap_or_default()
@@ -108,7 +113,10 @@ pub(crate) fn insert_ws_opts(m: &mut Mapping, network: &str, path: &str, host: &
     }
     if !host.is_empty() {
         let mut headers = Mapping::new();
-        headers.insert(Value::String("Host".into()), Value::String(host.to_string()));
+        headers.insert(
+            Value::String("Host".into()),
+            Value::String(host.to_string()),
+        );
         opts.insert(Value::String("headers".into()), Value::Mapping(headers));
     }
     m.insert(Value::String("ws-opts".into()), Value::Mapping(opts));
@@ -143,7 +151,11 @@ pub(crate) mod testutil {
             .as_sequence()
             .unwrap_or_else(|| panic!("{k} 不是序列"))
             .iter()
-            .map(|x| x.as_str().unwrap_or_else(|| panic!("{k} 元素非字符串")).to_string())
+            .map(|x| {
+                x.as_str()
+                    .unwrap_or_else(|| panic!("{k} 元素非字符串"))
+                    .to_string()
+            })
             .collect()
     }
 
@@ -157,7 +169,8 @@ pub(crate) mod testutil {
                 .get(Value::String((*k).to_string()))
                 .unwrap_or_else(|| panic!("missing nested key: {}", path[..=i + 1].join(".")));
         }
-        cur.as_mapping().unwrap_or_else(|| panic!("{} 不是 mapping", path.join(".")))
+        cur.as_mapping()
+            .unwrap_or_else(|| panic!("{} 不是 mapping", path.join(".")))
     }
 
     pub fn base64_encode(s: &str) -> String {

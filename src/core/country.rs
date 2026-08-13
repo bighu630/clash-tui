@@ -185,7 +185,10 @@ mod tests {
     fn display_trims_empty_en() {
         assert_eq!(country_display(None, Some("   ")), None);
         assert_eq!(country_display(None, Some("")), None);
-        assert_eq!(country_display(None, Some(" United States ")), Some("United States".to_string()));
+        assert_eq!(
+            country_display(None, Some(" United States ")),
+            Some("United States".to_string())
+        );
     }
 
     #[test]

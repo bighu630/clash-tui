@@ -28,7 +28,10 @@ pub enum FetchError {
 }
 
 /// 拉取订阅内容。直连失败且 via_proxy_port=Some(p) 时经 http://127.0.0.1:p 代理重试。
-pub async fn fetch_subscription(url: &str, via_proxy_port: Option<u16>) -> Result<String, FetchError> {
+pub async fn fetch_subscription(
+    url: &str,
+    via_proxy_port: Option<u16>,
+) -> Result<String, FetchError> {
     let client = build_client(None)?;
     match fetch_once(&client, url).await {
         Ok(body) => Ok(body),
@@ -92,7 +95,14 @@ pub fn detect_kind(content: &str) -> SubscriptionKind {
     // 整体 base64 包裹？解码后再看
     if let Some(decoded) = parsers::b64_decode(t) {
         let s = String::from_utf8_lossy(&decoded);
-        for key in ["proxies:", "proxy-groups:", "port:", "mixed-port:", "dns:", "tun:"] {
+        for key in [
+            "proxies:",
+            "proxy-groups:",
+            "port:",
+            "mixed-port:",
+            "dns:",
+            "tun:",
+        ] {
             if s.contains(key) {
                 return SubscriptionKind::Yaml;
             }
@@ -127,7 +137,9 @@ fn parse_yaml(content: &str) -> Result<SubscriptionCache, ParseError> {
             return Err(ParseError::Message("暂不支持 proxy-providers 订阅".into()));
         }
         Some(_) => {
-            return Err(ParseError::Message("订阅中 proxies 格式无效（应为节点列表）".into()));
+            return Err(ParseError::Message(
+                "订阅中 proxies 格式无效（应为节点列表）".into(),
+            ));
         }
         None if has_provider => {
             return Err(ParseError::Message("暂不支持 proxy-providers 订阅".into()));
@@ -225,10 +237,7 @@ pub fn parse_share_link(line: &str) -> Result<ProxyNode, ParseError> {
         dispatch(line).ok_or_else(|| ParseError::Message("不支持的链接格式".into()))?;
     let (name, mut mapping) = parse(line)?;
     let name = if name.is_empty() {
-        format!(
-            "未命名-{}",
-            UNNAMED_COUNTER.fetch_add(1, Ordering::Relaxed)
-        )
+        format!("未命名-{}", UNNAMED_COUNTER.fetch_add(1, Ordering::Relaxed))
     } else {
         name
     };
@@ -251,7 +260,11 @@ fn dispatch(line: &str) -> Option<(&'static str, ParserFn)> {
         ("trojan://", "trojan", parsers::trojan::parse as ParserFn),
         ("ssr://", "ssr", parsers::ssr::parse as ParserFn),
         ("ss://", "ss", parsers::ss::parse as ParserFn),
-        ("hysteria2://", "hysteria2", parsers::hysteria2::parse as ParserFn),
+        (
+            "hysteria2://",
+            "hysteria2",
+            parsers::hysteria2::parse as ParserFn,
+        ),
         ("hy2://", "hysteria2", parsers::hysteria2::parse as ParserFn),
         ("tuic://", "tuic", parsers::tuic::parse as ParserFn),
     ];
@@ -272,8 +285,14 @@ mod tests {
     fn detect_plain_yaml() {
         let yaml = "proxies:\n  - name: a\n    type: ss\n";
         assert!(matches!(detect_kind(yaml), SubscriptionKind::Yaml));
-        assert!(matches!(detect_kind("proxy-groups: []\n"), SubscriptionKind::Yaml));
-        assert!(matches!(detect_kind("{port: 7890}"), SubscriptionKind::Yaml));
+        assert!(matches!(
+            detect_kind("proxy-groups: []\n"),
+            SubscriptionKind::Yaml
+        ));
+        assert!(matches!(
+            detect_kind("{port: 7890}"),
+            SubscriptionKind::Yaml
+        ));
     }
 
     #[test]
@@ -368,8 +387,7 @@ rules:
 
     #[test]
     fn parse_share_links_lines() {
-        let content =
-            "vless://uuid@1.2.3.4:443#A\n\n# 注释行\ntrojan://pass@1.2.3.4:443#B\n";
+        let content = "vless://uuid@1.2.3.4:443#A\n\n# 注释行\ntrojan://pass@1.2.3.4:443#B\n";
         let c = parse_subscription(content).unwrap();
         assert_eq!(c.proxies.len(), 2);
         assert_eq!(c.proxies[0].name, "A");
@@ -416,7 +434,8 @@ rules:
     #[test]
     fn plain_links_still_parse_after_decode_attempt() {
         // 明文行不会被误判为 base64（含 : 无法解码），回落到原文解析
-        let content = "ss://YWVzLTEyOC1nY206cGFzc0AxLjIuMy40OjgzODg=#P\ntrojan://pass@1.2.3.4:443#Q\n";
+        let content =
+            "ss://YWVzLTEyOC1nY206cGFzc0AxLjIuMy40OjgzODg=#P\ntrojan://pass@1.2.3.4:443#Q\n";
         let c = parse_subscription(content).unwrap();
         assert_eq!(c.proxies.len(), 2);
         assert_eq!(c.proxies[0].name, "P");
@@ -427,11 +446,8 @@ rules:
 
     #[test]
     fn share_link_name_priority_and_udp() {
-        let vmess_json = |ps: &str| {
-            format!(
-                r#"{{"add":"1.2.3.4","port":"443","id":"uuid-1","ps":"{ps}"}}"#
-            )
-        };
+        let vmess_json =
+            |ps: &str| format!(r#"{{"add":"1.2.3.4","port":"443","id":"uuid-1","ps":"{ps}"}}"#);
         // fragment 优先于协议内名称
         let n = parse_share_link(&format!(
             "vmess://{}#frag名",
@@ -443,8 +459,11 @@ rules:
         assert!(n.yaml.get("udp").and_then(|v| v.as_bool()) == Some(true));
 
         // 无 fragment → 协议内名称（vmess ps）
-        let n = parse_share_link(&format!("vmess://{}", base64_encode(&vmess_json("ps节点一"))))
-            .unwrap();
+        let n = parse_share_link(&format!(
+            "vmess://{}",
+            base64_encode(&vmess_json("ps节点一"))
+        ))
+        .unwrap();
         assert_eq!(n.name, "ps节点一");
         assert_eq!(n.kind, "vmess");
     }
@@ -468,7 +487,9 @@ rules:
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
             loop {
-                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
                 tokio::spawn(async move {
                     use tokio::io::{AsyncReadExt, AsyncWriteExt};
                     let mut buf = [0u8; 8192];

@@ -71,11 +71,17 @@ const ENDPOINTS: &[(&str, ParseMode)] = &[
     // 注意：免费版可能拒绝数据中心出口（403，经代理出口多为 VPS IP）——
     // 实测本机代理出口正常（200）；若遇 403 自动降级下一端点（cloudflare/ipwho.is），
     // 不影响功能，仅国家信息改由兜底端点提供。
-    ("http://ip-api.com/json/?fields=status,query,country,countryCode", ParseMode::IpApi),
+    (
+        "http://ip-api.com/json/?fields=status,query,country,countryCode",
+        ParseMode::IpApi,
+    ),
     // cloudflare trace 零成本（HTTPS）：ip= 与 loc= 同行返回
     ("https://www.cloudflare.com/cdn-cgi/trace", ParseMode::Trace),
     // ipwho.is HTTPS 免费 10k/月；fields 精简响应
-    ("https://ipwho.is/?fields=ip,success,country,country_code", ParseMode::Ipwho),
+    (
+        "https://ipwho.is/?fields=ip,success,country,country_code",
+        ParseMode::Ipwho,
+    ),
     ("https://api.ipify.org", ParseMode::Plain),
     ("https://ipv4.icanhazip.com", ParseMode::Plain),
     ("https://checkip.amazonaws.com", ParseMode::Plain),
@@ -168,7 +174,12 @@ pub fn classify_from_chain(
 
 /// reqwest 错误 → 分类（取 is_timeout/is_connect/is_builder + 完整 source 链）。
 fn classify_reqwest(e: &reqwest::Error) -> ExitErrorKind {
-    classify_from_chain(e.is_timeout(), e.is_connect(), e.is_builder(), &chain_string(e))
+    classify_from_chain(
+        e.is_timeout(),
+        e.is_connect(),
+        e.is_builder(),
+        &chain_string(e),
+    )
 }
 
 /// 失败分类 → 可读中文提示。
@@ -245,7 +256,11 @@ pub async fn fetch_exit_ip(ports: &ProxyPorts) -> Result<ExitInfo, String> {
     }
     // 所有端口均连接被拒：基本可断定 mihomo 未运行或端口配置不一致，
     // 给出明确的首行结论；其余情况保持端口级摘要聚合。
-    if !kinds.is_empty() && kinds.iter().all(|k| matches!(k, ExitErrorKind::ConnectRefused)) {
+    if !kinds.is_empty()
+        && kinds
+            .iter()
+            .all(|k| matches!(k, ExitErrorKind::ConnectRefused))
+    {
         Err(format!(
             "出口 IP 获取失败: 代理端口全部连接被拒（mihomo 未运行或端口配置不一致，检查 systemctl status mihomo）; {}",
             summaries.join("; ")
@@ -305,7 +320,12 @@ async fn fetch_one(
         ParseMode::Ipwho => parse_ipwho(&text),
         ParseMode::Ipip => parse_ipip(&text).map(|ip| ExitInfo { ip, country: None }),
     }
-    .ok_or_else(|| (ExitErrorKind::BadBody, format!("{url} 内容不含有效 IP/国家信息")))?;
+    .ok_or_else(|| {
+        (
+            ExitErrorKind::BadBody,
+            format!("{url} 内容不含有效 IP/国家信息"),
+        )
+    })?;
     Ok(info)
 }
 
@@ -328,9 +348,11 @@ pub fn parse_trace(text: &str) -> Option<ExitInfo> {
     let ip = text
         .lines()
         .find_map(|line| line.strip_prefix("ip=").and_then(parse_plain))?;
-    let code = text
-        .lines()
-        .find_map(|line| line.strip_prefix("loc=").map(str::trim).filter(|v| !v.is_empty()));
+    let code = text.lines().find_map(|line| {
+        line.strip_prefix("loc=")
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    });
     Some(ExitInfo {
         ip,
         country: country_display(code, None),
@@ -490,7 +512,10 @@ mod tests {
         assert_eq!(parse_plain("2001:db8::1"), Some("2001:db8::1".to_string()));
         assert_eq!(parse_plain("fe80::1%25"), Some("fe80::1%25".to_string()));
         assert_eq!(parse_plain("0.0.0.0"), Some("0.0.0.0".to_string()));
-        assert_eq!(parse_plain("255.255.255.255"), Some("255.255.255.255".to_string()));
+        assert_eq!(
+            parse_plain("255.255.255.255"),
+            Some("255.255.255.255".to_string())
+        );
     }
 
     #[test]
@@ -567,7 +592,10 @@ mod tests {
 
     #[test]
     fn parse_ip_api_error_status() {
-        assert_eq!(parse_ip_api(r#"{"status":"fail","message":"invalid query"}"#), None);
+        assert_eq!(
+            parse_ip_api(r#"{"status":"fail","message":"invalid query"}"#),
+            None
+        );
     }
 
     #[test]
@@ -580,14 +608,18 @@ mod tests {
 
     #[test]
     fn parse_ip_api_bad_ip_or_garbage() {
-        assert_eq!(parse_ip_api(r#"{"status":"success","query":"not-an-ip"}"#), None);
+        assert_eq!(
+            parse_ip_api(r#"{"status":"success","query":"not-an-ip"}"#),
+            None
+        );
         assert_eq!(parse_ip_api("not json at all"), None);
         assert_eq!(parse_ip_api(""), None);
     }
 
     #[test]
     fn parse_ipwho_ok() {
-        let text = r#"{"ip":"43.243.192.92","success":true,"country":"Hong Kong","country_code":"HK"}"#;
+        let text =
+            r#"{"ip":"43.243.192.92","success":true,"country":"Hong Kong","country_code":"HK"}"#;
         let info = parse_ipwho(text).expect("应解析成功");
         assert_eq!(info.ip, "43.243.192.92");
         assert_eq!(info.country.as_deref(), Some("中国香港"));
@@ -621,7 +653,11 @@ mod tests {
         };
         assert_eq!(
             ports.candidates(),
-            vec![(7892, Scheme::Http), (7890, Scheme::Http), (7891, Scheme::Socks5)]
+            vec![
+                (7892, Scheme::Http),
+                (7890, Scheme::Http),
+                (7891, Scheme::Socks5)
+            ]
         );
     }
 
@@ -632,7 +668,10 @@ mod tests {
             http: 7890,
             socks: 7891,
         };
-        assert_eq!(ports.candidates(), vec![(7890, Scheme::Http), (7891, Scheme::Socks5)]);
+        assert_eq!(
+            ports.candidates(),
+            vec![(7890, Scheme::Http), (7891, Scheme::Socks5)]
+        );
         let all_zero = ProxyPorts {
             mixed: 0,
             http: 0,
@@ -649,14 +688,20 @@ mod tests {
             http: 7890,
             socks: 7892,
         };
-        assert_eq!(ports.candidates(), vec![(7892, Scheme::Http), (7890, Scheme::Http)]);
+        assert_eq!(
+            ports.candidates(),
+            vec![(7892, Scheme::Http), (7890, Scheme::Http)]
+        );
         // socks == http：保留 http 的 HTTP
         let ports = ProxyPorts {
             mixed: 7892,
             http: 7890,
             socks: 7890,
         };
-        assert_eq!(ports.candidates(), vec![(7892, Scheme::Http), (7890, Scheme::Http)]);
+        assert_eq!(
+            ports.candidates(),
+            vec![(7892, Scheme::Http), (7890, Scheme::Http)]
+        );
         // 三端口相同：仅保留 mixed
         let ports = ProxyPorts {
             mixed: 7890,
@@ -674,7 +719,10 @@ mod tests {
             http: 0,
             socks: 0,
         };
-        assert_eq!(fetch_exit_ip(&ports).await, Err("没有可用的代理端口".to_string()));
+        assert_eq!(
+            fetch_exit_ip(&ports).await,
+            Err("没有可用的代理端口".to_string())
+        );
     }
 
     /// 可构造多级 source 链的测试错误。
@@ -779,12 +827,7 @@ mod tests {
             ExitErrorKind::Dns
         );
         assert_eq!(
-            classify_from_chain(
-                false,
-                false,
-                false,
-                "no address associated with hostname"
-            ),
+            classify_from_chain(false, false, false, "no address associated with hostname"),
             ExitErrorKind::Dns
         );
     }
@@ -801,7 +844,12 @@ mod tests {
             ExitErrorKind::ConnectFailed
         );
         assert_eq!(
-            classify_from_chain(false, false, false, "error trying to connect: tcp connect error"),
+            classify_from_chain(
+                false,
+                false,
+                false,
+                "error trying to connect: tcp connect error"
+            ),
             ExitErrorKind::ConnectFailed
         );
         // is_connect 标志本身即 ConnectFailed（即使文本无特征）
@@ -873,7 +921,9 @@ mod tests {
             http: 0,
             socks: 0,
         };
-        let err = fetch_exit_ip(&ports).await.expect_err("closed port must fail");
+        let err = fetch_exit_ip(&ports)
+            .await
+            .expect_err("closed port must fail");
         assert!(err.contains(&port.to_string()), "err: {err}");
         assert!(err.contains("连接被拒"), "err: {err}");
         assert!(err.contains("代理端口全部连接被拒"), "err: {err}");

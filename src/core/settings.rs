@@ -109,10 +109,7 @@ pub fn generate_secret() -> String {
 fn atomic_write(path: &Path, body: &[u8]) -> Result<(), SettingsError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir).map_err(|e| SettingsError::Io(e.to_string()))?;
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("file");
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let tmp = dir.join(format!(".{name}.tmp{}", std::process::id()));
     let result = (|| -> std::io::Result<()> {
         let mut f = fs::File::create(&tmp)?;

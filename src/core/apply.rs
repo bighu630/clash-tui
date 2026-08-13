@@ -69,7 +69,11 @@ pub async fn validate_config(yaml: &str) -> Result<(), ApplyError> {
                 Ok(())
             } else {
                 Err(ApplyError::ValidateFailed {
-                    stderr: if stderr.trim().is_empty() { stdout } else { stderr },
+                    stderr: if stderr.trim().is_empty() {
+                        stdout
+                    } else {
+                        stderr
+                    },
                 })
             }
         }
@@ -152,11 +156,13 @@ async fn run_capture(
     stdin_file: Option<&str>,
 ) -> Result<(std::process::ExitStatus, String, String), ApplyError> {
     let mut command = Command::new(cmd);
-    command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if let Some(path) = stdin_file {
         // 打开本地文件作为子进程 stdin（快速阻塞操作，可接受）
-        let file = std::fs::File::open(path)
-            .map_err(|e| ApplyError::Io(e.to_string()))?;
+        let file = std::fs::File::open(path).map_err(|e| ApplyError::Io(e.to_string()))?;
         command.stdin(Stdio::from(file));
     } else {
         command.stdin(Stdio::null());
@@ -173,11 +179,8 @@ async fn run_capture(
     };
     let mut stdout = child.stdout.take().expect("stdout 管道已请求");
     let mut stderr = child.stderr.take().expect("stderr 管道已请求");
-    let (out, err, status) = tokio::join!(
-        read_all(&mut stdout),
-        read_all(&mut stderr),
-        child.wait()
-    );
+    let (out, err, status) =
+        tokio::join!(read_all(&mut stdout), read_all(&mut stderr), child.wait());
     let status = status.map_err(|e| ApplyError::Io(e.to_string()))?;
     Ok((status, out, err))
 }
@@ -294,7 +297,9 @@ mod tests {
             NeedsPassword
         ));
         assert!(matches!(
-            classify_sudo_failure("alice is not in the sudoers file. This incident will be reported."),
+            classify_sudo_failure(
+                "alice is not in the sudoers file. This incident will be reported."
+            ),
             NotInSudoers
         ));
         assert!(matches!(

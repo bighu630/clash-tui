@@ -36,7 +36,9 @@ pub fn parse(line: &str) -> Result<(String, Mapping), ParseError> {
             m.insert(
                 Value::String("alpn".into()),
                 Value::Sequence(
-                    alpn.split(',').map(|s| Value::String(s.trim().to_string())).collect(),
+                    alpn.split(',')
+                        .map(|s| Value::String(s.trim().to_string()))
+                        .collect(),
                 ),
             );
         }

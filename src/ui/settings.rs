@@ -82,7 +82,12 @@ pub(crate) fn field_values(s: &NetworkSettings) -> Vec<FormField> {
         FormField {
             label: "run-mode".into(),
             value: mode_str.into(),
-            kind: FieldKind::Dropdown(vec!["systemd".into(), "direct".into()]),
+            // Windows 无 systemd/sudo 体系：仅 direct 一种运行方式
+            kind: FieldKind::Dropdown(if cfg!(windows) {
+                vec!["direct".into()]
+            } else {
+                vec!["systemd".into(), "direct".into()]
+            }),
         },
         FormField {
             label: "mihomo-bin".into(),
@@ -277,9 +282,17 @@ pub(crate) fn apply_values(f: &[FormField]) -> Result<NetworkSettings, Validatio
     let cfg = &f[CONFIG_START..];
     debug_assert_eq!(cfg.len(), 22, "config 字段应为 22 个");
     Ok(NetworkSettings {
-        run_mode: match cfg_parse_dropdown(&f[0], &["systemd", "direct"])?.as_str() {
-            "systemd" => RunMode::Systemd,
-            _ => RunMode::Direct,
+        run_mode: {
+            // Windows 仅 direct 一种选项（与 field_values 下拉一致）
+            let options: &[&str] = if cfg!(windows) {
+                &["direct"]
+            } else {
+                &["systemd", "direct"]
+            };
+            match cfg_parse_dropdown(&f[0], options)?.as_str() {
+                "systemd" => RunMode::Systemd,
+                _ => RunMode::Direct,
+            }
         },
         mihomo_bin: String::new(),
         mode: parse_dropdown("mode", &cfg[0].value, &["rule", "global", "direct"])?,
@@ -440,7 +453,26 @@ impl SettingsPage {
                 self.popup = Some(MessagePopup::new("校验失败".into(), vec![e.to_string()]));
                 None
             }
-            Ok(s) => {
+            Ok(mut s) => {
+                // mihomo_bin 不经过表单（Windows 路径由 mihomo-bin 弹窗维护），保存时保留现值；
+                // Linux 该字段恒为空，此处为无操作
+                s.mihomo_bin = st.settings.mihomo_bin.clone();
+                // Windows：TUN 从关→开 且 TUI 非管理员 → 警告弹窗（UAC 无法中途提升；
+                // 提示后仍尊重用户选择继续保存）
+                #[cfg(windows)]
+                if s.tun.enable
+                    && !st.settings.tun.enable
+                    && !crate::service::process::is_elevated()
+                {
+                    self.popup = Some(MessagePopup::new(
+                        "TUN 需要管理员权限".into(),
+                        vec![
+                            "TUN 模式需要管理员权限：当前 TUI 未以管理员身份运行，".into(),
+                            "mihomo 将无法创建 TUN 设备。".into(),
+                            "请关闭 TUN，或退出后右键「以管理员身份运行」本程序。".into(),
+                        ],
+                    ));
+                }
                 let old_mode = st.settings.run_mode;
                 if let Err(e) = save_settings(&s) {
                     self.popup = Some(MessagePopup::new(
@@ -688,7 +720,7 @@ impl Page for SettingsPage {
                     // mihomo 路径：打开输入弹窗（预填已有路径或 which 结果）
                     1 => {
                         let current = self.fields[1].value.clone();
-                        let prefill = if current.starts_with('/') {
+                        let prefill = if crate::core::mihomo_bin::is_absolute_path(&current) {
                             current
                         } else {
                             find_mihomo_in_path().unwrap_or_default()
@@ -920,7 +952,11 @@ mod tests {
     fn fixed_settings() -> NetworkSettings {
         NetworkSettings {
             secret: "a".repeat(32),
-            run_mode: RunMode::Systemd,
+            run_mode: if cfg!(windows) {
+                RunMode::Direct
+            } else {
+                RunMode::Systemd
+            },
             mihomo_bin: String::new(),
             mode: "global".into(),
             ipv6: true,
@@ -967,7 +1003,14 @@ mod tests {
         let fields = field_values(&s);
         assert_eq!(fields.len(), FIELD_COUNT);
         let back = apply_values(&fields).expect("往返不应校验失败");
-        assert_eq!(back.run_mode, RunMode::Systemd);
+        assert_eq!(
+            back.run_mode,
+            if cfg!(windows) {
+                RunMode::Direct
+            } else {
+                RunMode::Systemd
+            }
+        );
         assert_eq!(back.mode, "global");
         assert!(back.ipv6);
         assert!(back.allow_lan);
@@ -1442,19 +1485,24 @@ mod tests {
     }
 
     /// 运行方式区块：run-mode 下拉循环 + Ctrl+S 持久化 run_mode。
+    /// Windows 仅 direct 一个选项（Enter 无变化）；Linux 可 systemd → direct 循环。
     #[test]
     fn run_mode_dropdown_cycles_and_persists() {
         with_settings_dir(|| {
             let mut st = test_state();
             save_settings(&st.settings).unwrap();
             let mut p = page_with_state(&st);
-            assert_eq!(p.fields[0].value, "systemd");
+            assert_eq!(
+                p.fields[0].value,
+                if cfg!(windows) { "direct" } else { "systemd" }
+            );
             press(
                 &mut p,
                 &mut st,
                 KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             );
             assert_eq!(p.fields[0].value, "direct");
+            #[cfg(not(windows))]
             assert!(p.dirty(), "切换后应标记未保存");
             press(&mut p, &mut st, ctrl('s'));
             let back = load_settings().unwrap();
@@ -1480,11 +1528,17 @@ mod tests {
     #[test]
     fn bin_field_enter_opens_path_popup_with_prefill() {
         let mut st = test_state();
+        // 平台各自的绝对路径形态（is_absolute_path 判定）
+        let configured_bin = if cfg!(windows) {
+            r"C:\mihomo\mihomo.exe".to_string()
+        } else {
+            "/usr/bin/mihomo".to_string()
+        };
         st.run_status = Some(RunStatus {
             service_unit: Some(true),
             service_active: Some(true),
             proc: Some(ProcStatus {
-                bin: Some("/usr/bin/mihomo".into()),
+                bin: Some(configured_bin.clone()),
                 pid: None,
                 running: false,
             }),
@@ -1497,7 +1551,7 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
         let popup = p.path_popup.as_ref().expect("应打开路径弹窗");
-        assert_eq!(popup.value(0), "/usr/bin/mihomo", "已有路径应预填");
+        assert_eq!(popup.value(0), configured_bin, "已有路径应预填");
         // 未配置时预填 which mihomo 结果（环境自适应）
         st.run_status = None;
         let mut p2 = page_with_state(&st);
@@ -1562,7 +1616,10 @@ mod tests {
             );
             match cmd {
                 Some(UiCommand::SaveMihomoBin(path)) => {
-                    assert!(path.starts_with('/'));
+                    assert!(
+                        crate::core::mihomo_bin::is_absolute_path(&path),
+                        "预填路径应为绝对路径: {path}"
+                    );
                     assert!(
                         std::path::Path::new(&path).exists(),
                         "预填路径应存在: {path}"
@@ -1641,6 +1698,7 @@ mod tests {
     fn status_field_enter_dispatches() {
         // systemd + 运行中 → RefreshStatus
         let mut st = test_state();
+        st.settings.run_mode = RunMode::Systemd;
         st.run_status = Some(RunStatus {
             service_unit: Some(true),
             service_active: Some(true),
@@ -1658,6 +1716,7 @@ mod tests {
             "运行中应刷新: {cmd:?}"
         );
         // systemd + 未运行 → SystemdAction(Start)（systemctl 直接执行，polkit 弹窗认证）
+        st.settings.run_mode = RunMode::Systemd;
         st.run_status = Some(RunStatus {
             service_unit: Some(true),
             service_active: Some(false),
@@ -1675,6 +1734,7 @@ mod tests {
             "未运行应派发 SystemdAction(Start): {cmd:?}"
         );
         // 单元缺失 → 指引弹窗（无命令）
+        st.settings.run_mode = RunMode::Systemd;
         st.run_status = Some(RunStatus {
             service_unit: Some(false),
             service_active: Some(false),
@@ -1702,36 +1762,40 @@ mod tests {
     }
 
     /// 模式切换 systemd ← direct 且进程运行中：Ctrl+S 保存后返回 ProcAction(Stop)。
+    /// Windows 无 systemd 模式（下拉仅 direct），"切回 systemd"场景不存在，跳过。
     #[test]
     fn mode_switch_to_systemd_returns_stop_when_proc_running() {
         with_settings_dir(|| {
-            let mut st = test_state();
-            st.settings.run_mode = RunMode::Direct;
-            st.run_status = Some(RunStatus {
-                service_unit: Some(true),
-                service_active: Some(false),
-                proc: Some(ProcStatus {
-                    bin: Some("/usr/bin/mihomo".into()),
-                    pid: Some(42),
-                    running: true,
-                }),
-            });
-            save_settings(&st.settings).unwrap();
-            let mut p = page_with_state(&st);
-            // 切回 systemd
-            p.focused = 0;
-            press(
-                &mut p,
-                &mut st,
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            ); // direct → systemd
-            let cmd = press(&mut p, &mut st, ctrl('s'));
-            assert!(
-                matches!(cmd, Some(UiCommand::ProcAction(ProcOp::Stop))),
-                "进程运行中切 systemd 应自动停止: {cmd:?}"
-            );
-            let back = load_settings().unwrap();
-            assert_eq!(back.run_mode, RunMode::Systemd);
+            #[cfg(not(windows))]
+            {
+                let mut st = test_state();
+                st.settings.run_mode = RunMode::Direct;
+                st.run_status = Some(RunStatus {
+                    service_unit: Some(true),
+                    service_active: Some(false),
+                    proc: Some(ProcStatus {
+                        bin: Some("/usr/bin/mihomo".into()),
+                        pid: Some(42),
+                        running: true,
+                    }),
+                });
+                save_settings(&st.settings).unwrap();
+                let mut p = page_with_state(&st);
+                // 切回 systemd
+                p.focused = 0;
+                press(
+                    &mut p,
+                    &mut st,
+                    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                ); // direct → systemd
+                let cmd = press(&mut p, &mut st, ctrl('s'));
+                assert!(
+                    matches!(cmd, Some(UiCommand::ProcAction(ProcOp::Stop))),
+                    "进程运行中切 systemd 应自动停止: {cmd:?}"
+                );
+                let back = load_settings().unwrap();
+                assert_eq!(back.run_mode, RunMode::Systemd);
+            }
             // 进程未运行时切换：无 stop 命令
             let mut st2 = test_state();
             st2.settings.run_mode = RunMode::Direct;

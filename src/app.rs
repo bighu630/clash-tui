@@ -324,6 +324,16 @@ const HELP_LINES: &[&str] = &[
     "  Ctrl+A            保存并应用（合并 → mihomo -t 校验 → 提权重启）",
 ];
 
+/// 帮助内容（渲染时过滤）：Windows 隐藏「i 安装提权组件」行（该入口为 Linux 专用）；
+/// Linux 上 cfg!(windows) 恒为 false，输出与 HELP_LINES 完全一致。
+fn help_lines() -> Vec<String> {
+    let mut lines: Vec<String> = HELP_LINES.iter().map(|s| s.to_string()).collect();
+    if cfg!(windows) {
+        lines.retain(|s| s != "  i                  安装提权组件（首次启动拒绝后的重试入口）");
+    }
+    lines
+}
+
 struct App<B: Backend> {
     state: AppState,
     pages: Vec<Box<dyn Page>>,
@@ -539,10 +549,7 @@ where
             // s：全局跳转设置页（设置页内不拦截——s 是文本字段输入字符）
             KeyCode::Char('s') if self.current != 5 => self.switch_page(5),
             KeyCode::Char('?') => {
-                self.help_popup = Some(MessagePopup::new(
-                    "帮助".into(),
-                    HELP_LINES.iter().map(|s| s.to_string()).collect(),
-                ));
+                self.help_popup = Some(MessagePopup::new("帮助".into(), help_lines()));
             }
             _ => {
                 let page = &mut self.pages[self.current];
@@ -1018,6 +1025,15 @@ where
                 let bin = self.state.settings.mihomo_bin.clone();
                 let bin_opt = (!bin.is_empty()).then_some(bin);
                 tokio::spawn(async move {
+                    // Windows：未设置 mihomo 路径 → 直接引导（Linux 走 PATH 查找，不受影响）
+                    #[cfg(windows)]
+                    if bin_opt.is_none() {
+                        let _ = ui_tx.send(UiEvent::ApplyDone(Err(
+                            "未设置 mihomo 路径：请先在设置页 Enter mihomo-bin 设置 mihomo 可执行文件路径"
+                                .to_string(),
+                        )));
+                        return;
+                    }
                     // 先 mihomo -t 校验，再非交互 sudo
                     match validate_config(&yaml, bin_opt.as_deref()).await {
                         Err(e) => {
@@ -1232,14 +1248,21 @@ where
             InteractiveTask::SaveMihomoBin(path) => {
                 #[cfg(windows)]
                 {
-                    crate::service::process::save_bin(&path)
+                    let res = crate::service::process::save_bin(&path)
                         .await
                         .map(|lines| ApplyOutcome {
                             success: true,
                             stdout: lines.join("\n"),
                             stderr: String::new(),
                         })
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| e.to_string());
+                    // 磁盘 + 内存双写：不同步的话，同会话内后续任何写 settings.toml 的操作
+                    // （设置页 Ctrl+S/Ctrl+A、仪表盘 m/t/6 热键双写）会用陈旧空串
+                    // 覆盖掉刚保存的路径。
+                    if res.is_ok() {
+                        self.state.settings.mihomo_bin = path.clone();
+                    }
+                    res
                 }
                 #[cfg(not(windows))]
                 {
@@ -1326,14 +1349,20 @@ fn sudo_password_popup_lines(has_group: bool) -> Vec<String> {
 
 fn page_hints(current: usize) -> Vec<(String, String)> {
     let mut hints: Vec<(String, String)> = match current {
-        0 => vec![
-            ("m".into(), "模式".into()),
-            ("t".into(), "TUN".into()),
-            ("6".into(), "IPv6".into()),
-            ("r".into(), "出口IP".into()),
-            ("s".into(), "设置".into()),
-            ("i".into(), "安装".into()),
-        ],
+        0 => {
+            let mut v = vec![
+                ("m".into(), "模式".into()),
+                ("t".into(), "TUN".into()),
+                ("6".into(), "IPv6".into()),
+                ("r".into(), "出口IP".into()),
+                ("s".into(), "设置".into()),
+            ];
+            // Windows：隐藏「i 安装」入口（提权组件安装为 Linux 专用）
+            if !cfg!(windows) {
+                v.push(("i".into(), "安装".into()));
+            }
+            v
+        }
         1 => vec![
             ("a".into(), "添加".into()),
             ("Enter".into(), "激活".into()),

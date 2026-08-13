@@ -616,7 +616,13 @@ pub(crate) fn run_status_text(mode: RunMode, rs: &RunStatus) -> String {
             }
         }
         RunMode::Direct => match rs.proc.as_ref() {
-            None => "查询失败（未安装提权组件？仪表盘按 i 重新安装）".to_string(),
+            None => {
+                if cfg!(windows) {
+                    "查询失败（请检查 mihomo 路径设置）".to_string()
+                } else {
+                    "查询失败（未安装提权组件？仪表盘按 i 重新安装）".to_string()
+                }
+            }
             Some(p) if p.bin.is_none() => "未设置路径（Enter 设置）".to_string(),
             Some(p) if p.running => format!("运行中（PID {}）", p.pid.unwrap_or(0)),
             Some(_) => "未运行（无开机自启，重启系统后需手动启动）".to_string(),

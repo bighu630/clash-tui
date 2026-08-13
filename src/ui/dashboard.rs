@@ -94,6 +94,14 @@ impl Page for DashboardPage {
                 // TUN 热切
                 KeyCode::Char('t') => {
                     let enable = !st.runtime.tun_enable;
+                    // Windows：非管理员开 TUN → 警告（UAC 无法中途提升；不阻塞）
+                    #[cfg(windows)]
+                    if enable && !crate::service::process::is_elevated() {
+                        st.notice(
+                            "[!] TUN 需要管理员权限：当前 TUI 未以管理员身份运行，mihomo 将无法创建 TUN 设备"
+                                .to_string(),
+                        );
+                    }
                     st.runtime.tun_enable = enable;
                     return Some(self.toggle_double_write(
                         st,

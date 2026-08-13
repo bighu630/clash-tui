@@ -24,6 +24,10 @@ pub const LOG_FILE: &str = "mihomo.log";
 /// 创建进程时不弹控制台窗口（TUI 是终端程序，子进程不应抢占窗口）。
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// 进程操作互斥锁：start/stop/apply/control 串行执行。
+/// 防两次快速 start 并发 → 双实例 + PID 文件被后启动者删除（TOCTOU）。
+static OP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub fn config_path() -> PathBuf {
     config_dir().join(CONFIG_FILE)
 }
@@ -131,14 +135,26 @@ async fn read_pid() -> Option<u32> {
 }
 
 async fn write_pid(pid: u32) -> Result<(), ApplyError> {
-    tokio::fs::write(pid_path(), format!("{pid}\n"))
+    // 原子写：tmp + rename，防崩溃残留半截 PID 文件
+    let tmp = config_dir().join(".mihomo.pid.tmp");
+    tokio::fs::write(&tmp, format!("{pid}\n"))
         .await
-        .map_err(|e| ApplyError::Io(format!("写入 PID 文件失败: {e}")))
+        .map_err(|e| ApplyError::Io(format!("写入 PID 文件失败: {e}")))?;
+    tokio::fs::rename(&tmp, pid_path())
+        .await
+        .map_err(|e| ApplyError::Io(format!("写入 PID 文件失败: {e}")))?;
+    Ok(())
 }
 
-/// 启动 mihomo：`-d <dir> -f <dir>\config.yaml`，stdout/stderr → mihomo.log，
+/// 启动 mihomo（加进程互斥锁）：`-d <dir> -f <dir>\config.yaml`，stdout/stderr → mihomo.log，
 /// CREATE_NO_WINDOW 不弹控制台；TUI 退出后进程继续运行（与 Linux setsid 语义一致）。
 pub async fn start() -> Result<ApplyOutcome, ApplyError> {
+    let _guard = OP_LOCK.lock().await;
+    start_unlocked().await
+}
+
+/// start 的实际实现（调用方须已持有 OP_LOCK）。
+async fn start_unlocked() -> Result<ApplyOutcome, ApplyError> {
     let bin = configured_bin()?;
     // 幂等：已在运行（PID 匹配配置 bin）→ 直接返回
     if let Some(pid) = read_pid().await {
@@ -182,9 +198,13 @@ pub async fn start() -> Result<ApplyOutcome, ApplyError> {
     // 短等待：启动即崩（配置错误/端口占用）尽早暴露，避免用户以为成功了
     tokio::time::sleep(Duration::from_millis(500)).await;
     if !process_matches(pid, &bin) {
-        let _ = tokio::fs::remove_file(pid_path()).await;
+        // 仅当 PID 文件仍是本实例写入的才清理（防并发下删掉先启动者的 PID 记录）
+        if read_pid().await == Some(pid) {
+            let _ = tokio::fs::remove_file(pid_path()).await;
+        }
         return Err(ApplyError::Io(
-            "mihomo 启动后立即退出（请查看 mihomo.log：配置错误或端口被占用）".to_string(),
+            "mihomo 启动后立即退出（请查看 mihomo.log：配置错误、端口被占用或已有其他 mihomo 实例）"
+                .to_string(),
         ));
     }
     Ok(ApplyOutcome {
@@ -194,8 +214,14 @@ pub async fn start() -> Result<ApplyOutcome, ApplyError> {
     })
 }
 
-/// 停止 mihomo（按 PID 文件定位；kill 前校验镜像路径防误杀；残留 PID 自动清理）。
+/// 停止 mihomo（加进程互斥锁；按 PID 文件定位；kill 前校验镜像路径防误杀；残留 PID 自动清理）。
 pub async fn stop() -> Result<ApplyOutcome, ApplyError> {
+    let _guard = OP_LOCK.lock().await;
+    stop_unlocked().await
+}
+
+/// stop 的实际实现（调用方须已持有 OP_LOCK）。
+async fn stop_unlocked() -> Result<ApplyOutcome, ApplyError> {
     let bin = configured_bin()?;
     let Some(pid) = read_pid().await else {
         return Ok(ApplyOutcome {
@@ -249,13 +275,24 @@ pub async fn status() -> Result<ProcStatus, ApplyError> {
     })
 }
 
-/// 应用配置：用配置 bin 校验 → 原子写 config.yaml → 重启进程。
-/// 校验失败不触碰运行中的 mihomo（与 Linux 链路语义一致）。
+/// 应用配置（加进程互斥锁）：用配置 bin 校验 → 备份旧配置 → 原子写 config.yaml → 重启进程。
+/// 校验失败不触碰运行中的 mihomo（与 Linux 链路语义一致）；启动失败回滚旧配置并重试一次。
 pub async fn apply(yaml: &str) -> Result<ApplyOutcome, ApplyError> {
+    let _guard = OP_LOCK.lock().await;
+    apply_unlocked(yaml).await
+}
+
+/// apply 的实际实现（调用方须已持有 OP_LOCK）。
+async fn apply_unlocked(yaml: &str) -> Result<ApplyOutcome, ApplyError> {
     let bin = configured_bin()?;
     crate::core::apply::validate_config(yaml, Some(&bin)).await?;
     let dir = config_dir();
     let tmp = dir.join(".config.yaml.tmp");
+    // 备份旧配置（启动失败回滚用，与 Linux mihomo-apply 健康检查回滚对称）
+    let bak = dir.join("config.yaml.bak");
+    if tokio::fs::try_exists(config_path()).await.unwrap_or(false) {
+        let _ = tokio::fs::copy(config_path(), &bak).await;
+    }
     {
         let mut f = tokio::fs::OpenOptions::new()
             .write(true)
@@ -280,19 +317,34 @@ pub async fn apply(yaml: &str) -> Result<ApplyOutcome, ApplyError> {
         .map(|p| process_matches(p, &bin))
         .unwrap_or(false);
     if running {
-        stop().await?;
+        stop_unlocked().await?;
     }
-    start().await
+    // 启动失败 → 回滚旧配置并重试一次
+    match start_unlocked().await {
+        Ok(o) => Ok(o),
+        Err(e) => {
+            let _ = tokio::fs::rename(&bak, config_path()).await;
+            match start_unlocked().await {
+                Ok(_) => Err(ApplyError::Io(format!(
+                    "新配置启动失败，已回滚为旧配置: {e}"
+                ))),
+                Err(e2) => Err(ApplyError::Io(format!(
+                    "新配置启动失败（回滚旧配置后仍失败）: {e}；{e2}"
+                ))),
+            }
+        }
+    }
 }
 
-/// 启/停/重启统一入口（app.rs ProcAction 经 apply::proc_control 分派到这里）。
+/// 启/停/重启统一入口（加进程互斥锁；app.rs ProcAction 经 apply::proc_control 分派到这里）。
 pub async fn control(op: ProcOp) -> Result<ApplyOutcome, ApplyError> {
+    let _guard = OP_LOCK.lock().await;
     match op {
-        ProcOp::Start => start().await,
-        ProcOp::Stop => stop().await,
+        ProcOp::Start => start_unlocked().await,
+        ProcOp::Stop => stop_unlocked().await,
         ProcOp::Restart => {
-            stop().await?;
-            start().await
+            stop_unlocked().await?;
+            start_unlocked().await
         }
     }
 }

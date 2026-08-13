@@ -1,10 +1,11 @@
-# 基础 CI：push / PR 时运行 fmt + clippy + test（仅 x86_64，保证质量门槛）
+# 基础 CI：仅在发布 tag（v*）时运行 fmt + clippy + test（仅 x86_64，保证质量门槛）
+# 日常 dev/main 分支提交不再触发，避免无谓的 CI 开销
 name: CI
 
 on:
   push:
-    branches: [main, dev]
-  pull_request: {}
+    tags:
+      - 'v*'
 
 env:
   CARGO_TERM_COLOR: always

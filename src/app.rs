@@ -16,7 +16,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Tabs};
 use ratatui::{CompletedFrame, Terminal};
 use tokio::sync::mpsc;
 
-use crate::core::apply::{apply_config, validate_config, ApplyOutcome};
+use crate::core::apply::{apply_config, validate_config, ApplyOutcome, ProcOp, RunStatus};
 use crate::core::client::GROUP_DELAY_TIMEOUT_MS;
 use crate::core::client::{
     Client, ConnInfo, ConnSnapshot, GroupInfo, LogEntry, LogLevel, MemoryFrame, RuntimeConfig,
@@ -61,6 +61,8 @@ pub struct AppState {
     pub logs: VecDeque<LogEntry>,
     /// 通知（带到达时刻）。整组共享截止时间（notice_deadline），到期整组同消。
     pub notices: VecDeque<(Instant, String)>,
+    /// 运行状态（设置页运行方式区块显示；RefreshStatus 事件更新）
+    pub run_status: Option<RunStatus>,
 }
 
 impl AppState {
@@ -109,6 +111,7 @@ impl AppState {
             group_delays: HashMap::new(),
             logs: VecDeque::new(),
             notices,
+            run_status: None,
         }
     }
 
@@ -148,6 +151,14 @@ pub enum UiCommand {
         group: String,
         silent: bool,
     },
+    /// 刷新运行状态（systemd 单元/服务 + 直接进程实例）
+    RefreshStatus,
+    /// 直接进程模式操作（start/stop/restart）
+    ProcAction(ProcOp),
+    /// 交互式启动 systemd 服务（需 sudo 密码）
+    StartSystemdService,
+    /// 交互式提权保存 mihomo 路径（需 sudo 密码）
+    SaveMihomoBin(String),
     /// 日志页切换显示级别：主循环转发给 logs 后台任务触发 ?level= 重连。
     SetLogLevel(LogLevel),
 }
@@ -175,6 +186,10 @@ pub enum UiEvent {
         silent: bool,
         result: Result<Vec<(String, u16)>, String>,
     },
+    RunStatusDone(Result<RunStatus, String>),
+    ProcActionDone(Result<ApplyOutcome, String>),
+    /// 启动时引导通知（systemd 模式服务不可用）
+    StartupNotice(String),
     /// logs 后台任务推送的单条日志。
     LogLine(LogEntry),
 }
@@ -189,6 +204,8 @@ enum BgMsg {
 enum InteractiveTask {
     Apply(String),
     Install,
+    SaveMihomoBin(String),
+    StartSystemdService,
 }
 
 /// 按键处理结果。
@@ -847,6 +864,11 @@ where
                 }
                 Err(e) => self.popup_error("延迟测试失败", e),
             },
+            UiEvent::RunStatusDone(_)
+            | UiEvent::ProcActionDone(_)
+            | UiEvent::StartupNotice(_) => {
+                // 骨架阶段占位：Task 6 实现
+            }
             UiEvent::LogLine(entry) => self.on_log(entry),
         }
     }
@@ -982,6 +1004,12 @@ where
                     InteractiveTask::Install,
                 ));
             }
+            UiCommand::RefreshStatus
+            | UiCommand::ProcAction(_)
+            | UiCommand::StartSystemdService
+            | UiCommand::SaveMihomoBin(_) => {
+                // 骨架阶段占位：Task 6 实现（刷新状态/进程操作/交互提权）
+            }
             UiCommand::SetLogLevel(level) => {
                 let _ = self.log_level_tx.send(level);
             }
@@ -1005,6 +1033,10 @@ where
                     stderr: String::new(),
                 })
                 .map_err(|e| e.to_string()),
+            InteractiveTask::SaveMihomoBin(_) | InteractiveTask::StartSystemdService => {
+                // 骨架阶段占位：Task 6 实现
+                Err("交互任务尚未接线".to_string())
+            }
         };
 
         crossterm::terminal::enable_raw_mode()?;
@@ -1567,6 +1599,7 @@ mod tests {
             group_delays: HashMap::new(),
             logs: VecDeque::new(),
             notices: VecDeque::new(),
+            run_status: None,
         };
         let (ui_tx, _) = mpsc::unbounded_channel();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();

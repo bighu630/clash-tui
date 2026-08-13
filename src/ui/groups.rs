@@ -573,6 +573,7 @@ mod tests {
             group_delays: HashMap::new(),
             logs: VecDeque::new(),
             notices: VecDeque::new(),
+            run_status: None,
         }
     }
 

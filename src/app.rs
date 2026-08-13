@@ -17,9 +17,10 @@ use ratatui::{CompletedFrame, Terminal};
 use tokio::sync::mpsc;
 
 use crate::core::apply::{
-    apply_config, proc_control, proc_status, service_is_active, service_unit_exists,
-    systemctl_control, validate_config, ApplyOutcome, ProcOp, RunStatus,
+    apply_config, proc_control, proc_status, validate_config, ApplyOutcome, ProcOp, RunStatus,
 };
+#[cfg(not(windows))]
+use crate::core::apply::{service_is_active, service_unit_exists, systemctl_control};
 use crate::core::client::GROUP_DELAY_TIMEOUT_MS;
 use crate::core::client::{
     Client, ConnInfo, ConnSnapshot, GroupInfo, LogEntry, LogLevel, MemoryFrame, RuntimeConfig,
@@ -207,6 +208,8 @@ enum BgMsg {
 /// 需要交互式终端（离开 raw 模式/AltScreen）执行的任务。
 enum InteractiveTask {
     Apply(String),
+    /// 提权组件安装（Linux 专属：Windows 无 sudoers 体系）
+    #[cfg(not(windows))]
     Install,
     SaveMihomoBin(String),
 }
@@ -633,7 +636,12 @@ where
                 Act::Sudo(yaml) => {
                     // 弹确认框前附诊断提示：区分"未重新登录（组未生效）"与
                     // "sudoers 规则未生效"两种根因，引导用户对症处理。
+                    // Windows 上 Act::Sudo 永不被触发（apply 链路不产生
+                    // SudoNeedsPassword），置 false 仅为让代码可编译。
+                    #[cfg(not(windows))]
                     let has_group = crate::service::installer::session_has_admin_group();
+                    #[cfg(windows)]
+                    let has_group = false;
                     self.pending_confirm = Some((
                         ConfirmPopup::new(
                             "需要 sudo 密码".into(),
@@ -647,8 +655,27 @@ where
         Ok(())
     }
 
-    /// 启动引导：systemd 模式且服务不可用 → 通知用户（设置页可启动服务或切换 direct 模式）。
-    /// 非阻塞、无 sudo；检测失败静默。
+    /// 启动引导：Windows —— TUN 已开启但非管理员 → 通知一次（UAC 无法中途提升）。
+    #[cfg(windows)]
+    fn spawn_startup_guard(&self) {
+        if !self.state.settings.tun.enable {
+            return;
+        }
+        let ui_tx = self.ui_tx.clone();
+        tokio::spawn(async move {
+            if !crate::service::process::is_elevated() {
+                let _ = ui_tx.send(UiEvent::StartupNotice(
+                    "TUN 模式需要管理员权限：当前 TUI 未以管理员身份运行，mihomo 将无法创建 \
+                     TUN 设备。请关闭 TUN，或退出后右键「以管理员身份运行」本程序"
+                        .to_string(),
+                ));
+            }
+        });
+    }
+
+    /// 启动引导：Linux —— systemd 模式且服务不可用 → 通知用户
+    /// （设置页可启动服务或切换 direct 模式）。非阻塞、无 sudo；检测失败静默。
+    #[cfg(not(windows))]
     fn spawn_startup_guard(&self) {
         if self.state.settings.run_mode != RunMode::Systemd {
             return;
@@ -988,9 +1015,11 @@ where
             UiCommand::ApplyConfig(yaml) => {
                 let sudo_tx = self.sudo_tx.clone();
                 let mode = self.state.settings.run_mode;
+                let bin = self.state.settings.mihomo_bin.clone();
+                let bin_opt = (!bin.is_empty()).then_some(bin);
                 tokio::spawn(async move {
                     // 先 mihomo -t 校验，再非交互 sudo
-                    match validate_config(&yaml).await {
+                    match validate_config(&yaml, bin_opt.as_deref()).await {
                         Err(e) => {
                             let _ = ui_tx.send(UiEvent::ApplyDone(Err(e.to_string())));
                         }
@@ -1080,6 +1109,7 @@ where
                     });
                 });
             }
+            #[cfg(not(windows))]
             UiCommand::InstallSetup => {
                 self.pending_confirm = Some((
                     ConfirmPopup::new(
@@ -1089,19 +1119,29 @@ where
                     InteractiveTask::Install,
                 ));
             }
+            // Windows 无提权组件体系：InstallSetup 命令永不被触发，空实现保持 match 穷尽。
+            #[cfg(windows)]
+            UiCommand::InstallSetup => {}
             UiCommand::RefreshStatus => {
                 let ui_tx = self.ui_tx.clone();
                 tokio::spawn(async move {
-                    let unit = service_unit_exists().await;
-                    let active = service_is_active().await;
+                    #[cfg(not(windows))]
+                    let (unit, active) = (service_unit_exists().await, service_is_active().await);
                     // 进程实例查询失败（未装脚本/未授权/超时）静默置 None，设置页显示"查询失败"
                     let proc = tokio::time::timeout(PROC_STATUS_TIMEOUT, proc_status())
                         .await
                         .ok()
                         .and_then(|r| r.ok());
+                    #[cfg(not(windows))]
                     let _ = ui_tx.send(UiEvent::RunStatusDone(Ok(RunStatus {
                         service_unit: Some(unit),
                         service_active: Some(active),
+                        proc,
+                    })));
+                    #[cfg(windows)]
+                    let _ = ui_tx.send(UiEvent::RunStatusDone(Ok(RunStatus {
+                        service_unit: None,
+                        service_active: None,
                         proc,
                     })));
                 });
@@ -1125,6 +1165,7 @@ where
                     }
                 });
             }
+            #[cfg(not(windows))]
             UiCommand::SystemdAction(op) => {
                 let ui_tx = self.ui_tx.clone();
                 tokio::spawn(async move {
@@ -1140,12 +1181,24 @@ where
                     }
                 });
             }
+            // Windows 无 systemctl：进程操作统一走 ProcAction（process::control），空实现保持 match 穷尽。
+            #[cfg(windows)]
+            UiCommand::SystemdAction(_) => {}
             UiCommand::SaveMihomoBin(path) => {
+                let confirm_text = {
+                    #[cfg(windows)]
+                    {
+                        format!(
+                            "将 mihomo 路径保存为 {path}（settings.toml，无需提权）。是否继续？"
+                        )
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        format!("需要 root 权限写入 {path} 到系统配置。是否继续？")
+                    }
+                };
                 self.pending_confirm = Some((
-                    ConfirmPopup::new(
-                        "保存 mihomo 路径".into(),
-                        format!("需要 root 权限写入 {path} 到系统配置。是否继续？"),
-                    ),
+                    ConfirmPopup::new("保存 mihomo 路径".into(), confirm_text),
                     InteractiveTask::SaveMihomoBin(path),
                 ));
             }
@@ -1167,6 +1220,7 @@ where
                     .await
                     .map_err(|e| e.to_string())
             }
+            #[cfg(not(windows))]
             InteractiveTask::Install => crate::service::installer::install()
                 .await
                 .map(|lines| ApplyOutcome {
@@ -1176,14 +1230,28 @@ where
                 })
                 .map_err(|e| e.to_string()),
             InteractiveTask::SaveMihomoBin(path) => {
-                crate::service::installer::save_mihomo_bin(&path)
-                    .await
-                    .map(|lines| ApplyOutcome {
-                        success: true,
-                        stdout: lines.join("\n"),
-                        stderr: String::new(),
-                    })
-                    .map_err(|e| e.to_string())
+                #[cfg(windows)]
+                {
+                    crate::service::process::save_bin(&path)
+                        .await
+                        .map(|lines| ApplyOutcome {
+                            success: true,
+                            stdout: lines.join("\n"),
+                            stderr: String::new(),
+                        })
+                        .map_err(|e| e.to_string())
+                }
+                #[cfg(not(windows))]
+                {
+                    crate::service::installer::save_mihomo_bin(&path)
+                        .await
+                        .map(|lines| ApplyOutcome {
+                            success: true,
+                            stdout: lines.join("\n"),
+                            stderr: String::new(),
+                        })
+                        .map_err(|e| e.to_string())
+                }
             }
         };
 
@@ -1563,18 +1631,24 @@ pub async fn run() -> Result<(), BoxError> {
     // M6: 首次启动自动检测提权组件（README 承诺）。缺失时挂起确认框；
     // 用户确认后由 run_interactive 离开 raw 模式/AltScreen 执行交互式 sudo 安装，
     // 结束后恢复终端并弹结果（成功列日志行，失败列错误）。
-    if crate::service::installer::needs_install().await {
-        app.pending_confirm = Some((
-            ConfirmPopup::new(
-                "首次安装".to_string(),
-                "检测到首次运行：缺少提权组件。\n\
-                 将安装 /usr/local/sbin/mihomo-apply 提权脚本与\n\
-                 /etc/sudoers.d/99-mihomo 规则（期间需要 sudo 密码）。\n\
-                 是否继续？"
-                    .to_string(),
-            ),
-            InteractiveTask::Install,
-        ));
+    #[cfg(not(windows))]
+    {
+        // M6: 首次启动自动检测提权组件（README 承诺）。缺失时挂起确认框；
+        // 用户确认后由 run_interactive 离开 raw 模式/AltScreen 执行交互式 sudo 安装，
+        // 结束后恢复终端并弹结果（成功列日志行，失败列错误）。
+        if crate::service::installer::needs_install().await {
+            app.pending_confirm = Some((
+                ConfirmPopup::new(
+                    "首次安装".to_string(),
+                    "检测到首次运行：缺少提权组件。\n\
+                     将安装 /usr/local/sbin/mihomo-apply 提权脚本与\n\
+                     /etc/sudoers.d/99-mihomo 规则（期间需要 sudo 密码）。\n\
+                     是否继续？"
+                        .to_string(),
+                ),
+                InteractiveTask::Install,
+            ));
+        }
     }
     app.spawn_startup_guard();
     let result = app

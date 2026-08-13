@@ -290,8 +290,9 @@ async fn apply_unlocked(yaml: &str) -> Result<ApplyOutcome, ApplyError> {
     let tmp = dir.join(".config.yaml.tmp");
     // 备份旧配置（启动失败回滚用，与 Linux mihomo-apply 健康检查回滚对称）
     let bak = dir.join("config.yaml.bak");
+    let mut had_bak = false;
     if tokio::fs::try_exists(config_path()).await.unwrap_or(false) {
-        let _ = tokio::fs::copy(config_path(), &bak).await;
+        had_bak = tokio::fs::copy(config_path(), &bak).await.is_ok();
     }
     {
         let mut f = tokio::fs::OpenOptions::new()
@@ -319,18 +320,22 @@ async fn apply_unlocked(yaml: &str) -> Result<ApplyOutcome, ApplyError> {
     if running {
         stop_unlocked().await?;
     }
-    // 启动失败 → 回滚旧配置并重试一次
+    // 启动失败 → 回滚旧配置并重试一次；仅 bak 存在且 rename 成功才算真正回滚
     match start_unlocked().await {
         Ok(o) => Ok(o),
         Err(e) => {
-            let _ = tokio::fs::rename(&bak, config_path()).await;
+            let rolled_back = had_bak && tokio::fs::rename(&bak, config_path()).await.is_ok();
             match start_unlocked().await {
-                Ok(_) => Err(ApplyError::Io(format!(
-                    "新配置启动失败，已回滚为旧配置: {e}"
-                ))),
-                Err(e2) => Err(ApplyError::Io(format!(
-                    "新配置启动失败（回滚旧配置后仍失败）: {e}；{e2}"
-                ))),
+                Ok(_) => Err(ApplyError::Io(if rolled_back {
+                    format!("新配置启动失败，已回滚为旧配置: {e}")
+                } else {
+                    format!("新配置启动失败（无旧配置可回滚，当前运行新配置）: {e}")
+                })),
+                Err(e2) => Err(ApplyError::Io(if rolled_back {
+                    format!("新配置启动失败（回滚旧配置后仍失败）: {e}；{e2}")
+                } else {
+                    format!("新配置启动失败（无旧配置可回滚）: {e}；{e2}")
+                })),
             }
         }
     }

@@ -864,9 +864,7 @@ where
                 }
                 Err(e) => self.popup_error("延迟测试失败", e),
             },
-            UiEvent::RunStatusDone(_)
-            | UiEvent::ProcActionDone(_)
-            | UiEvent::StartupNotice(_) => {
+            UiEvent::RunStatusDone(_) | UiEvent::ProcActionDone(_) | UiEvent::StartupNotice(_) => {
                 // 骨架阶段占位：Task 6 实现
             }
             UiEvent::LogLine(entry) => self.on_log(entry),
@@ -2153,15 +2151,15 @@ mod tests {
     }
 
     /// 进入设置页编辑模式后 Esc 退出编辑模式而非退出程序（P0-1 回归）。
-    /// 全链路走 app.handle_key：Down×13 聚焦 dns.listen（Text，index 13）、
+    /// 全链路走 app.handle_key：Down×19 聚焦 dns.listen（Text，index 19）、
     /// Enter 进编辑、输入 x、Esc；退出编辑后 x 不再插入，Ctrl+S 落盘验证。
     #[test]
     fn esc_in_edit_mode_does_not_quit() {
         with_settings_dir(|| {
             let (mut app, _rx) = test_app(24);
             app.switch_page(5);
-            // Down×13：focused 0 → 13（dns.listen，Text 字段）
-            for _ in 0..13 {
+            // Down×19：focused 0 → 19（dns.listen，Text 字段）
+            for _ in 0..19 {
                 assert!(app
                     .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
                     .is_none());
@@ -2221,13 +2219,13 @@ mod tests {
     }
 
     /// 编辑 Number 字段时输入数字不切页（P0-1 回归）：
-    /// port（index 3）编辑中输入 '5' 保持当前页、不退出。
+    /// port（index 9）编辑中输入 '5' 保持当前页、不退出。
     #[test]
     fn digits_typed_in_edit_mode_do_not_switch() {
         let (mut app, _rx) = test_app(24);
         app.switch_page(5);
-        // Down×3：focused 0 → 3（port，Number 字段）
-        for _ in 0..3 {
+        // Down×9：focused 0 → 9（port，Number 字段）
+        for _ in 0..9 {
             app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -2240,13 +2238,13 @@ mod tests {
     }
 
     /// 编辑 Text 字段时输入 'q' 不退出程序（P0-1 回归）：
-    /// nameserver（index 16，Text）编辑中输入 'q' 保持运行（dns-query 可完整输入）。
+    /// nameserver（index 22，Text）编辑中输入 'q' 保持运行（dns-query 可完整输入）。
     #[test]
     fn q_typed_in_edit_mode_does_not_quit() {
         let (mut app, _rx) = test_app(24);
         app.switch_page(5);
-        // Down×16：focused 0 → 16（dns.nameserver，Text 字段）
-        for _ in 0..16 {
+        // Down×22：focused 0 → 22（dns.nameserver，Text 字段）
+        for _ in 0..22 {
             app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -2258,13 +2256,16 @@ mod tests {
         assert!(!app.quit, "编辑模式输入 q 不应退出程序");
     }
 
-    /// 状态行焦点字段提示（P2-2，spec §2）：设置页状态行渲染「当前: mode」。
+    /// 状态行焦点字段提示（P2-2，spec §2）：设置页状态行渲染「当前: run-mode」。
     #[test]
     fn settings_status_line_shows_focused_field() {
         let (mut app, _rx) = test_app_with_width(120, 24);
         app.switch_page(5);
         let text = buffer_text(&mut app);
-        assert!(text.contains("当前:mode"), "状态行应含焦点字段提示: {text}");
+        assert!(
+            text.contains("当前:run-mode"),
+            "状态行应含焦点字段提示: {text}"
+        );
     }
 
     /// 状态行编辑态「编辑中」标记（新契约）：Enter 进编辑后状态行渲染 [编辑中]。
@@ -2276,8 +2277,8 @@ mod tests {
             !buffer_text(&mut app).contains("编辑中"),
             "导航态不应显示编辑中"
         );
-        // Down×3 聚焦 port（Text/Number 字段）再 Enter 进编辑态
-        for _ in 0..3 {
+        // Down×9 聚焦 port（Number 字段）再 Enter 进编辑态
+        for _ in 0..9 {
             app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

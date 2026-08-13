@@ -1,4 +1,4 @@
-//! 设置页：config.yaml 可配置项集中编辑（TUN/DNS/网络/端口/日志/其他）。
+//! 设置页：config.yaml 可配置项集中编辑 + 运行方式区块（模式切换/路径/状态/启停）。
 //! 交互规格见 docs/superpowers/specs/2026-08-12-settings-tab-design.md。
 //! 本文件包含：纯函数（模型↔表单转换与校验）+ SettingsPage 整页表单。
 
@@ -10,24 +10,31 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{AppState, UiCommand};
+use crate::core::apply::{find_mihomo_in_path, ProcOp, RunStatus};
 use crate::core::merger::{merge, MergeContext};
 use crate::core::models::{DnsSettings, NetworkSettings, RunMode, TunSettings};
 use crate::core::settings::{generate_secret, save_settings};
-use crate::ui::widgets::{FieldKind, FormField, MessagePopup};
+use crate::service::installer::validate_mihomo_bin;
+use crate::ui::widgets::{FieldKind, FormAction, FormField, FormPopup, MessagePopup};
 use crate::ui::Page;
 
 /// 区块定义：(标题, 字段起始索引, 字段数)。渲染与导航共用，顺序即字段顺序。
+/// 首区块「运行方式」为 TUI 自身设置（不写入 config.yaml），其余为 config 字段。
 pub(crate) const SECTIONS: &[(&str, usize, usize)] = &[
-    ("网络", 0, 3),
-    ("端口", 3, 3),
-    ("日志", 6, 1),
-    ("TUN", 7, 5),
-    ("DNS", 12, 8),
-    ("其他", 20, 2),
+    ("运行方式", 0, 6),
+    ("网络", 6, 3),
+    ("端口", 9, 3),
+    ("日志", 12, 1),
+    ("TUN", 13, 5),
+    ("DNS", 18, 8),
+    ("其他", 26, 2),
 ];
 
 /// 字段总数（= SECTIONS 覆盖的 0..FIELD_COUNT）。
-pub(crate) const FIELD_COUNT: usize = 22;
+pub(crate) const FIELD_COUNT: usize = 28;
+
+/// config 字段起始索引（运行方式区块之后）。
+pub(crate) const CONFIG_START: usize = 6;
 
 /// 校验错误：label 定位表单字段，message 说明原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +57,9 @@ pub(crate) fn split_csv(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// 模型 → 表单字段（22 个，顺序与 SECTIONS 一致）。
+/// 模型 → 表单字段（28 个：运行方式区块 6 + config 字段 22）。
+/// f[1]/f[2]（路径/状态）为占位值，由 sync_from_settings 用 run_status 覆盖；
+/// f[3..6]（启停按钮）按 run_mode 启用或禁用。
 pub(crate) fn field_values(s: &NetworkSettings) -> Vec<FormField> {
     let yn = |b: bool| {
         if b {
@@ -60,7 +69,39 @@ pub(crate) fn field_values(s: &NetworkSettings) -> Vec<FormField> {
         }
     };
     let csv = |v: &[String]| v.join(",");
-    vec![
+    let mode_str = match s.run_mode {
+        RunMode::Systemd => "systemd",
+        RunMode::Direct => "direct",
+    };
+    let action = |label: &str| FormField {
+        label: label.into(),
+        value: match s.run_mode {
+            RunMode::Direct => label.to_string(),
+            RunMode::Systemd => "—".to_string(),
+        },
+        kind: FieldKind::Action,
+    };
+    let mut fields = vec![
+        FormField {
+            label: "run-mode".into(),
+            value: mode_str.into(),
+            kind: FieldKind::Dropdown(vec!["systemd".into(), "direct".into()]),
+        },
+        FormField {
+            label: "mihomo-bin".into(),
+            value: "未设置（Enter 设置）".into(),
+            kind: FieldKind::ReadOnly,
+        },
+        FormField {
+            label: "mihomo-status".into(),
+            value: "查询中…".into(),
+            kind: FieldKind::ReadOnly,
+        },
+        action("启动"),
+        action("停止"),
+        action("重启"),
+    ];
+    fields.extend(vec![
         FormField {
             label: "mode".into(),
             value: s.mode.clone(),
@@ -177,7 +218,8 @@ pub(crate) fn field_values(s: &NetworkSettings) -> Vec<FormField> {
             value: s.secret.clone(),
             kind: FieldKind::ReadOnly,
         },
-    ]
+    ]);
+    fields
 }
 
 fn err<T>(label: &str, message: &str) -> Result<T, ValidationError> {
@@ -235,45 +277,53 @@ fn parse_dropdown(label: &str, v: &str, options: &[&str]) -> Result<String, Vali
 /// listen/fake-ip-range/external-controller/secret 非空；枚举字段须在选项内。
 pub(crate) fn apply_values(f: &[FormField]) -> Result<NetworkSettings, ValidationError> {
     debug_assert_eq!(f.len(), FIELD_COUNT, "字段数量必须与 SECTIONS 一致");
+    let cfg = &f[CONFIG_START..];
+    debug_assert_eq!(cfg.len(), 22, "config 字段应为 22 个");
     Ok(NetworkSettings {
-        mode: parse_dropdown("mode", &f[0].value, &["rule", "global", "direct"])?,
-        ipv6: parse_yn("ipv6", &f[1].value)?,
-        allow_lan: parse_yn("allow-lan", &f[2].value)?,
-        port: parse_u16("port", &f[3].value)?,
-        socks_port: parse_u16("socks-port", &f[4].value)?,
-        mixed_port: parse_u16("mixed-port", &f[5].value)?,
+        run_mode: match cfg_parse_dropdown(&f[0], &["systemd", "direct"])?.as_str() {
+            "systemd" => RunMode::Systemd,
+            _ => RunMode::Direct,
+        },
+        mode: parse_dropdown("mode", &cfg[0].value, &["rule", "global", "direct"])?,
+        ipv6: parse_yn("ipv6", &cfg[1].value)?,
+        allow_lan: parse_yn("allow-lan", &cfg[2].value)?,
+        port: parse_u16("port", &cfg[3].value)?,
+        socks_port: parse_u16("socks-port", &cfg[4].value)?,
+        mixed_port: parse_u16("mixed-port", &cfg[5].value)?,
         log_level: parse_dropdown(
             "log-level",
-            &f[6].value,
+            &cfg[6].value,
             &["silent", "error", "warning", "info", "debug"],
         )?,
         tun: TunSettings {
-            enable: parse_yn("tun.enable", &f[7].value)?,
-            stack: parse_dropdown("tun.stack", &f[8].value, &["system", "gvisor", "mixed"])?,
-            auto_route: parse_yn("tun.auto-route", &f[9].value)?,
-            mtu: parse_u16("tun.mtu", &f[10].value)?,
-            dns_hijack: parse_csv("tun.dns-hijack", &f[11].value)?,
+            enable: parse_yn("tun.enable", &cfg[7].value)?,
+            stack: parse_dropdown("tun.stack", &cfg[8].value, &["system", "gvisor", "mixed"])?,
+            auto_route: parse_yn("tun.auto-route", &cfg[9].value)?,
+            mtu: parse_u16("tun.mtu", &cfg[10].value)?,
+            dns_hijack: parse_csv("tun.dns-hijack", &cfg[11].value)?,
         },
         dns: DnsSettings {
-            enable: parse_yn("dns.enable", &f[12].value)?,
-            listen: nonempty("dns.listen", &f[13].value)?,
+            enable: parse_yn("dns.enable", &cfg[12].value)?,
+            listen: nonempty("dns.listen", &cfg[13].value)?,
             enhanced_mode: parse_dropdown(
                 "dns.enhanced-mode",
-                &f[14].value,
+                &cfg[14].value,
                 &["fake-ip", "redir-host"],
             )?,
-            fake_ip_range: nonempty("dns.fake-ip-range", &f[15].value)?,
-            nameserver: parse_csv("dns.nameserver", &f[16].value)?,
-            default_nameserver: parse_csv("dns.default-nameserver", &f[17].value)?,
-            fallback: parse_csv("dns.fallback", &f[18].value)?,
-            fake_ip_filter: parse_csv("dns.fake-ip-filter", &f[19].value)?,
+            fake_ip_range: nonempty("dns.fake-ip-range", &cfg[15].value)?,
+            nameserver: parse_csv("dns.nameserver", &cfg[16].value)?,
+            default_nameserver: parse_csv("dns.default-nameserver", &cfg[17].value)?,
+            fallback: parse_csv("dns.fallback", &cfg[18].value)?,
+            fake_ip_filter: parse_csv("dns.fake-ip-filter", &cfg[19].value)?,
         },
-        external_controller: nonempty("external-controller", &f[20].value)?,
-        secret: nonempty("secret", &f[21].value)?,
-        // 运行方式不纳入表单（Task 5 加入表单区块）；表单保存时保持 systemd，
-        // run_mode 仅由 settings.toml 持久化值决定。
-        run_mode: RunMode::Systemd,
+        external_controller: nonempty("external-controller", &cfg[20].value)?,
+        secret: nonempty("secret", &cfg[21].value)?,
     })
+}
+
+/// 运行方式下拉解析（label 用 f[0] 本身，复用 parse_dropdown 语义）。
+fn cfg_parse_dropdown(field: &FormField, options: &[&str]) -> Result<String, ValidationError> {
+    parse_dropdown(&field.label, &field.value, options)
 }
 
 /// 渲染行：区块标题或字段。
@@ -299,6 +349,8 @@ pub struct SettingsPage {
     offset: usize,
     /// 校验/保存失败弹窗
     popup: Option<MessagePopup>,
+    /// 路径输入弹窗（mihomo-bin Enter 打开；确认 → 校验 → SaveMihomoBin）
+    pub(crate) path_popup: Option<FormPopup>,
 }
 
 /// 全部渲染行（含标题），供滚动与绘制。
@@ -329,6 +381,7 @@ impl SettingsPage {
             saved: Vec::new(),
             offset: 0,
             popup: None,
+            path_popup: None,
         }
     }
 
@@ -337,9 +390,14 @@ impl SettingsPage {
         self.fields.iter().map(|f| f.value.clone()).collect()
     }
 
-    /// 是否有未保存修改。
+    /// 是否有未保存修改（只比较 run-mode 与 config 字段；
+    /// 路径/状态/按钮显示值随状态刷新变化，不参与 dirty）。
     fn dirty(&self) -> bool {
-        !self.saved.is_empty() && self.values() != self.saved
+        if self.saved.is_empty() {
+            return false;
+        }
+        let v = self.values();
+        v[0] != self.saved[0] || v[CONFIG_START..] != self.saved[CONFIG_START..]
     }
 
     /// 从 st.settings 重新同步字段。有未保存编辑时保留（不覆盖）。
@@ -353,6 +411,17 @@ impl SettingsPage {
         self.focused = 0;
         self.editing = false;
         self.offset = 0;
+        self.path_popup = None;
+        // 运行方式区块：用运行状态覆盖路径/状态显示值
+        if let Some(rs) = &st.run_status {
+            let bin_text = rs
+                .proc
+                .as_ref()
+                .and_then(|p| p.bin.clone())
+                .unwrap_or_else(|| "未设置（Enter 设置）".to_string());
+            self.fields[1].value = bin_text;
+            self.fields[2].value = run_status_text(st.settings.run_mode, rs);
+        }
     }
 
     /// 保存（可选应用）。校验失败/落盘失败/合并失败 → 弹窗，内容保留。
@@ -366,6 +435,7 @@ impl SettingsPage {
                 None
             }
             Ok(s) => {
+                let old_mode = st.settings.run_mode;
                 if let Err(e) = save_settings(&s) {
                     self.popup = Some(MessagePopup::new(
                         "保存失败".into(),
@@ -377,6 +447,19 @@ impl SettingsPage {
                 st.settings = s.clone();
                 self.saved = self.values();
                 st.notice("[✓] 已保存".to_string());
+                // 模式切换 systemd ← direct 且进程实例运行中：自动停止（防止双实例）
+                let stop_proc = s.run_mode == RunMode::Systemd
+                    && old_mode == RunMode::Direct
+                    && st
+                        .run_status
+                        .as_ref()
+                        .and_then(|rs| rs.proc.as_ref())
+                        .map(|p| p.running)
+                        .unwrap_or(false);
+                if stop_proc {
+                    st.notice("[!] 已切换到 systemd 模式，正在停止进程实例…".to_string());
+                    return Some(UiCommand::ProcAction(ProcOp::Stop));
+                }
                 if !apply {
                     return None;
                 }
@@ -475,9 +558,34 @@ impl SettingsPage {
     }
 }
 
+/// 运行状态文本（设置页 status 字段显示）。
+pub(crate) fn run_status_text(mode: RunMode, rs: &RunStatus) -> String {
+    match mode {
+        RunMode::Systemd => {
+            let svc = match (rs.service_unit, rs.service_active) {
+                (Some(false), _) => return "未安装 mihomo.service（Enter 查看指引）".to_string(),
+                (_, Some(true)) => "服务运行中".to_string(),
+                (_, _) => "服务未运行（Enter 启动）".to_string(),
+            };
+            match rs.proc.as_ref() {
+                Some(p) if p.running => {
+                    format!("{svc}；进程实例运行中（PID {}）", p.pid.unwrap_or(0))
+                }
+                _ => svc,
+            }
+        }
+        RunMode::Direct => match rs.proc.as_ref() {
+            None => "查询失败（未安装提权组件？）".to_string(),
+            Some(p) if p.bin.is_none() => "未设置路径（Enter 设置）".to_string(),
+            Some(p) if p.running => format!("运行中（PID {}）", p.pid.unwrap_or(0)),
+            Some(_) => "未运行（无开机自启，重启系统后需手动启动）".to_string(),
+        },
+    }
+}
+
 impl Page for SettingsPage {
     fn popup_open(&self) -> bool {
-        self.popup.is_some()
+        self.popup.is_some() || self.path_popup.is_some()
     }
 
     /// 编辑模式接管全局键：输入任意字符（数字/字母/符号）不会触发
@@ -499,6 +607,22 @@ impl Page for SettingsPage {
         if let Some(mut popup) = self.popup.take() {
             if !popup.handle_key(key) {
                 self.popup = Some(popup);
+            }
+            return None;
+        }
+        // 路径输入弹窗优先：Confirm → 校验路径 → 通过则提权保存命令
+        if let Some(mut popup) = self.path_popup.take() {
+            match popup.handle_key(key) {
+                Some(FormAction::Confirm) => {
+                    let path = popup.value(0).trim().to_string();
+                    if let Err(e) = validate_mihomo_bin(&path) {
+                        self.popup = Some(MessagePopup::new("路径无效".into(), vec![e]));
+                        return None;
+                    }
+                    return Some(UiCommand::SaveMihomoBin(path));
+                }
+                Some(FormAction::Cancel) => {}
+                None => self.path_popup = Some(popup),
             }
             return None;
         }
@@ -537,10 +661,66 @@ impl Page for SettingsPage {
             KeyCode::Home => self.focused = 0,
             KeyCode::End => self.focused = FIELD_COUNT - 1,
             KeyCode::Enter => match &self.fields[self.focused].kind {
-                FieldKind::ReadOnly => {
+                FieldKind::ReadOnly => match self.focused {
                     // secret：重新生成（32 hex）
-                    self.fields[self.focused].value = generate_secret();
-                    self.cursor[self.focused] = self.fields[self.focused].value.len();
+                    i if i == FIELD_COUNT - 1 => {
+                        self.fields[i].value = generate_secret();
+                        self.cursor[i] = self.fields[i].value.len();
+                    }
+                    // mihomo 路径：打开输入弹窗（预填已有路径或 which 结果）
+                    1 => {
+                        let current = self.fields[1].value.clone();
+                        let prefill = if current.starts_with('/') {
+                            current
+                        } else {
+                            find_mihomo_in_path().unwrap_or_default()
+                        };
+                        self.path_popup = Some(FormPopup::new(
+                            "设置 mihomo 路径".into(),
+                            vec![FormField {
+                                label: "路径".into(),
+                                value: prefill,
+                                kind: FieldKind::Text,
+                            }],
+                        ));
+                    }
+                    // 状态行：按模式与状态分派
+                    2 => {
+                        let rs = st.run_status.clone();
+                        let mode = st.settings.run_mode;
+                        match mode {
+                            RunMode::Direct => return Some(UiCommand::RefreshStatus),
+                            RunMode::Systemd => match rs {
+                                Some(rs) if rs.service_unit == Some(false) => {
+                                    self.popup = Some(MessagePopup::new(
+                                        "未安装 mihomo.service".into(),
+                                        vec![
+                                            "未检测到 systemd 单元。可选方案：".into(),
+                                            "1. 参照 README「手动安装」创建 mihomo.service 后：sudo systemctl daemon-reload".into(),
+                                            "2. 仪表盘按 i 安装提权组件（仍要求单元存在）".into(),
+                                            "3. Enter mihomo-bin 设置路径，切换 direct 模式（无需 systemd）".into(),
+                                        ],
+                                    ));
+                                }
+                                Some(rs) if rs.service_active == Some(true) => {
+                                    return Some(UiCommand::RefreshStatus)
+                                }
+                                _ => return Some(UiCommand::StartSystemdService),
+                            },
+                        }
+                    }
+                    _ => {}
+                },
+                FieldKind::Action => {
+                    let op = match (self.focused, self.fields[self.focused].value.as_str()) {
+                        (3, "启动") => Some(ProcOp::Start),
+                        (4, "停止") => Some(ProcOp::Stop),
+                        (5, "重启") => Some(ProcOp::Restart),
+                        _ => None,
+                    };
+                    if let Some(op) = op {
+                        return Some(UiCommand::ProcAction(op));
+                    }
                 }
                 FieldKind::Dropdown(_) => self.cycle_dropdown(1),
                 _ => {
@@ -558,7 +738,7 @@ impl Page for SettingsPage {
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
         // 状态行：未保存标记 + 编辑中标记 + 按键提示 + 焦点字段提示
         let dirty = self.dirty();
-        let hint = "↑↓ 移动 · Enter 编辑/循环 · Ctrl+S 保存 · Ctrl+A 保存并应用";
+        let hint = "↑↓ 移动 · Enter 编辑/循环/执行 · Ctrl+S 保存 · Ctrl+A 保存并应用";
         let focus = self
             .fields
             .get(self.focused)
@@ -659,6 +839,17 @@ impl Page for SettingsPage {
                                 Rect::new(vx, y, vw, 1),
                             );
                         }
+                        FieldKind::Action => {
+                            let text = if field.value == "—" {
+                                field.value.clone()
+                            } else {
+                                format!("[ {} ]", field.value)
+                            };
+                            f.render_widget(
+                                Paragraph::new(Span::styled(text, value_style)),
+                                Rect::new(vx, y, vw, 1),
+                            );
+                        }
                         _ => {
                             let cur_chars = field.value[..self.cursor[*idx]].chars().count();
                             let start_c = cur_chars.saturating_sub(vw as usize - 1);
@@ -683,6 +874,9 @@ impl Page for SettingsPage {
         }
 
         if let Some(popup) = &mut self.popup {
+            popup.render(f, area);
+        }
+        if let Some(popup) = &mut self.path_popup {
             popup.render(f, area);
         }
     }
@@ -743,6 +937,7 @@ mod tests {
         let fields = field_values(&s);
         assert_eq!(fields.len(), FIELD_COUNT);
         let back = apply_values(&fields).expect("往返不应校验失败");
+        assert_eq!(back.run_mode, RunMode::Systemd);
         assert_eq!(back.mode, "global");
         assert!(back.ipv6);
         assert!(back.allow_lan);
@@ -787,28 +982,28 @@ mod tests {
     fn validation_rejects_invalid_input() {
         let mut fields = field_values(&fixed_settings());
         // 空端口
-        fields[3].value = "".into();
+        fields[9].value = "".into();
         let e = apply_values(&fields).unwrap_err();
         assert_eq!(e.label, "port");
         assert!(e.to_string().contains("port"));
         // 越界
-        fields[3].value = "65536".into();
+        fields[9].value = "65536".into();
         assert_eq!(apply_values(&fields).unwrap_err().label, "port");
         // 非数字
-        fields[3].value = "abc".into();
+        fields[9].value = "abc".into();
         assert_eq!(apply_values(&fields).unwrap_err().label, "port");
         // 空 CSV（先恢复合法端口，否则 port 先报错）
-        fields[3].value = "1080".into();
-        fields[16].value = " , , ".into();
+        fields[9].value = "1080".into();
+        fields[22].value = " , , ".into();
         let e = apply_values(&fields).unwrap_err();
         assert_eq!(e.label, "dns.nameserver");
         // 空文本
-        fields[16].value = "1.1.1.1".into();
-        fields[13].value = "".into();
+        fields[22].value = "1.1.1.1".into();
+        fields[19].value = "".into();
         assert_eq!(apply_values(&fields).unwrap_err().label, "dns.listen");
         // 非法枚举（绕过 UI 直接改值）
-        fields[13].value = "0.0.0.0:1053".into();
-        fields[0].value = "hack".into();
+        fields[19].value = "0.0.0.0:1053".into();
+        fields[6].value = "hack".into();
         assert_eq!(apply_values(&fields).unwrap_err().label, "mode");
     }
 
@@ -817,9 +1012,9 @@ mod tests {
     fn secret_field_is_readonly() {
         let s = fixed_settings();
         let fields = field_values(&s);
-        assert_eq!(fields[21].label, "secret");
-        assert_eq!(fields[21].value, "a".repeat(32));
-        assert_eq!(fields[21].kind, FieldKind::ReadOnly);
+        assert_eq!(fields[27].label, "secret");
+        assert_eq!(fields[27].value, "a".repeat(32));
+        assert_eq!(fields[27].kind, FieldKind::ReadOnly);
     }
 
     /// split_csv：分割、trim、去空项。
@@ -833,6 +1028,7 @@ mod tests {
     // ---- SettingsPage 整页表单 ----
 
     use crate::app::{AppState, UiCommand};
+    use crate::core::apply::ProcStatus;
     use crate::core::client::RuntimeConfig;
     use crate::core::settings::{load_settings, save_settings, with_settings_dir};
     use crate::ui::Page;
@@ -880,7 +1076,7 @@ mod tests {
         let mut st = test_state();
         st.settings.port = 8888;
         let p = page_with_state(&st);
-        assert_eq!(p.fields[3].value, "8888");
+        assert_eq!(p.fields[9].value, "8888");
         assert!(!p.dirty(), "同步后不应是未保存状态");
     }
 
@@ -890,7 +1086,7 @@ mod tests {
         let mut st = test_state();
         let mut p = page_with_state(&st);
         // 编辑 port 字段：选中 → Enter 进编辑 → 输入 9
-        p.focused = 3;
+        p.focused = 9;
         press(
             &mut p,
             &mut st,
@@ -905,7 +1101,7 @@ mod tests {
         // st.settings 被外部改动（如仪表盘热切）后 on_enter 不应覆盖编辑
         st.settings.port = 7777;
         p.on_enter(&st);
-        assert!(p.fields[3].value.contains('9'), "dirty 时不应重新同步");
+        assert!(p.fields[9].value.contains('9'), "dirty 时不应重新同步");
     }
 
     /// Ctrl+S 仅保存：落盘 + st.settings 同步 + 无命令 + 清除 dirty。
@@ -915,7 +1111,7 @@ mod tests {
             let mut st = test_state();
             save_settings(&st.settings).unwrap();
             let mut p = page_with_state(&st);
-            p.focused = 3;
+            p.focused = 9;
             press(
                 &mut p,
                 &mut st,
@@ -961,7 +1157,7 @@ mod tests {
             let mut st = test_state();
             save_settings(&st.settings).unwrap();
             let mut p = page_with_state(&st);
-            p.focused = 3;
+            p.focused = 9;
             press(
                 &mut p,
                 &mut st,
@@ -1010,7 +1206,7 @@ mod tests {
             save_settings(&st.settings).unwrap();
             let mut p = page_with_state(&st);
             // 清空 port
-            p.focused = 3;
+            p.focused = 9;
             press(
                 &mut p,
                 &mut st,
@@ -1026,8 +1222,8 @@ mod tests {
             let cmd = press(&mut p, &mut st, ctrl('s'));
             assert!(cmd.is_none());
             assert!(p.popup.is_some(), "应有错误弹窗");
-            assert_eq!(p.focused, 3, "焦点应留在出错字段");
-            assert!(p.fields[3].value.is_empty(), "已填内容应保留");
+            assert_eq!(p.focused, 9, "焦点应留在出错字段");
+            assert!(p.fields[9].value.is_empty(), "已填内容应保留");
             let back = load_settings().unwrap();
             assert_eq!(back.port, 7890, "失败时不应落盘");
             // 关闭弹窗后仍可继续编辑（内容未丢）
@@ -1071,26 +1267,35 @@ mod tests {
         let mut st = test_state();
         let mut p = page_with_state(&st);
         assert_eq!(p.focused, 0);
+        // ↓ 从 run-mode 走到 mode（跳过运行方式区块前 6 字段）
+        for _ in 0..6 {
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            );
+        }
+        assert_eq!(p.focused, 6);
         // mode → global → direct（Enter 循环）
         press(
             &mut p,
             &mut st,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
-        assert_eq!(p.fields[0].value, "global");
+        assert_eq!(p.fields[6].value, "global");
         press(
             &mut p,
             &mut st,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
         );
-        assert_eq!(p.fields[0].value, "direct");
+        assert_eq!(p.fields[6].value, "direct");
         // ↓ 走到下一个字段
         press(
             &mut p,
             &mut st,
             KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
         );
-        assert_eq!(p.focused, 1);
+        assert_eq!(p.focused, 7);
     }
 
     /// 文本字段编辑模式：Enter 进入、End 光标定位末尾、输入、Esc 退出。
@@ -1098,8 +1303,8 @@ mod tests {
     fn text_field_edit_mode() {
         let mut st = test_state();
         let mut p = page_with_state(&st);
-        // dns.listen（index 13）进入编辑后追加端口
-        p.focused = 13;
+        // dns.listen（index 19）进入编辑后追加端口
+        p.focused = 19;
         press(
             &mut p,
             &mut st,
@@ -1131,7 +1336,7 @@ mod tests {
             &mut st,
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         );
-        assert_eq!(p.fields[13].value, "0.0.0.0:1053:15");
+        assert_eq!(p.fields[19].value, "0.0.0.0:1053:15");
         assert!(!p.editing, "Esc 退出编辑模式");
     }
 
@@ -1140,7 +1345,7 @@ mod tests {
     fn number_field_edit_filters_non_digits() {
         let mut st = test_state();
         let mut p = page_with_state(&st);
-        p.focused = 3; // port
+        p.focused = 9; // port
         press(
             &mut p,
             &mut st,
@@ -1151,26 +1356,26 @@ mod tests {
             &mut st,
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
         );
-        assert_eq!(p.fields[3].value, "7890", "非数字不应插入");
+        assert_eq!(p.fields[9].value, "7890", "非数字不应插入");
         press(
             &mut p,
             &mut st,
             KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE),
         );
-        assert_eq!(p.fields[3].value, "7890", "符号也不应插入");
+        assert_eq!(p.fields[9].value, "7890", "符号也不应插入");
         press(
             &mut p,
             &mut st,
             KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
         );
-        assert_eq!(p.fields[3].value, "78905", "数字应插入");
+        assert_eq!(p.fields[9].value, "78905", "数字应插入");
         // Text 字段不受限（数字字母均可）
         press(
             &mut p,
             &mut st,
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         );
-        p.focused = 13;
+        p.focused = 19;
         press(
             &mut p,
             &mut st,
@@ -1182,7 +1387,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
         );
         assert_eq!(
-            p.fields[13].value, "0.0.0.0:1053a",
+            p.fields[19].value, "0.0.0.0:1053a",
             "Text 字段任意字符可插入"
         );
     }
@@ -1204,5 +1409,298 @@ mod tests {
             assert!(press(&mut p, &mut st, key).is_none(), "{key:?} 应无操作");
         }
         assert!(p.fields.is_empty(), "不应产生字段");
+    }
+
+    /// 运行方式区块：run-mode 下拉循环 + Ctrl+S 持久化 run_mode。
+    #[test]
+    fn run_mode_dropdown_cycles_and_persists() {
+        with_settings_dir(|| {
+            let mut st = test_state();
+            save_settings(&st.settings).unwrap();
+            let mut p = page_with_state(&st);
+            assert_eq!(p.fields[0].value, "systemd");
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            );
+            assert_eq!(p.fields[0].value, "direct");
+            assert!(p.dirty(), "切换后应标记未保存");
+            press(&mut p, &mut st, ctrl('s'));
+            let back = load_settings().unwrap();
+            assert_eq!(back.run_mode, RunMode::Direct);
+        });
+    }
+
+    /// dirty 排除规则：状态显示值变化（模拟刷新）不污染未保存标记。
+    #[test]
+    fn status_field_changes_do_not_mark_dirty() {
+        let st = test_state();
+        let mut p = page_with_state(&st);
+        // 模拟状态刷新写入 f[1]/f[2]
+        p.fields[1].value = "/usr/bin/mihomo".into();
+        p.fields[2].value = "运行中（PID 1234）".into();
+        assert!(!p.dirty(), "状态字段变化不应触发未保存标记");
+        // 但 run-mode 变化会
+        p.fields[0].value = "direct".into();
+        assert!(p.dirty());
+    }
+
+    /// 路径字段 Enter → 打开路径输入弹窗（预填 which 结果或已有路径）。
+    #[test]
+    fn bin_field_enter_opens_path_popup_with_prefill() {
+        let mut st = test_state();
+        st.run_status = Some(RunStatus {
+            service_unit: Some(true),
+            service_active: Some(true),
+            proc: Some(ProcStatus {
+                bin: Some("/usr/bin/mihomo".into()),
+                pid: None,
+                running: false,
+            }),
+        });
+        let mut p = page_with_state(&st);
+        p.focused = 1;
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        let popup = p.path_popup.as_ref().expect("应打开路径弹窗");
+        assert_eq!(popup.value(0), "/usr/bin/mihomo", "已有路径应预填");
+        // 未配置时预填 which mihomo 结果（环境自适应）
+        st.run_status = None;
+        let mut p2 = page_with_state(&st);
+        p2.focused = 1;
+        press(
+            &mut p2,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        let popup = p2.path_popup.as_ref().expect("应打开路径弹窗");
+        let expected = crate::core::apply::find_mihomo_in_path().unwrap_or_default();
+        assert_eq!(popup.value(0), expected);
+    }
+
+    /// 路径弹窗确认：校验失败 → 页内错误弹窗不返回命令；校验通过 → SaveMihomoBin 命令。
+    #[test]
+    fn path_popup_confirm_validates_and_returns_command() {
+        let mut st = test_state();
+        let mut p = page_with_state(&st);
+        p.focused = 1;
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        // 清空预填（反复 Backspace）→ 空路径确认 → 校验错误弹窗、无命令
+        {
+            let n = p.path_popup.as_ref().unwrap().value(0).len();
+            for _ in 0..n {
+                press(
+                    &mut p,
+                    &mut st,
+                    KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+                );
+            }
+        }
+        let cmd = press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(cmd.is_none(), "空路径不应返回命令");
+        assert!(p.popup.is_some(), "应有校验错误弹窗");
+        // 关闭错误弹窗
+        press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        assert!(p.popup.is_none());
+        // 环境自适应：PATH 中能找到 mihomo 时，重新打开弹窗预填合法路径，直接确认即可提交
+        if crate::core::apply::find_mihomo_in_path().is_some() {
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            );
+            let cmd = press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            );
+            match cmd {
+                Some(UiCommand::SaveMihomoBin(path)) => {
+                    assert!(path.starts_with('/'));
+                    assert!(
+                        std::path::Path::new(&path).exists(),
+                        "预填路径应存在: {path}"
+                    );
+                }
+                other => panic!("应返回 SaveMihomoBin: {other:?}"),
+            }
+            assert!(p.path_popup.is_none(), "确认后弹窗应关闭");
+        }
+    }
+
+    /// Action 字段：direct 模式 Enter → ProcAction 命令；systemd 模式（—）→ 无命令。
+    #[test]
+    fn action_fields_dispatch_by_mode() {
+        let mut st = test_state();
+        st.settings.run_mode = RunMode::Direct;
+        let mut p = page_with_state(&st);
+        p.focused = 3;
+        let cmd = press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(matches!(cmd, Some(UiCommand::ProcAction(ProcOp::Start))));
+        p.focused = 4;
+        let cmd = press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(matches!(cmd, Some(UiCommand::ProcAction(ProcOp::Stop))));
+        p.focused = 5;
+        let cmd = press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(matches!(cmd, Some(UiCommand::ProcAction(ProcOp::Restart))));
+        // systemd 模式：按钮禁用（值 —）
+        let mut st2 = test_state();
+        st2.settings.run_mode = RunMode::Systemd;
+        let mut p2 = page_with_state(&st2);
+        assert_eq!(p2.fields[3].value, "—");
+        p2.focused = 3;
+        let cmd = press(
+            &mut p2,
+            &mut st2,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(cmd.is_none(), "systemd 模式动作应禁用");
+    }
+
+    /// status 字段 Enter 分派：systemd+active → 刷新；systemd+inactive → StartSystemdService；
+    /// 单元缺失 → 页内指引弹窗；direct → 刷新。
+    #[test]
+    fn status_field_enter_dispatches() {
+        // systemd + 运行中 → RefreshStatus
+        let mut st = test_state();
+        st.run_status = Some(RunStatus {
+            service_unit: Some(true),
+            service_active: Some(true),
+            proc: None,
+        });
+        let mut p = page_with_state(&st);
+        p.focused = 2;
+        let cmd = press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(
+            matches!(cmd, Some(UiCommand::RefreshStatus)),
+            "运行中应刷新: {cmd:?}"
+        );
+        // systemd + 未运行 → StartSystemdService
+        st.run_status = Some(RunStatus {
+            service_unit: Some(true),
+            service_active: Some(false),
+            proc: None,
+        });
+        let mut p = page_with_state(&st);
+        p.focused = 2;
+        let cmd = press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(matches!(cmd, Some(UiCommand::StartSystemdService)));
+        // 单元缺失 → 指引弹窗（无命令）
+        st.run_status = Some(RunStatus {
+            service_unit: Some(false),
+            service_active: Some(false),
+            proc: None,
+        });
+        let mut p = page_with_state(&st);
+        p.focused = 2;
+        let cmd = press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(cmd.is_none(), "单元缺失应只弹指引: {cmd:?}");
+        assert!(p.popup.is_some());
+        // direct → 刷新
+        st.settings.run_mode = RunMode::Direct;
+        let mut p = page_with_state(&st);
+        p.focused = 2;
+        let cmd = press(
+            &mut p,
+            &mut st,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        );
+        assert!(matches!(cmd, Some(UiCommand::RefreshStatus)));
+    }
+
+    /// 模式切换 systemd ← direct 且进程运行中：Ctrl+S 保存后返回 ProcAction(Stop)。
+    #[test]
+    fn mode_switch_to_systemd_returns_stop_when_proc_running() {
+        with_settings_dir(|| {
+            let mut st = test_state();
+            st.settings.run_mode = RunMode::Direct;
+            st.run_status = Some(RunStatus {
+                service_unit: Some(true),
+                service_active: Some(false),
+                proc: Some(ProcStatus {
+                    bin: Some("/usr/bin/mihomo".into()),
+                    pid: Some(42),
+                    running: true,
+                }),
+            });
+            save_settings(&st.settings).unwrap();
+            let mut p = page_with_state(&st);
+            // 切回 systemd
+            p.focused = 0;
+            press(
+                &mut p,
+                &mut st,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            ); // direct → systemd
+            let cmd = press(&mut p, &mut st, ctrl('s'));
+            assert!(
+                matches!(cmd, Some(UiCommand::ProcAction(ProcOp::Stop))),
+                "进程运行中切 systemd 应自动停止: {cmd:?}"
+            );
+            let back = load_settings().unwrap();
+            assert_eq!(back.run_mode, RunMode::Systemd);
+            // 进程未运行时切换：无 stop 命令
+            let mut st2 = test_state();
+            st2.settings.run_mode = RunMode::Direct;
+            st2.run_status = Some(RunStatus {
+                service_unit: Some(true),
+                service_active: Some(false),
+                proc: Some(ProcStatus {
+                    bin: Some("/usr/bin/mihomo".into()),
+                    pid: None,
+                    running: false,
+                }),
+            });
+            save_settings(&st2.settings).unwrap();
+            let mut p2 = page_with_state(&st2);
+            p2.focused = 0;
+            press(
+                &mut p2,
+                &mut st2,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            );
+            let cmd = press(&mut p2, &mut st2, ctrl('s'));
+            assert!(cmd.is_none(), "未运行无需停止: {cmd:?}");
+        });
     }
 }

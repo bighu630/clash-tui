@@ -26,6 +26,8 @@ pub enum FieldKind {
     Number,
     /// 只读展示（如 secret）：不响应任何编辑按键
     ReadOnly,
+    /// 动作按钮（如启动/停止/重启）：Enter 触发页面定义的动作
+    Action,
 }
 
 /// 表单字段。
@@ -112,6 +114,7 @@ impl FormPopup {
                 }
                 FieldKind::Text => self.insert_char(c),
                 FieldKind::ReadOnly => {}
+                FieldKind::Action => {}
             },
             _ => {}
         }
@@ -186,6 +189,11 @@ impl FormPopup {
     /// 与 fields 顺序一致的当前值。
     pub fn values(&self) -> Vec<String> {
         self.fields.iter().map(|f| f.value.clone()).collect()
+    }
+
+    /// 读取字段当前值（测试与确认流程用）。
+    pub fn value(&self, idx: usize) -> &str {
+        self.fields.get(idx).map(|f| f.value.as_str()).unwrap_or("")
     }
 
     pub fn render(&mut self, f: &mut Frame, area: Rect) {

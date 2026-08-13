@@ -117,7 +117,7 @@ pub async fn install() -> Result<Vec<String>, InstallError> {
     logs.push("[1/6] 已检测到 mihomo 二进制".to_string());
 
     // b. 检查 systemd 服务单元
-    if !service_unit_exists() {
+    if !crate::core::apply::service_unit_exists().await {
         return Err(InstallError::ServiceUnitMissing);
     }
     logs.push("[2/6] 已检测到 mihomo.service 系统单元".to_string());
@@ -168,17 +168,6 @@ fn mihomo_exists() -> bool {
         .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// `systemctl list-unit-files mihomo.service` 输出中是否含 mihomo.service。
-fn service_unit_exists() -> bool {
-    Command::new("systemctl")
-        .args(["list-unit-files", "mihomo.service"])
-        .output()
-        .map(|o| {
-            o.status.success() && String::from_utf8_lossy(&o.stdout).contains("mihomo.service")
-        })
         .unwrap_or(false)
 }
 

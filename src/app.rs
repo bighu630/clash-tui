@@ -23,7 +23,7 @@ use crate::core::client::{
     TrafficFrame,
 };
 use crate::core::exit_ip::{self, ExitInfo, ProxyPorts};
-use crate::core::models::{NetworkSettings, Overrides, Subscription, SubscriptionCache};
+use crate::core::models::{NetworkSettings, Overrides, RunMode, Subscription, SubscriptionCache};
 use crate::core::settings::{
     load_overrides, load_settings, load_subscriptions, save_overrides, save_subscriptions,
 };
@@ -887,7 +887,7 @@ where
                         Err(e) => {
                             let _ = ui_tx.send(UiEvent::ApplyDone(Err(e.to_string())));
                         }
-                        Ok(()) => match apply_config(&yaml, true).await {
+                        Ok(()) => match apply_config(&yaml, true, RunMode::Systemd).await {
                             Ok(outcome) => {
                                 let _ = ui_tx.send(UiEvent::ApplyDone(Ok(outcome)));
                             }
@@ -994,9 +994,9 @@ where
         let _ = crossterm::execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen);
 
         let result = match task {
-            InteractiveTask::Apply(yaml) => {
-                apply_config(&yaml, false).await.map_err(|e| e.to_string())
-            }
+            InteractiveTask::Apply(yaml) => apply_config(&yaml, false, RunMode::Systemd)
+                .await
+                .map_err(|e| e.to_string()),
             InteractiveTask::Install => crate::service::installer::install()
                 .await
                 .map(|lines| ApplyOutcome {

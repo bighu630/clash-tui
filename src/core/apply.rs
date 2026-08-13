@@ -804,22 +804,9 @@ mod tests {
         ));
     }
 
-    /// 环境自适应：systemctl_control 直接执行（无 sudo）。
-    /// 桌面有 polkit 代理时可能成功；无代理/未授权 → SystemdAuthFailed 或 CommandFailed。
-    #[cfg(not(windows))]
-    #[tokio::test]
-    async fn systemctl_control_env_adaptive() {
-        match systemctl_control(ProcOp::Start).await {
-            Ok(outcome) => assert!(outcome.success),
-            Err(
-                ApplyError::SystemdAuthFailed { .. }
-                | ApplyError::CommandFailed { .. }
-                | ApplyError::Io(_),
-            ) => {}
-            Err(other) => panic!("意外错误: {other:?}"),
-        }
-    }
-
+    /// systemctl_control 的真实执行不在单测覆盖（pkexec 会触发桌面 polkit 密码弹窗，
+    /// 干扰日常测试）；由 classify_systemctl_failure_rules 覆盖失败分类，
+    /// 实际执行链路经手动/端到端验证（设置页按钮）。
     /// 环境自适应：mihomo-proc 未安装时 proc_control/proc_status 直接返回
     /// ProcScriptMissing（明确引导重装，而非 sudo 裸报"找不到命令"）。
     /// Linux 专属（is_proc_script_installed 已门控）。

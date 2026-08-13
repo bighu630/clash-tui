@@ -264,7 +264,7 @@ mod tests {
                     fetched_at: "2026-08-10T12:00:00Z".into(),
                 }),
             };
-            save_subscriptions(&[sub.clone()]).unwrap();
+            save_subscriptions(std::slice::from_ref(&sub)).unwrap();
             let back = load_subscriptions().unwrap();
             assert_eq!(back, vec![sub]);
         });

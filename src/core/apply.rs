@@ -491,13 +491,27 @@ mod tests {
     /// 依赖 config_dir（MIHOMO_TUI_SETTINGS_DIR）的三个用例与 settings/dashboard
     /// 测试共用 SETTINGS_DIR_LOCK（with_settings_dir）串行执行，消除 env 并行读写
     /// 竞态。with_settings_dir 为同步闭包，内部以独立 Runtime block_on 驱动异步体。
-    /// 依赖真实 mihomo/sudo 环境，windows-latest CI 无 → 仅 Linux。
+    /// 依赖真实 mihomo 环境，windows-latest CI 无 → 仅 Linux；
+    /// ubuntu-latest 等无 mihomo 的环境自适应跳过。
+    #[cfg(not(windows))]
+    fn mihomo_available() -> bool {
+        std::process::Command::new("mihomo")
+            .arg("-v")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn validate_ok_minimal_config() {
+        // 环境自适应：ubuntu-latest 等无 mihomo 的 CI 直接跳过
+        if !mihomo_available() {
+            eprintln!("跳过：本机无 mihomo");
+            return;
+        }
         with_settings_dir(|| {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            // 本机已装 mihomo（计划验收环境）
             rt.block_on(validate_config("port: 7890\n", None)).unwrap();
         });
     }
@@ -505,6 +519,11 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn validate_bad_yaml_fails_with_stderr() {
+        // 环境自适应：无 mihomo 时无法产生校验 stderr，跳过
+        if !mihomo_available() {
+            eprintln!("跳过：本机无 mihomo");
+            return;
+        }
         with_settings_dir(|| {
             let rt = tokio::runtime::Runtime::new().unwrap();
             let e = rt

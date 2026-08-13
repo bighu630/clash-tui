@@ -621,7 +621,7 @@ where
                 }
                 Act::Tick => {
                     self.tick_count += 1;
-                    if self.tick_count % 5 == 0 || !self.state.api_ok {
+                    if self.tick_count.is_multiple_of(5) || !self.state.api_ok {
                         let _ = self.cmd_tx.send(UiCommand::ReloadConfigs);
                     }
                     // 设置页停留：周期性刷新运行状态（用户在终端 systemctl start/stop

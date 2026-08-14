@@ -1,7 +1,7 @@
 # clash-tui
 
 Linux 下的 [mihomo](https://github.com/MetaCubeX/mihomo)（Clash Meta 内核）终端控制器。
-Rust + ratatui 实现，无需浏览器/桌面环境，在纯终端里完成订阅管理、配置合并、节点切换与流量监控。
+极致的内存体验。
 
 仓库：<https://github.com/bighu630/clash-tui>
 

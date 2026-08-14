@@ -3,7 +3,6 @@
 Linux 下的 [mihomo](https://github.com/MetaCubeX/mihomo)（Clash Meta 内核）终端控制器。
 极致的内存体验。
 
-仓库：<https://github.com/bighu630/clash-tui>
 
 ## 平台支持
 

@@ -83,6 +83,19 @@ async fn fetch_once(client: &reqwest::Client, url: &str) -> Result<String, Fetch
     String::from_utf8(buf).map_err(|_| FetchError::Other("订阅内容不是 UTF-8 文本".into()))
 }
 
+fn try_decode_base64_yaml(content: &str) -> Option<String> {
+    let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+    let decoded = parsers::b64_decode(&compact)?;
+    let s = String::from_utf8_lossy(&decoded).into_owned();
+    // 仅用强特征键避免误判：分享链接的 base64 解码后若节点名含 "dns:" 等短键会误判为 YAML
+    for key in ["proxies:", "proxy-groups:", "proxy-providers:"] {
+        if s.contains(key) {
+            return Some(s);
+        }
+    }
+    None
+}
+
 /// 识别订阅内容类型。
 pub fn detect_kind(content: &str) -> SubscriptionKind {
     let t = content.trim();
@@ -92,21 +105,9 @@ pub fn detect_kind(content: &str) -> SubscriptionKind {
     if t.contains("proxies:") || t.contains("proxy-groups:") || t.contains("proxy-providers:") {
         return SubscriptionKind::Yaml;
     }
-    // 整体 base64 包裹？解码后再看
-    if let Some(decoded) = parsers::b64_decode(t) {
-        let s = String::from_utf8_lossy(&decoded);
-        for key in [
-            "proxies:",
-            "proxy-groups:",
-            "port:",
-            "mixed-port:",
-            "dns:",
-            "tun:",
-        ] {
-            if s.contains(key) {
-                return SubscriptionKind::Yaml;
-            }
-        }
+    // 整体 base64 包裹？解码后再看（兼容多行 base64）
+    if try_decode_base64_yaml(content).is_some() {
+        return SubscriptionKind::Yaml;
     }
     SubscriptionKind::ShareLinks
 }
@@ -117,7 +118,11 @@ pub fn parse_subscription(content: &str) -> Result<SubscriptionCache, ParseError
         return Err(ParseError::Message("订阅内容为空".into()));
     }
     match detect_kind(content) {
-        SubscriptionKind::Yaml => parse_yaml(content),
+        SubscriptionKind::Yaml => {
+            let yaml_content =
+                try_decode_base64_yaml(content).unwrap_or_else(|| content.to_string());
+            parse_yaml(&yaml_content)
+        }
         SubscriptionKind::ShareLinks => parse_links(content),
     }
 }
@@ -303,6 +308,24 @@ mod tests {
     }
 
     #[test]
+    fn detect_base64_yaml_multiline() {
+        let yaml = "proxies:\n  - name: a\n    type: ss\n";
+        let b64 = base64_encode(yaml);
+        // 按 76 字符换行模拟多行 base64
+        let chunked: String = b64
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(76)
+            .map(|c| c.iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            matches!(detect_kind(&chunked), SubscriptionKind::Yaml),
+            "多行 base64 YAML 应识别为 Yaml"
+        );
+    }
+
+    #[test]
     fn detect_base64_links() {
         let links = "vless://uuid@1.2.3.4:443#A\ntrojan://pass@1.2.3.4:443#B\n";
         let b64 = base64_encode(links);
@@ -429,6 +452,33 @@ rules:
         assert_eq!(c.proxies.len(), 2);
         assert_eq!(c.proxies[0].name, "X");
         assert_eq!(c.proxies[1].name, "Y");
+    }
+
+    #[test]
+    fn parse_base64_yaml() {
+        let b64 = base64_encode(YAML_SUB);
+        let c = parse_subscription(&b64).unwrap();
+        assert_eq!(c.proxies.len(), 2);
+        assert_eq!(c.proxy_groups.len(), 1);
+        assert_eq!(c.rules.len(), 2);
+        assert_eq!(c.proxies[0].name, "节点A");
+        assert_eq!(c.proxies[1].name, "节点B");
+    }
+
+    #[test]
+    fn parse_base64_yaml_with_newlines() {
+        let b64 = base64_encode(YAML_SUB);
+        let chunked: String = b64
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(76)
+            .map(|c| c.iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let c = parse_subscription(&chunked).unwrap();
+        assert_eq!(c.proxies.len(), 2);
+        assert_eq!(c.proxy_groups.len(), 1);
+        assert_eq!(c.rules.len(), 2);
     }
 
     #[test]

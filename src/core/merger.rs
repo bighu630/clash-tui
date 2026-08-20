@@ -109,16 +109,19 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
     // ---------- 5. 自定义规则（target 校验 → MergeError） ----------
     let mut rules: Vec<String> = Vec::new();
     for r in &ctx.overrides.rules {
-        let s = if r.rule_type == "MATCH" {
-            format!("MATCH,{}", r.target)
+        let target_trim = r.target.trim();
+        let payload_trim = r.payload.trim();
+        let rule_type_trim = r.rule_type.trim();
+        let s = if rule_type_trim == "MATCH" {
+            format!("MATCH,{target_trim}")
         } else {
-            format!("{},{},{}", r.rule_type, r.payload, r.target)
+            format!("{rule_type_trim},{payload_trim},{target_trim}")
         };
-        if !targets.contains(&r.target) {
+        // targets 比较时 trim，兼容用户输入带空格
+        if !targets.iter().any(|t| t.trim() == target_trim) {
             return Err(MergeError {
                 message: format!(
-                    "自定义规则「{s}」的目标「{}」不存在（可用：订阅节点/组/内置 {}）",
-                    r.target,
+                    "自定义规则「{s}」的目标「{target_trim}」不存在（可用：订阅节点/组/内置 {}）",
                     BUILTIN_TARGETS.join("/")
                 ),
             });
@@ -129,29 +132,103 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
     // ---------- 6. 订阅规则（去重 + 目标校验，丢弃记 warning） ----------
     if let Some(cache) = ctx.subscription.and_then(|s| s.cache.as_ref()) {
         for r in &cache.rules {
-            if rules.contains(r) {
+            // 去重：规范化后比较（去除逗号周围空格），兼容订阅中同一规则带空格的重复
+            let normalized_dup = r
+                .trim()
+                .split(',')
+                .map(|s| s.trim())
+                .collect::<Vec<_>>()
+                .join(",");
+            if rules.contains(&normalized_dup) {
                 warnings.push(format!("订阅规则「{r}」与已有规则重复，已丢弃"));
                 continue;
             }
-            // 目标解析：mihomo 规则格式 TYPE,payload,target[,选项...]。
-            // MATCH 类（无 payload）目标在第 2 段，其余类型目标在第 3 段。
-            let parts: Vec<&str> = r.split(',').collect();
-            let target = match parts.as_slice() {
-                ["MATCH", t, ..] => *t,
-                [_, _, t, ..] => *t,
-                _ => {
+            // 目标解析：健壮处理前后空格、逻辑规则（AND/OR 含嵌套逗号）与 no-resolve 选项。
+            // mihomo 规则格式 TYPE,payload,target[,选项...]；逻辑规则 payload 含逗号，故目标应取最后一段
+            // （若最后一段为 no-resolve 则取倒数第二段）。MATCH 类无 payload，目标同样为最后一段。
+            let trimmed = r.trim();
+            if trimmed.is_empty() {
+                warnings.push(format!("订阅规则「{r}」格式异常，已丢弃"));
+                continue;
+            }
+            let parts: Vec<&str> = trimmed.split(',').map(|s| s.trim()).collect();
+            // 判断是否为 no-resolve 选项（大小写不敏感）
+            let is_no_resolve = parts
+                .last()
+                .map(|s| s.eq_ignore_ascii_case("no-resolve"))
+                .unwrap_or(false);
+            // 根据是否含 no-resolve 确定 target 位置与最小长度校验
+            let target_raw: &str = if is_no_resolve {
+                if parts.len() < 2 {
                     warnings.push(format!("订阅规则「{r}」格式异常，已丢弃"));
                     continue;
                 }
+                parts[parts.len() - 2]
+            } else {
+                // parts 非空（trimmed 非空保证至少 1 段）
+                parts.last().copied().unwrap()
             };
-            if !targets.contains(&target.to_string()) {
+            let target = target_raw.trim();
+            if target.is_empty() {
+                warnings.push(format!("订阅规则「{r}」格式异常，已丢弃"));
+                continue;
+            }
+            // 长度校验：MATCH 需 >=2 段（no-resolve 时 >=3），非 MATCH 需 >=3 段（no-resolve 时 >=4）
+            let is_match = parts
+                .first()
+                .map(|s| s.eq_ignore_ascii_case("MATCH"))
+                .unwrap_or(false);
+            let min_len = if is_match {
+                if is_no_resolve {
+                    3
+                } else {
+                    2
+                }
+            } else if is_no_resolve {
+                4
+            } else {
+                3
+            };
+            if parts.len() < min_len {
+                warnings.push(format!("订阅规则「{r}」格式异常，已丢弃"));
+                continue;
+            }
+            // targets 来自订阅组名/节点名（YAML 解析已去引号与外层空格），此处对 target trim 后比较；
+            // 为容错对 targets 元素也 trim 后比较。
+            let target_exists = targets.iter().any(|t| t.trim() == target);
+            if !target_exists {
                 warnings.push(format!(
                     "订阅规则「{r}」的目标「{target}」不存在，已丢弃该规则"
                 ));
                 continue;
             }
-            rules.push(r.clone());
+            // 规范化存储：去除逗号周围多余空格，避免 mihomo 运行时因 "Proxy " 尾空格导致匹配失败
+            let normalized = parts.join(",");
+            rules.push(normalized);
         }
+    }
+
+    // ---------- 6b. 规则重排：MATCH 类规则固定置底（避免自定义 MATCH 在前遮蔽订阅规则） ----------
+    // mihomo 语义要求 MATCH 恒为最后一条，否则后续规则不可达；此处对全部规则稳定分区。
+    // 大小写不敏感：兼容机场不规范的 match/Match
+    let has_match = rules.iter().any(|r| {
+        r.trim()
+            .split(',')
+            .next()
+            .map(|s| s.trim().eq_ignore_ascii_case("MATCH"))
+            .unwrap_or(false)
+    });
+    if has_match {
+        let (mut non_match, mut is_match): (Vec<String>, Vec<String>) =
+            rules.into_iter().partition(|r| {
+                !r.trim()
+                    .split(',')
+                    .next()
+                    .map(|s| s.trim().eq_ignore_ascii_case("MATCH"))
+                    .unwrap_or(false)
+            });
+        non_match.append(&mut is_match);
+        rules = non_match;
     }
 
     // ---------- 7. 兜底默认规则：有节点但无任何规则 ----------

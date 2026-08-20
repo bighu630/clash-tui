@@ -297,6 +297,34 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
         str_seq(s.dns.fake_ip_filter.iter().cloned()),
     );
     kv(&mut root, "dns", Value::Mapping(dns));
+    // 域名嗅探：TUN 流量通过 TLS SNI / HTTP Host 还原真实域名，使 DOMAIN(/KEYWORD/-SUFFIX) 规则生效
+    // 否则 TUN 下 host 为空，仅 IP 类规则（GEOIP/IP-CIDR）生效，全部回落到 MATCH（🐟 漏网之鱼）
+    let mut sniffer = Mapping::new();
+    kv(&mut sniffer, "enable", true);
+    kv(&mut sniffer, "force-dns-mapping", true);
+    kv(&mut sniffer, "parse-pure-ip", true);
+    let mut sniff = Mapping::new();
+    let mut http = Mapping::new();
+    kv(
+        &mut http,
+        "ports",
+        Value::Sequence(vec![
+            Value::Number(80.into()),
+            Value::String("8080-8880".into()),
+        ]),
+    );
+    kv(&mut http, "override-destination", true);
+    let mut tls = Mapping::new();
+    kv(
+        &mut tls,
+        "ports",
+        Value::Sequence(vec![Value::Number(443.into()), Value::Number(8443.into())]),
+    );
+    kv(&mut tls, "override-destination", true);
+    kv(&mut sniff, "HTTP", Value::Mapping(http));
+    kv(&mut sniff, "TLS", Value::Mapping(tls));
+    kv(&mut sniffer, "sniff", Value::Mapping(sniff));
+    kv(&mut root, "sniffer", Value::Mapping(sniffer));
     // select 组选择持久化：重启后保持运行时切换的节点
     let mut profile = Mapping::new();
     kv(&mut profile, "store-selected", true);
@@ -443,6 +471,7 @@ mod tests {
             "secret",
             "tun",
             "dns",
+            "sniffer",
             "profile",
             "proxy-groups",
             "rules",
@@ -591,7 +620,7 @@ mod tests {
             !keys.contains(&"proxies".to_string()),
             "不应有 proxies 键: {keys:?}"
         );
-        assert!(keys.len() <= 13, "不应注入模板: {keys:?}");
+        assert!(keys.len() <= 14, "不应注入模板: {keys:?}");
         let rs = v["rules"].as_sequence().unwrap();
         assert_eq!(rs[0], Value::String("MATCH,DIRECT".into()));
     }

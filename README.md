@@ -59,7 +59,7 @@ cargo build --release
 #    按 Enter 激活：自动完成「合并 → mihomo -t 预校验 → 提权应用 → 重启」
 
 # 5. 日常使用：
-#    仪表盘  m/t/6 热切换模式/TUN/IPv6，r 刷新出口 IP，s 跳转设置页
+#    仪表盘  m/t/6 热切换模式/TUN/IPv6，r 刷新出口 IP，R 重启核心（需确认），s 跳转设置页
 #    规则组/规则页  分流策略：规则组只读展示与切换、规则页自定义规则（见「使用指南」）
 #    也可手动生成配置：cargo run --example merge_sample > /tmp/config.yaml
 ```
@@ -331,6 +331,7 @@ WantedBy=multi-user.target
 | `t` | 开关 TUN（PATCH 热切，需进程持有 CAP_NET_ADMIN） |
 | `6` | 开关 IPv6（PATCH 热切） |
 | `r` | 手动刷新出口 IP（含国家） |
+| `R` | 重启核心（需确认，经 POST /restart，systemd/直连进程/Windows 通用，成功后自动刷新 API 状态与流数据） |
 | `s` | 跳转设置页（tab 6） |
 | `i` | 安装提权组件（首次启动拒绝后的重试入口） |
 

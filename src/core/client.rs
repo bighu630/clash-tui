@@ -570,6 +570,27 @@ impl Client {
         body.parse()
     }
 
+    /// POST /restart 重启核心（systemd/直连进程/Windows 均经同一 external-controller）。
+    pub async fn restart(&self) -> Result<(), ApiError> {
+        let mut req = self
+            .http
+            .post(self.url("/restart"))
+            .timeout(REQUEST_TIMEOUT)
+            .header(CONTENT_TYPE, "application/json");
+        if let Some(auth) = self.auth_header() {
+            req = req.header(AUTHORIZATION, auth);
+        }
+        let resp = req
+            .body("{}")
+            .send()
+            .await
+            .map_err(|e| ApiError::Conn(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(ApiError::Status(resp.status().as_u16()));
+        }
+        Ok(())
+    }
+
     async fn request_text(&self, method: reqwest::Method, path: &str) -> Result<String, ApiError> {
         let mut req = self
             .http
@@ -1377,5 +1398,110 @@ mod tests {
             matches!(e, ApiError::Status(400)),
             "期望 Status(400)，实际: {e}"
         );
+    }
+
+    // ---------- restart 接口 ----------
+
+    #[tokio::test]
+    async fn restart_sends_post_with_bearer_auth() {
+        let (port, mut rx) = spawn_api_server().await;
+        client_on(port).restart().await.unwrap();
+        let req = rx.recv().await.expect("服务器应收到请求");
+        assert!(req.starts_with("POST /restart"), "请求行: {req}");
+        let req_lower = req.to_lowercase();
+        assert!(
+            req_lower.contains("authorization: bearer testsecret"),
+            "应带 Bearer 鉴权: {req}"
+        );
+        assert!(
+            req_lower.contains("content-type: application/json"),
+            "应带 Content-Type: {req}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_without_secret_omits_auth() {
+        let (port, mut rx) = spawn_api_server().await;
+        let client = Client::new(&NetworkSettings {
+            external_controller: format!("127.0.0.1:{port}"),
+            secret: String::new(),
+            ..NetworkSettings::default()
+        });
+        client.restart().await.unwrap();
+        let req = rx.recv().await.expect("服务器应收到请求");
+        assert!(req.starts_with("POST /restart"), "请求行: {req}");
+        assert!(
+            !req.to_lowercase().contains("authorization"),
+            "空 secret 不应带鉴权头: {req}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_http_500_returns_status_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut tmp).await {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    Err(_) => break,
+                }
+            }
+            let _ = sock
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        });
+        let e = client_on(port).restart().await.unwrap_err();
+        assert!(
+            matches!(e, ApiError::Status(500)),
+            "期望 Status(500)，实际: {e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_http_401_returns_status_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 4096];
+            while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut tmp).await {
+                    Ok(0) => break,
+                    Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                    Err(_) => break,
+                }
+            }
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+        });
+        let e = client_on(port).restart().await.unwrap_err();
+        assert!(
+            matches!(e, ApiError::Status(401)),
+            "期望 Status(401)，实际: {e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_conn_error() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        drop(l);
+        let e = client_on(port).restart().await.unwrap_err();
+        assert!(matches!(e, ApiError::Conn(_)), "期望 Conn 错误，实际: {e}");
     }
 }

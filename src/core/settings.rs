@@ -2,7 +2,7 @@
 //! 所有写入采用「临时文件 + rename」原子替换。目录可用 MIHOMO_TUI_SETTINGS_DIR 覆盖（测试/样例用）。
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::core::models::{NetworkSettings, Overrides, Subscription};
@@ -125,11 +125,10 @@ pub fn save_overrides(o: &Overrides) -> Result<(), SettingsError> {
     atomic_write(&overrides_path(), body.as_bytes())
 }
 
-/// 16 字节 /dev/urandom → 32 hex 字符。
+/// 跨平台随机 16 字节（getrandom）→ 32 hex 小写字符。
 pub fn generate_secret() -> String {
     let mut buf = [0u8; 16];
-    let mut f = fs::File::open("/dev/urandom").expect("open /dev/urandom");
-    f.read_exact(&mut buf).expect("read /dev/urandom");
+    getrandom::fill(&mut buf).expect("getrandom failed");
     buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 

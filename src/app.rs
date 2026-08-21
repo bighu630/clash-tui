@@ -165,6 +165,8 @@ pub enum UiCommand {
     SystemdAction(ProcOp),
     /// 交互式提权保存 mihomo 路径（需 sudo 密码）
     SaveMihomoBin(String),
+    /// 重启 mihomo 核心（POST /restart，需二次确认）
+    RestartCore,
     /// 日志页切换显示级别：主循环转发给 logs 后台任务触发 ?level= 重连。
     SetLogLevel(LogLevel),
 }
@@ -195,6 +197,8 @@ pub enum UiEvent {
     RunStatusDone(Result<RunStatus, String>),
     /// 进程操作结果（direct 模式 mihomo-proc 与 systemd 模式 systemctl 共用）
     ProcActionDone(Result<ApplyOutcome, String>),
+    /// 重启核心结果
+    RestartDone(Result<(), String>),
     /// 启动时引导通知（systemd 模式服务不可用）
     StartupNotice(String),
     /// logs 后台任务推送的单条日志。
@@ -292,6 +296,7 @@ const HELP_LINES: &[&str] = &[
     "  t                  开关 TUN（热切换）",
     "  6                  开关 IPv6",
     "  r                  刷新出口 IP",
+    "  R                  重启核心（需确认）",
     "  s                  跳转设置页",
     "  i                  安装提权组件（首次启动拒绝后的重试入口）",
     "",
@@ -352,6 +357,8 @@ struct App<B: Backend> {
     exit_ports: Arc<Mutex<ProxyPorts>>,
     /// 需要用户确认后执行的交互任务（sudo 密码/首次安装）
     pending_confirm: Option<(ConfirmPopup, InteractiveTask)>,
+    restart_confirm: Option<ConfirmPopup>,
+    restarting: bool,
     help_popup: Option<MessagePopup>,
     result_popup: Option<MessagePopup>,
     /// 出口 IP 探测最近一次是否失败：恢复成功时用于关闭陈旧错误弹窗并通知恢复。
@@ -465,6 +472,9 @@ where
             if let Some((popup, _)) = &mut self.pending_confirm {
                 popup.render(f, area);
             }
+            if let Some(popup) = &mut self.restart_confirm {
+                popup.render(f, area);
+            }
             if let Some(popup) = &mut self.result_popup {
                 popup.render(f, area);
             }
@@ -515,6 +525,31 @@ where
             if popup.handle_key(key) {
                 self.result_popup = None;
             }
+            return None;
+        }
+        // restart 确认弹窗优先
+        if let Some(mut popup) = self.restart_confirm.take() {
+            match popup.handle_key(key) {
+                Some(true) => {
+                    self.restarting = true;
+                    self.state.notice("[…] 正在重启...".to_string());
+                    let _ = self.cmd_tx.send(UiCommand::RestartCore);
+                }
+                Some(false) => {
+                    self.state.notice("[✗] 已取消重启".to_string());
+                }
+                None => self.restart_confirm = Some(popup),
+            }
+            return None;
+        }
+        if self.restarting && key.code == KeyCode::Char('R') {
+            return None;
+        }
+        if self.current == 0 && key.code == KeyCode::Char('R') && !self.restarting {
+            self.restart_confirm = Some(ConfirmPopup::new(
+                "重启确认".into(),
+                "确认重启 mihomo 核心？".into(),
+            ));
             return None;
         }
 
@@ -988,6 +1023,19 @@ where
                 }
                 Err(e) => self.popup_error("操作失败", e),
             },
+            UiEvent::RestartDone(res) => {
+                self.restarting = false;
+                match res {
+                    Ok(()) => {
+                        self.state.notice("[✓] 核心已重启".to_string());
+                        let _ = self.cmd_tx.send(UiCommand::ReloadConfigs);
+                    }
+                    Err(e) => {
+                        self.popup_error("重启失败", e);
+                        let _ = self.cmd_tx.send(UiCommand::ReloadConfigs);
+                    }
+                }
+            }
             UiEvent::StartupNotice(msg) => self.state.notice(msg),
             UiEvent::LogLine(entry) => self.on_log(entry),
         }
@@ -1223,6 +1271,14 @@ where
             UiCommand::SetLogLevel(level) => {
                 let _ = self.log_level_tx.send(level);
             }
+            UiCommand::RestartCore => {
+                let client = self.client.clone();
+                let ui_tx = self.ui_tx.clone();
+                tokio::spawn(async move {
+                    let res = client.restart().await.map_err(|e| e.to_string());
+                    let _ = ui_tx.send(UiEvent::RestartDone(res));
+                });
+            }
         }
     }
 
@@ -1357,6 +1413,7 @@ fn page_hints(current: usize) -> Vec<(String, String)> {
                 ("t".into(), "TUN".into()),
                 ("6".into(), "IPv6".into()),
                 ("r".into(), "出口IP".into()),
+                ("R".into(), "重启".into()),
                 ("s".into(), "设置".into()),
             ];
             // Windows：隐藏「i 安装」入口（提权组件安装为 Linux 专用）
@@ -1650,6 +1707,8 @@ pub async fn run() -> Result<(), BoxError> {
         log_level_tx,
         exit_ports,
         pending_confirm: None,
+        restart_confirm: None,
+        restarting: false,
         help_popup: None,
         result_popup: None,
         exit_ip_was_error: false,
@@ -1884,6 +1943,8 @@ mod tests {
             log_level_tx,
             exit_ports,
             pending_confirm: None,
+            restart_confirm: None,
+            restarting: false,
             help_popup: None,
             result_popup: None,
             exit_ip_was_error: false,
@@ -2672,5 +2733,109 @@ mod tests {
         assert_eq!(app.state.connections.len(), CONNECTIONS_KEEP);
         // 排序后最新在上：所有连接 start 相同 → 流量降序 → c249 在最前
         assert_eq!(app.state.connections[0].id, "c249");
+    }
+
+    #[test]
+    fn restart_only_on_dashboard() {
+        let (mut app, mut rx) = test_app(24);
+        app.current = 1;
+        let result = app.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert!(result.is_none());
+        assert!(app.restart_confirm.is_none(), "非首页按 R 不应弹确认");
+        assert!(rx.try_recv().is_err(), "非首页不应发送 RestartCore");
+        // 首页应弹确认
+        app.current = 0;
+        let result = app.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert!(result.is_none());
+        assert!(app.restart_confirm.is_some(), "首页按 R 应弹确认");
+        // 小写 r 不应触发重启确认（继续走 dashboard FetchExitIp）
+        let (mut app2, _rx2) = test_app(24);
+        app2.current = 0;
+        let _ = app2.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(app2.restart_confirm.is_none(), "小写 r 不应弹重启确认");
+    }
+
+    #[test]
+    fn restart_confirm_and_cancel() {
+        // y -> RestartCore
+        let (mut app, mut rx) = test_app(24);
+        app.current = 0;
+        app.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert!(app.restart_confirm.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(app.restart_confirm.is_none(), "确认后弹窗应关闭");
+        assert!(app.restarting, "确认后 restarting 应为 true");
+        assert!(
+            app.state
+                .notices
+                .iter()
+                .any(|(_, t)| t.contains("正在重启")),
+            "应有正在重启通知: {:?}",
+            app.state.notices
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(UiCommand::RestartCore)),
+            "应发送 RestartCore"
+        );
+        // n -> cancel + notice, 不发 RestartCore
+        let (mut app2, mut rx2) = test_app(24);
+        app2.current = 0;
+        app2.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        app2.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(app2.restart_confirm.is_none());
+        assert!(!app2.restarting);
+        assert!(
+            app2.state
+                .notices
+                .iter()
+                .any(|(_, t)| t.contains("已取消重启")),
+            "取消应有通知: {:?}",
+            app2.state.notices
+        );
+        assert!(rx2.try_recv().is_err(), "取消不应发送 RestartCore");
+    }
+
+    #[test]
+    fn restart_restarting_blocks_reentry() {
+        let (mut app, mut rx) = test_app(24);
+        app.current = 0;
+        app.restarting = true;
+        let result = app.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::NONE));
+        assert!(result.is_none());
+        assert!(app.restart_confirm.is_none(), "restarting 时 R 应被忽略");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn restart_done_success_notices_and_reloads() {
+        let (mut app, mut rx) = test_app(24);
+        app.restarting = true;
+        app.on_ui_event(UiEvent::RestartDone(Ok(())));
+        assert!(!app.restarting, "RestartDone 后 restarting 应为 false");
+        assert!(
+            app.state
+                .notices
+                .iter()
+                .any(|(_, t)| t.contains("核心已重启")),
+            "成功应通知核心已重启: {:?}",
+            app.state.notices
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(UiCommand::ReloadConfigs)),
+            "成功后应发送 ReloadConfigs"
+        );
+    }
+
+    #[test]
+    fn restart_done_failure_popup_and_reloads() {
+        let (mut app, mut rx) = test_app(24);
+        app.restarting = true;
+        app.on_ui_event(UiEvent::RestartDone(Err("500".into())));
+        assert!(!app.restarting);
+        assert_eq!(app.result_popup.as_ref().unwrap().title(), "重启失败");
+        assert!(
+            matches!(rx.try_recv(), Ok(UiCommand::ReloadConfigs)),
+            "失败后应发送 ReloadConfigs"
+        );
     }
 }

@@ -497,6 +497,7 @@ where
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
                     )
+                    .padding("", "")
                     .divider(TAB_DIVIDER),
                 tabs_area,
             );

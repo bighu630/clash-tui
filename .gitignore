@@ -17,3 +17,4 @@ settings.toml
 subscriptions.toml
 overrides.toml
 /release.sh
+/scripts/release.sh

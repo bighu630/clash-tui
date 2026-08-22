@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use futures_util::StreamExt;
@@ -3002,10 +3002,10 @@ mod tests {
         assert_eq!(hit_test(tabs_area, &hits, 1, 1), Some(0)); // 仪表盘首列
         assert_eq!(hit_test(tabs_area, &hits, 6, 1), Some(0)); // 仪表盘末列
         assert_eq!(hit_test(tabs_area, &hits, 10, 1), Some(1)); // 订阅
-        // divider 区域不命中
+                                                                // divider 区域不命中
         assert_eq!(hit_test(tabs_area, &hits, 7, 1), None); // 第一 divider 首列
         assert_eq!(hit_test(tabs_area, &hits, 9, 1), None); // 第一 divider 末列
-        // 空白区不命中
+                                                            // 空白区不命中
         assert_eq!(hit_test(tabs_area, &hits, 44, 1), None); // 放到 50 宽末尾空白
         assert_eq!(hit_test(tabs_area, &hits, 0, 1), None); // 区域左侧外
         assert_eq!(hit_test(tabs_area, &hits, 1, 0), None); // 行不匹配
@@ -3122,10 +3122,7 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            app.pages[5].consumes_global_keys(),
-            "应进入编辑模式"
-        );
+        assert!(app.pages[5].consumes_global_keys(), "应进入编辑模式");
         let tabs_y = app.tabs_area.y;
         let target_x = app.tab_hits[0].x;
         assert!(!app.handle_mouse(MouseEvent {

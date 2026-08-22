@@ -4,6 +4,7 @@
 use std::io;
 
 use crossterm::cursor::Show;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -14,10 +15,12 @@ fn main() -> Result<(), mihomo_tui::app::BoxError> {
 
     execute!(io::stdout(), EnterAlternateScreen)?;
     enable_raw_mode()?;
+    let _ = execute!(io::stdout(), EnableMouseCapture);
 
     let result = run_blocking();
 
     // finally 恢复终端
+    let _ = execute!(io::stdout(), DisableMouseCapture);
     let _ = disable_raw_mode();
     let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
     result
@@ -34,6 +37,7 @@ fn run_blocking() -> Result<(), mihomo_tui::app::BoxError> {
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
         default_hook(info);

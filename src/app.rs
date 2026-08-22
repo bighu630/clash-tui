@@ -6,7 +6,11 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent,
+    KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use crossterm::execute;
 use futures_util::StreamExt;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -228,6 +232,64 @@ enum KeyAction {
 
 const TABS: [&str; 6] = ["仪表盘", "订阅", "规则组", "规则", "日志", "设置"];
 
+/// 单个 tab 与 divider 的分隔符（用于命中计算，必须与 draw 中 Tabs::divider 一致）
+const TAB_DIVIDER: &str = " │ ";
+const TAB_DIVIDER_WIDTH: u16 = 3;
+
+/// 计算每个 tab 的命中 Rect（仅文本区域，不包含 divider）
+/// tabs_area 为 Tabs 容器区域（单行高度）
+fn compute_tab_hits(tabs: &[&str], tabs_area: Rect) -> Vec<Rect> {
+    let mut hits = Vec::with_capacity(tabs.len());
+    if tabs_area.width == 0 || tabs_area.height == 0 {
+        return hits;
+    }
+    let mut x = tabs_area.x;
+    let end_x = tabs_area.x.saturating_add(tabs_area.width);
+    for (i, tab) in tabs.iter().enumerate() {
+        let w = Line::raw(*tab).width() as u16;
+        if w == 0 {
+            hits.push(Rect::new(x, tabs_area.y, 0, 1));
+        } else if x.saturating_add(w) > end_x {
+            // 剩余空间不足：截断或不再容纳
+            let remain = end_x.saturating_sub(x);
+            if remain > 0 {
+                hits.push(Rect::new(x, tabs_area.y, remain, 1));
+            }
+            break;
+        } else {
+            hits.push(Rect::new(x, tabs_area.y, w, 1));
+            x = x.saturating_add(w);
+        }
+        // divider 间隔（最后一个 tab 后无 divider）
+        if i + 1 < tabs.len() {
+            if x.saturating_add(TAB_DIVIDER_WIDTH) > end_x {
+                break;
+            }
+            x = x.saturating_add(TAB_DIVIDER_WIDTH);
+        }
+    }
+    hits
+}
+
+/// 鼠标命中测试：返回命中的 tab 索引（仅文本区域命中，divider/空白返回 None）
+fn hit_test(tabs_area: Rect, tab_hits: &[Rect], column: u16, row: u16) -> Option<usize> {
+    if row != tabs_area.y {
+        return None;
+    }
+    if column < tabs_area.x || column >= tabs_area.x.saturating_add(tabs_area.width) {
+        return None;
+    }
+    for (idx, hit) in tab_hits.iter().enumerate() {
+        if hit.width == 0 {
+            continue;
+        }
+        if column >= hit.x && column < hit.x.saturating_add(hit.width) && row == hit.y {
+            return Some(idx);
+        }
+    }
+    None
+}
+
 const TRAFFIC_HISTORY: usize = 120;
 
 /// 设置页停留时的运行状态轮询间隔（systemctl/sudo 查询开销小，2s 足够及时）。
@@ -345,6 +407,10 @@ struct App<B: Backend> {
     state: AppState,
     pages: Vec<Box<dyn Page>>,
     current: usize,
+    /// 顶部 Tab 命中区域（每帧在 draw() 中重算，供鼠标点击命中测试）
+    tab_hits: Vec<Rect>,
+    /// 顶部 Tabs 容器区域（tabs_area）
+    tabs_area: Rect,
     client: Arc<Client>,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
     cmd_tx: mpsc::UnboundedSender<UiCommand>,
@@ -394,6 +460,9 @@ where
             0
         };
         let hints = page_hints(current);
+        // 鼠标命中区域：draw 内计算（依赖 f.area()/top），通过外部可变变量带出后写回 self
+        let mut new_tabs_area = Rect::default();
+        let mut new_hits: Vec<Rect> = Vec::new();
 
         let frame = self.terminal.draw(|f| {
             let area = f.area();
@@ -418,6 +487,8 @@ where
             // Tabs 不做 intersection 裁剪，必须提前 clamp 成空区域让它直接返回
             let tabs_area =
                 Rect::new(top.x + 1, top.y + 1, top.width.saturating_sub(2), 1).intersection(area);
+            new_tabs_area = tabs_area;
+            new_hits = compute_tab_hits(&TABS, tabs_area);
             f.render_widget(
                 Tabs::new(tabs.iter().map(|t| Line::raw(t.clone())))
                     .select(current)
@@ -426,7 +497,7 @@ where
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
                     )
-                    .divider(" │ "),
+                    .divider(TAB_DIVIDER),
                 tabs_area,
             );
 
@@ -479,7 +550,35 @@ where
                 popup.render(f, area);
             }
         })?;
+        self.tabs_area = new_tabs_area;
+        self.tab_hits = new_hits;
         Ok(frame)
+    }
+
+    /// 处理鼠标点击：仅 Left Down 在 tabs 行命中 tab 文本时切换页面
+    /// 返回 true 表示已切换并需要重绘
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+        // 仅响应左键按下
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return false;
+        }
+        // 弹窗或编辑态时屏蔽鼠标切页，避免误触
+        if self.help_popup.is_some()
+            || self.pending_confirm.is_some()
+            || self.restart_confirm.is_some()
+            || self.result_popup.is_some()
+            || self.pages[self.current].popup_open()
+            || self.pages[self.current].consumes_global_keys()
+        {
+            return false;
+        }
+        if let Some(idx) = hit_test(self.tabs_area, &self.tab_hits, mouse.column, mouse.row) {
+            if idx < self.pages.len() && idx != self.current {
+                self.switch_page(idx);
+                return true;
+            }
+        }
+        false
     }
 
     /// 切页；进入规则组页（index 2）时刷新运行时策略组；
@@ -615,6 +714,7 @@ where
         while !self.quit {
             enum Act {
                 Key(KeyEvent),
+                Mouse(MouseEvent),
                 Tick,
                 Bg(BgMsg),
                 Mem(MemoryFrame),
@@ -627,6 +727,7 @@ where
             let act = tokio::select! {
                 ev = events.next() => match ev {
                     Some(Ok(Event::Key(key))) => Act::Key(key),
+                    Some(Ok(Event::Mouse(mouse))) => Act::Mouse(mouse),
                     Some(Ok(Event::Resize(_, _))) => Act::Tick,
                     Some(Ok(_)) => continue,
                     Some(Err(_)) => continue,
@@ -655,6 +756,11 @@ where
                         None => {}
                     }
                     self.draw()?;
+                }
+                Act::Mouse(mouse) => {
+                    if self.handle_mouse(mouse) {
+                        self.draw()?;
+                    }
                 }
                 Act::Tick => {
                     self.tick_count += 1;
@@ -1284,6 +1390,7 @@ where
 
     /// 交互任务：离开 raw 模式/AltScreen → 执行（sudo 交互等）→ 恢复 → 结果弹窗。
     async fn run_interactive(&mut self, task: InteractiveTask) -> Result<(), BoxError> {
+        let _ = execute!(io::stdout(), DisableMouseCapture);
         let _ = crossterm::terminal::disable_raw_mode();
         let _ = crossterm::execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen);
 
@@ -1338,6 +1445,7 @@ where
 
         crossterm::terminal::enable_raw_mode()?;
         crossterm::execute!(io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
+        let _ = execute!(io::stdout(), EnableMouseCapture);
         self.terminal.clear()?;
         drain_input_queue().await;
 
@@ -1684,6 +1792,7 @@ pub async fn run() -> Result<(), BoxError> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.hide_cursor()?;
+    let _ = execute!(io::stdout(), EnableMouseCapture);
 
     let pages: Vec<Box<dyn Page>> = vec![
         Box::new(DashboardPage::new()),
@@ -1698,6 +1807,8 @@ pub async fn run() -> Result<(), BoxError> {
         state,
         pages,
         current: 0,
+        tab_hits: Vec::new(),
+        tabs_area: Rect::default(),
         client,
         ui_tx,
         cmd_tx,
@@ -1744,6 +1855,7 @@ pub async fn run() -> Result<(), BoxError> {
     let result = app
         .run_loop(traffic_rx, memory_rx, conns_rx, log_rx, ui_rx, sudo_rx)
         .await;
+    let _ = execute!(io::stdout(), DisableMouseCapture);
     let _ = app.terminal.show_cursor();
     result
 }
@@ -1934,6 +2046,8 @@ mod tests {
                 Box::new(crate::ui::settings::SettingsPage::new()),
             ],
             current: 0,
+            tab_hits: Vec::new(),
+            tabs_area: Rect::default(),
             client,
             ui_tx,
             cmd_tx,
@@ -2837,5 +2951,218 @@ mod tests {
             matches!(rx.try_recv(), Ok(UiCommand::ReloadConfigs)),
             "失败后应发送 ReloadConfigs"
         );
+    }
+
+    // ---- 鼠标点击顶部 Tab ----
+
+    #[test]
+    fn compute_tab_hits_basic() {
+        let tabs_area = Rect::new(1, 1, 50, 1);
+        let hits = compute_tab_hits(&TABS, tabs_area);
+        // 6 个 tab 全部容纳（总宽 43 <= 50）
+        assert_eq!(hits.len(), 6);
+        // 仪表盘(6) @ x=1
+        assert_eq!(hits[0], Rect::new(1, 1, 6, 1));
+        // 订阅(4) @ x=1+6+3=10
+        assert_eq!(hits[1], Rect::new(10, 1, 4, 1));
+        // 规则组(6) @ x=17
+        assert_eq!(hits[2], Rect::new(17, 1, 6, 1));
+        // 规则(4) @ x=26
+        assert_eq!(hits[3], Rect::new(26, 1, 4, 1));
+        // 日志(4) @ x=33
+        assert_eq!(hits[4], Rect::new(33, 1, 4, 1));
+        // 设置(4) @ x=40
+        assert_eq!(hits[5], Rect::new(40, 1, 4, 1));
+    }
+
+    #[test]
+    fn compute_tab_hits_narrow_truncates() {
+        let tabs_area = Rect::new(1, 1, 30, 1);
+        let hits = compute_tab_hits(&TABS, tabs_area);
+        // 30 宽仅容纳 4 个 tab（6+3+4+3+6+3+4=29，下一 divider 已越界）
+        assert_eq!(hits.len(), 4);
+        assert_eq!(hits[0], Rect::new(1, 1, 6, 1));
+        assert_eq!(hits[1], Rect::new(10, 1, 4, 1));
+        assert_eq!(hits[2], Rect::new(17, 1, 6, 1));
+        assert_eq!(hits[3], Rect::new(26, 1, 4, 1));
+    }
+
+    #[test]
+    fn compute_tab_hits_empty_area() {
+        assert!(compute_tab_hits(&TABS, Rect::new(0, 0, 0, 1)).is_empty());
+        assert!(compute_tab_hits(&TABS, Rect::new(0, 0, 0, 0)).is_empty());
+    }
+
+    #[test]
+    fn hit_test_text_and_divider() {
+        let tabs_area = Rect::new(1, 1, 50, 1);
+        let hits = compute_tab_hits(&TABS, tabs_area);
+        // 文本区域命中
+        assert_eq!(hit_test(tabs_area, &hits, 1, 1), Some(0)); // 仪表盘首列
+        assert_eq!(hit_test(tabs_area, &hits, 6, 1), Some(0)); // 仪表盘末列
+        assert_eq!(hit_test(tabs_area, &hits, 10, 1), Some(1)); // 订阅
+        // divider 区域不命中
+        assert_eq!(hit_test(tabs_area, &hits, 7, 1), None); // 第一 divider 首列
+        assert_eq!(hit_test(tabs_area, &hits, 9, 1), None); // 第一 divider 末列
+        // 空白区不命中
+        assert_eq!(hit_test(tabs_area, &hits, 44, 1), None); // 放到 50 宽末尾空白
+        assert_eq!(hit_test(tabs_area, &hits, 0, 1), None); // 区域左侧外
+        assert_eq!(hit_test(tabs_area, &hits, 1, 0), None); // 行不匹配
+        assert_eq!(hit_test(tabs_area, &hits, 1, 2), None);
+    }
+
+    #[test]
+    fn handle_mouse_switches_page() {
+        let (mut app, mut rx) = test_app(24);
+        // 通过 draw 初始化 tab_hits/tabs_area（宽 30 终端：4 个 hit）
+        let _ = app.draw().unwrap();
+        assert!(!app.tab_hits.is_empty(), "draw 应填充 tab_hits");
+        let first_hit_x = app.tab_hits[0].x;
+        let tabs_y = app.tabs_area.y;
+        // 当前 0，切到 1（订阅）：点击第二 tab（订阅页不触发 RefreshGroups）
+        app.current = 0;
+        let second_x = app.tab_hits[1].x;
+        let switched = app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: second_x,
+            row: tabs_y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(switched, "点击不同 tab 应切换");
+        assert_eq!(app.current, 1);
+        assert!(rx.try_recv().is_err(), "切到订阅页不应发 RefreshGroups");
+        // 点击已选中页：不切换
+        let switched2 = app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: second_x,
+            row: tabs_y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(!switched2, "点击已选中 tab 不应重复切换");
+        assert_eq!(app.current, 1);
+        // 切到 2（规则组）应发 RefreshGroups
+        let third_x = app.tab_hits[2].x;
+        let switched_to_groups = app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: third_x,
+            row: tabs_y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(switched_to_groups);
+        assert_eq!(app.current, 2);
+        assert!(matches!(rx.try_recv(), Ok(UiCommand::RefreshGroups)));
+        // divider 点击不切换（当前已在 2，点 divider 不应切）
+        let divider_x = first_hit_x + app.tab_hits[0].width; // 第一 divider 首列
+        let switched3 = app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: divider_x,
+            row: tabs_y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(!switched3);
+        assert_eq!(app.current, 2);
+        // 非 Left / 非 Down 不切换
+        assert!(!app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: second_x,
+            row: tabs_y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(!app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: second_x,
+            row: tabs_y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        // 行不匹配不切换
+        assert!(!app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: second_x,
+            row: tabs_y + 1,
+            modifiers: KeyModifiers::NONE,
+        }));
+    }
+
+    #[test]
+    fn handle_mouse_blocked_when_popup_open() {
+        let (mut app, _rx) = test_app(24);
+        let _ = app.draw().unwrap();
+        let tabs_y = app.tabs_area.y;
+        let target_x = app.tab_hits[1].x;
+        app.current = 0;
+        // help popup 打开时屏蔽
+        app.help_popup = Some(MessagePopup::new("帮助".into(), vec!["x".into()]));
+        assert!(!app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: target_x,
+            row: tabs_y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.current, 0);
+        app.help_popup = None;
+        // result popup 打开时屏蔽
+        app.result_popup = Some(MessagePopup::new("ok".into(), vec!["x".into()]));
+        assert!(!app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: target_x,
+            row: tabs_y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.current, 0);
+    }
+
+    #[test]
+    fn handle_mouse_blocked_in_edit_mode() {
+        let (mut app, _rx) = test_app(24);
+        app.switch_page(5);
+        let _ = app.draw().unwrap();
+        // 进入编辑模式：Down×9 到 port，Enter 编辑
+        for _ in 0..9 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            app.pages[5].consumes_global_keys(),
+            "应进入编辑模式"
+        );
+        let tabs_y = app.tabs_area.y;
+        let target_x = app.tab_hits[0].x;
+        assert!(!app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: target_x,
+            row: tabs_y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.current, 5);
+    }
+
+    #[test]
+    fn draw_updates_hits_on_resize() {
+        let (mut app, _rx) = test_app_with_width(50, 24);
+        let _ = app.draw().unwrap();
+        assert_eq!(app.tab_hits.len(), 6, "宽 50 应容纳全部");
+        // 窄终端重建：hits 随 draw 重算
+        let (mut app2, _rx2) = test_app_with_width(20, 24);
+        let _ = app2.draw().unwrap();
+        assert!(app2.tab_hits.len() < 6, "窄终端应截断");
+        // y 应恒为 1（top.y+1）
+        assert_eq!(app.tabs_area.y, 1);
+        assert_eq!(app2.tabs_area.y, 1);
+    }
+
+    #[test]
+    fn draw_tiny_terminal_mouse_no_panic() {
+        for h in [0u16, 1, 2, 3] {
+            let (mut app, _rx) = test_app(h);
+            let _ = app.draw().unwrap();
+            // 空区域点击不 panic 且不切页
+            let switched = app.handle_mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            });
+            assert!(!switched, "h={h} 空区域点击不应切换");
+        }
     }
 }

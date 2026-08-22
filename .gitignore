@@ -16,3 +16,4 @@ scratch/
 settings.toml
 subscriptions.toml
 overrides.toml
+/release.sh

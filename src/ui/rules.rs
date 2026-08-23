@@ -359,9 +359,10 @@ impl RulesPage {
             subscription: active,
         }) {
             Err(e) => {
+                let lines: Vec<String> = e.to_string().lines().map(String::from).collect();
                 self.popup = Some(RulePopup::Message(MessagePopup::new(
                     "合并失败".into(),
-                    vec![e.to_string()],
+                    lines,
                 )));
                 None
             }
@@ -490,6 +491,11 @@ impl Page for RulesPage {
             KeyCode::Char('J') => self.move_rule(st, 1),
             _ => None,
         }
+    }
+
+    /// 全局配置应用成功后清除 dirty：任何页面的应用都已包含当前规则 overrides。
+    fn on_apply_done(&mut self, _st: &AppState) {
+        self.dirty = false;
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect, st: &AppState) {

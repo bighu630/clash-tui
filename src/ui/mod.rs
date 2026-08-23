@@ -44,4 +44,9 @@ pub trait Page {
     /// 外部状态更新后的回调（默认无操作）。设置页用它刷新路径/状态显示值，
     /// 不动表单编辑状态（dirty/focused/editing 保留）。
     fn refresh_state(&mut self, _st: &AppState) {}
+
+    /// 全局配置应用成功后的回调（默认无操作）。规则页用它清除 dirty 标志：
+    /// 任何页面触发的成功应用都已把当前 overrides（含规则）合并应用，
+    /// 此时不存在「未应用」的本地变动。
+    fn on_apply_done(&mut self, _st: &AppState) {}
 }

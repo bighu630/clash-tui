@@ -966,6 +966,10 @@ where
                     }
                     // 应用后刷新运行状态（进程模式重启后 PID 变化）
                     let _ = self.cmd_tx.send(UiCommand::RefreshStatus);
+                    // 全局配置已应用（含各页 overrides），通知各页清除「未应用」类标志
+                    for p in &mut self.pages {
+                        p.on_apply_done(&self.state);
+                    }
                 }
                 Err(e) => self.popup_error("应用失败", e),
             },

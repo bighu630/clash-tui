@@ -378,6 +378,7 @@ const HELP_LINES: &[&str] = &[
     "  Enter              编辑规则",
     "  K / J              上移 / 下移",
     "  d                  删除规则",
+    "  Ctrl+A             保存并应用",
     "",
     "日志:",
     "  e                  切换级别 (error → warning → info → debug)",
@@ -965,6 +966,10 @@ where
                     }
                     // 应用后刷新运行状态（进程模式重启后 PID 变化）
                     let _ = self.cmd_tx.send(UiCommand::RefreshStatus);
+                    // 全局配置已应用（含各页 overrides），通知各页清除「未应用」类标志
+                    for p in &mut self.pages {
+                        p.on_apply_done(&self.state);
+                    }
                 }
                 Err(e) => self.popup_error("应用失败", e),
             },
@@ -1547,6 +1552,7 @@ fn page_hints(current: usize) -> Vec<(String, String)> {
             ("Enter".into(), "编辑".into()),
             ("K/J".into(), "移动".into()),
             ("d".into(), "删除".into()),
+            ("Ctrl+A".into(), "应用".into()),
         ],
         4 => vec![
             ("e".into(), "级别".into()),

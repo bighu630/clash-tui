@@ -4,12 +4,14 @@
 //! 列表行：`DOMAIN, example.com, 🚀 节点选择`。
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{AppState, UiCommand};
+use crate::core::merger::{merge, MergeContext};
 use crate::core::models::{UserRule, BUILTIN_TARGETS};
 use crate::core::settings::save_overrides;
 use crate::ui::widgets::{
@@ -94,6 +96,8 @@ pub struct RulesPage {
     form_title: String,
     /// 列表数据签名：内容变化时重建 SelectList
     sig: String,
+    /// 有未应用（未合并+下发）的变动
+    dirty: bool,
 }
 
 impl Default for RulesPage {
@@ -111,6 +115,7 @@ impl RulesPage {
             form_type: RULE_TYPES[0].to_string(),
             form_title: String::new(),
             sig: String::new(),
+            dirty: false,
         }
     }
 
@@ -268,6 +273,8 @@ impl RulesPage {
                 "保存失败".to_string(),
                 vec![e.to_string()],
             )));
+        } else {
+            self.dirty = true;
         }
         self.pending = None;
         None
@@ -303,6 +310,7 @@ impl RulesPage {
             self.list
                 .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
+        self.dirty = true;
         None
     }
 
@@ -330,11 +338,44 @@ impl RulesPage {
                         "保存失败".to_string(),
                         vec![e.to_string()],
                     )));
+                } else {
+                    self.dirty = true;
                 }
             }
         }
         self.pending = None;
         None
+    }
+
+    /// Ctrl+A：将落盘后的规则合并进配置并应用。无变动时不触发，避免空刷。
+    fn save_and_apply(&mut self, st: &mut AppState) -> Option<UiCommand> {
+        if !self.dirty {
+            return None;
+        }
+        let active = st.subs.iter().find(|s| s.active);
+        match merge(MergeContext {
+            settings: &st.settings,
+            overrides: &st.overrides,
+            subscription: active,
+        }) {
+            Err(e) => {
+                let lines: Vec<String> = e.to_string().lines().map(String::from).collect();
+                self.popup = Some(RulePopup::Message(MessagePopup::new(
+                    "合并失败".into(),
+                    lines,
+                )));
+                None
+            }
+            Ok(out) => {
+                if !out.warnings.is_empty() {
+                    st.notice(format!("[!] 合并警告: {}", out.warnings.join("；")));
+                } else {
+                    st.notice("[✓] 配置已合并，正在应用".to_string());
+                }
+                self.dirty = false;
+                Some(UiCommand::ApplyConfig(out.config))
+            }
+        }
     }
 
     /// popup 打开期间：按键优先喂 popup，popup 关闭后才恢复页面按键。
@@ -433,6 +474,11 @@ impl Page for RulesPage {
         if let Some(popup) = self.popup.take() {
             return self.handle_popup(popup, key, st);
         }
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'))
+        {
+            return self.save_and_apply(st);
+        }
         match key.code {
             KeyCode::Char('j') | KeyCode::Down | KeyCode::Char('k') | KeyCode::Up => {
                 self.list.handle_key(key);
@@ -447,7 +493,28 @@ impl Page for RulesPage {
         }
     }
 
+    /// 全局配置应用成功后清除 dirty：任何页面的应用都已包含当前规则 overrides。
+    fn on_apply_done(&mut self, _st: &AppState) {
+        self.dirty = false;
+    }
+
     fn render(&mut self, f: &mut Frame, area: Rect, st: &AppState) {
+        let [body, status] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
+        let status_text = if self.dirty {
+            "[未应用] Ctrl+A 保存并应用  ·  n 新建 · Enter 编辑 · K/J 移动 · d 删除"
+        } else {
+            "n 新建 · Enter 编辑 · K/J 移动 · d 删除"
+        };
+        let status_style = if self.dirty {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(status_text, status_style)),
+            status,
+        );
         let sig = Self::sig_of(st);
         if sig != self.sig {
             self.sig = sig;
@@ -456,9 +523,9 @@ impl Page for RulesPage {
         if st.overrides.rules.is_empty() {
             let hint = Paragraph::new(Line::from("无规则，按 n 新建（顺序即优先级）"))
                 .block(Block::default().borders(Borders::ALL).title(" 规则 "));
-            f.render_widget(hint, centered_rect(50, 30, area));
+            f.render_widget(hint, centered_rect(50, 30, body));
         } else {
-            self.list.render(f, area);
+            self.list.render(f, body);
         }
         // popup 置顶绘制
         if let Some(popup) = &mut self.popup {

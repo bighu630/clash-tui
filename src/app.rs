@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use futures_util::StreamExt;
@@ -378,6 +378,7 @@ const HELP_LINES: &[&str] = &[
     "  Enter              编辑规则",
     "  K / J              上移 / 下移",
     "  d                  删除规则",
+    "  Ctrl+A             保存并应用",
     "",
     "日志:",
     "  e                  切换级别 (error → warning → info → debug)",
@@ -965,6 +966,10 @@ where
                     }
                     // 应用后刷新运行状态（进程模式重启后 PID 变化）
                     let _ = self.cmd_tx.send(UiCommand::RefreshStatus);
+                    // 全局配置已应用（含各页 overrides），通知各页清除「未应用」类标志
+                    for p in &mut self.pages {
+                        p.on_apply_done(&self.state);
+                    }
                 }
                 Err(e) => self.popup_error("应用失败", e),
             },
@@ -1547,6 +1552,7 @@ fn page_hints(current: usize) -> Vec<(String, String)> {
             ("Enter".into(), "编辑".into()),
             ("K/J".into(), "移动".into()),
             ("d".into(), "删除".into()),
+            ("Ctrl+A".into(), "应用".into()),
         ],
         4 => vec![
             ("e".into(), "级别".into()),
@@ -3002,10 +3008,10 @@ mod tests {
         assert_eq!(hit_test(tabs_area, &hits, 1, 1), Some(0)); // 仪表盘首列
         assert_eq!(hit_test(tabs_area, &hits, 6, 1), Some(0)); // 仪表盘末列
         assert_eq!(hit_test(tabs_area, &hits, 10, 1), Some(1)); // 订阅
-        // divider 区域不命中
+                                                                // divider 区域不命中
         assert_eq!(hit_test(tabs_area, &hits, 7, 1), None); // 第一 divider 首列
         assert_eq!(hit_test(tabs_area, &hits, 9, 1), None); // 第一 divider 末列
-        // 空白区不命中
+                                                            // 空白区不命中
         assert_eq!(hit_test(tabs_area, &hits, 44, 1), None); // 放到 50 宽末尾空白
         assert_eq!(hit_test(tabs_area, &hits, 0, 1), None); // 区域左侧外
         assert_eq!(hit_test(tabs_area, &hits, 1, 0), None); // 行不匹配
@@ -3122,10 +3128,7 @@ mod tests {
             app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(
-            app.pages[5].consumes_global_keys(),
-            "应进入编辑模式"
-        );
+        assert!(app.pages[5].consumes_global_keys(), "应进入编辑模式");
         let tabs_y = app.tabs_area.y;
         let target_x = app.tab_hits[0].x;
         assert!(!app.handle_mouse(MouseEvent {

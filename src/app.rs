@@ -378,6 +378,7 @@ const HELP_LINES: &[&str] = &[
     "  Enter              编辑规则",
     "  K / J              上移 / 下移",
     "  d                  删除规则",
+    "  Ctrl+A             保存并应用",
     "",
     "日志:",
     "  e                  切换级别 (error → warning → info → debug)",
@@ -1547,6 +1548,7 @@ fn page_hints(current: usize) -> Vec<(String, String)> {
             ("Enter".into(), "编辑".into()),
             ("K/J".into(), "移动".into()),
             ("d".into(), "删除".into()),
+            ("Ctrl+A".into(), "应用".into()),
         ],
         4 => vec![
             ("e".into(), "级别".into()),

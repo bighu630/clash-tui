@@ -11,8 +11,8 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{AppState, UiCommand};
-use crate::core::models::{UserRule, BUILTIN_TARGETS};
 use crate::core::merger::{merge, MergeContext};
+use crate::core::models::{UserRule, BUILTIN_TARGETS};
 use crate::core::settings::save_overrides;
 use crate::ui::widgets::{
     centered_rect, ConfirmPopup, FieldKind, FormAction, FormField, FormPopup, MessagePopup,

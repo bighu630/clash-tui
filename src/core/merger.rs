@@ -264,6 +264,8 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
     kv(&mut tun, "enable", s.tun.enable);
     kv(&mut tun, "stack", s.tun.stack.clone());
     kv(&mut tun, "auto-route", s.tun.auto_route);
+    kv(&mut tun, "auto-redirect", s.tun.auto_redirect);
+    kv(&mut tun, "auto-detect-interface", s.tun.auto_detect_interface);
     kv(
         &mut tun,
         "dns-hijack",
@@ -483,6 +485,30 @@ mod tests {
         assert_eq!(v["port"], Value::Number(7890.into()));
         assert_eq!(v["mode"], Value::String("rule".into()));
         assert_eq!(v["tun"]["stack"], Value::String("mixed".into()));
+        // tun 新增字段：auto_redirect 默认 true、auto_detect_interface 默认 false，且恒写入
+        assert_eq!(v["tun"]["auto-route"], Value::Bool(true));
+        assert_eq!(v["tun"]["auto-redirect"], Value::Bool(true));
+        assert_eq!(v["tun"]["auto-detect-interface"], Value::Bool(false));
+        // tun 键序：enable → stack → auto-route → auto-redirect → auto-detect-interface → dns-hijack → mtu
+        let tun_keys: Vec<String> = v["tun"]
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            tun_keys,
+            vec![
+                "enable",
+                "stack",
+                "auto-route",
+                "auto-redirect",
+                "auto-detect-interface",
+                "dns-hijack",
+                "mtu"
+            ],
+            "tun 键序"
+        );
         assert_eq!(v["dns"]["enhanced-mode"], Value::String("fake-ip".into()));
         assert_eq!(
             v["dns"]["nameserver"][0],
@@ -1011,6 +1037,70 @@ mod tests {
         let out = do_merge(Overrides::default(), Some(s));
         let v = parse_out(&out);
         assert_eq!(v["profile"]["store-selected"], Value::Bool(true));
+    }
+
+    #[test]
+    fn tun_auto_redirect_and_detect_interface_written() {
+        // 默认 Settings → auto_redirect true、auto_detect_interface false 恒写入且覆盖上游缺省
+        let out = do_merge(Overrides::default(), None);
+        let v = parse_out(&out);
+        assert_eq!(v["tun"]["auto-redirect"], Value::Bool(true));
+        assert_eq!(v["tun"]["auto-detect-interface"], Value::Bool(false));
+        // 显式 false 时亦恒写入 false（覆盖默认 true）
+        let s_false = NetworkSettings {
+            tun: TunSettings {
+                auto_redirect: false,
+                auto_detect_interface: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out_false = merge(MergeContext {
+            settings: &s_false,
+            overrides: &Overrides::default(),
+            subscription: None,
+        })
+        .expect("merge 应成功");
+        let v_false: Value = serde_yaml::from_str(&out_false.config).unwrap();
+        assert_eq!(v_false["tun"]["auto-redirect"], Value::Bool(false));
+        assert_eq!(v_false["tun"]["auto-detect-interface"], Value::Bool(false));
+        // true 时亦写入
+        let s = NetworkSettings {
+            tun: TunSettings {
+                auto_redirect: true,
+                auto_detect_interface: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out2 = merge(MergeContext {
+            settings: &s,
+            overrides: &Overrides::default(),
+            subscription: None,
+        })
+        .expect("merge 应成功");
+        let v2: Value = serde_yaml::from_str(&out2.config).unwrap();
+        assert_eq!(v2["tun"]["auto-redirect"], Value::Bool(true));
+        assert_eq!(v2["tun"]["auto-detect-interface"], Value::Bool(true));
+        // 键序断言
+        let tun_keys: Vec<String> = v2["tun"]
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            tun_keys,
+            vec![
+                "enable",
+                "stack",
+                "auto-route",
+                "auto-redirect",
+                "auto-detect-interface",
+                "dns-hijack",
+                "mtu"
+            ]
+        );
     }
 
     #[test]

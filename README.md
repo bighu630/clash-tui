@@ -445,6 +445,8 @@ secret = "0123456789abcdef0123456789abcdef"   # 首次运行随机生成 32 hex
 enable = false
 stack = "mixed"      # system | gvisor | mixed
 auto_route = true
+auto_redirect = true
+auto_detect_interface = false
 dns_hijack = ["any:53"]
 mtu = 9000
 

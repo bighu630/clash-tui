@@ -25,13 +25,13 @@ pub(crate) const SECTIONS: &[(&str, usize, usize)] = &[
     ("网络", 6, 3),
     ("端口", 9, 3),
     ("日志", 12, 1),
-    ("TUN", 13, 5),
-    ("DNS", 18, 8),
-    ("其他", 26, 2),
+    ("TUN", 13, 7),
+    ("DNS", 20, 8),
+    ("其他", 28, 2),
 ];
 
 /// 字段总数（= SECTIONS 覆盖的 0..FIELD_COUNT）。
-pub(crate) const FIELD_COUNT: usize = 28;
+pub(crate) const FIELD_COUNT: usize = 30;
 
 /// config 字段起始索引（运行方式区块之后）。
 pub(crate) const CONFIG_START: usize = 6;
@@ -57,7 +57,7 @@ pub(crate) fn split_csv(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// 模型 → 表单字段（28 个：运行方式区块 6 + config 字段 22）。
+/// 模型 → 表单字段（30 个：运行方式区块 6 + config 字段 24）。
 /// f[1]/f[2]（路径/状态）为占位值，由 sync_from_settings 用 run_status 覆盖；
 /// f[3..6]（启停按钮）按 run_mode 启用或禁用。
 pub(crate) fn field_values(s: &NetworkSettings) -> Vec<FormField> {
@@ -158,6 +158,16 @@ pub(crate) fn field_values(s: &NetworkSettings) -> Vec<FormField> {
         FormField {
             label: "tun.auto-route".into(),
             value: yn(s.tun.auto_route),
+            kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]),
+        },
+        FormField {
+            label: "tun.auto-redirect".into(),
+            value: yn(s.tun.auto_redirect),
+            kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]),
+        },
+        FormField {
+            label: "tun.auto-detect-interface".into(),
+            value: yn(s.tun.auto_detect_interface),
             kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]),
         },
         FormField {
@@ -280,7 +290,7 @@ fn parse_dropdown(label: &str, v: &str, options: &[&str]) -> Result<String, Vali
 pub(crate) fn apply_values(f: &[FormField]) -> Result<NetworkSettings, ValidationError> {
     debug_assert_eq!(f.len(), FIELD_COUNT, "字段数量必须与 SECTIONS 一致");
     let cfg = &f[CONFIG_START..];
-    debug_assert_eq!(cfg.len(), 22, "config 字段应为 22 个");
+    debug_assert_eq!(cfg.len(), 24, "config 字段应为 24 个");
     Ok(NetworkSettings {
         run_mode: {
             // Windows 仅 direct 一种选项（与 field_values 下拉一致）
@@ -310,25 +320,27 @@ pub(crate) fn apply_values(f: &[FormField]) -> Result<NetworkSettings, Validatio
             enable: parse_yn("tun.enable", &cfg[7].value)?,
             stack: parse_dropdown("tun.stack", &cfg[8].value, &["system", "gvisor", "mixed"])?,
             auto_route: parse_yn("tun.auto-route", &cfg[9].value)?,
-            mtu: parse_u16("tun.mtu", &cfg[10].value)?,
-            dns_hijack: parse_csv("tun.dns-hijack", &cfg[11].value)?,
+            auto_redirect: parse_yn("tun.auto-redirect", &cfg[10].value)?,
+            auto_detect_interface: parse_yn("tun.auto-detect-interface", &cfg[11].value)?,
+            mtu: parse_u16("tun.mtu", &cfg[12].value)?,
+            dns_hijack: parse_csv("tun.dns-hijack", &cfg[13].value)?,
         },
         dns: DnsSettings {
-            enable: parse_yn("dns.enable", &cfg[12].value)?,
-            listen: nonempty("dns.listen", &cfg[13].value)?,
+            enable: parse_yn("dns.enable", &cfg[14].value)?,
+            listen: nonempty("dns.listen", &cfg[15].value)?,
             enhanced_mode: parse_dropdown(
                 "dns.enhanced-mode",
-                &cfg[14].value,
+                &cfg[16].value,
                 &["fake-ip", "redir-host"],
             )?,
-            fake_ip_range: nonempty("dns.fake-ip-range", &cfg[15].value)?,
-            nameserver: parse_csv("dns.nameserver", &cfg[16].value)?,
-            default_nameserver: parse_csv("dns.default-nameserver", &cfg[17].value)?,
-            fallback: parse_csv("dns.fallback", &cfg[18].value)?,
-            fake_ip_filter: parse_csv("dns.fake-ip-filter", &cfg[19].value)?,
+            fake_ip_range: nonempty("dns.fake-ip-range", &cfg[17].value)?,
+            nameserver: parse_csv("dns.nameserver", &cfg[18].value)?,
+            default_nameserver: parse_csv("dns.default-nameserver", &cfg[19].value)?,
+            fallback: parse_csv("dns.fallback", &cfg[20].value)?,
+            fake_ip_filter: parse_csv("dns.fake-ip-filter", &cfg[21].value)?,
         },
-        external_controller: nonempty("external-controller", &cfg[20].value)?,
-        secret: nonempty("secret", &cfg[21].value)?,
+        external_controller: nonempty("external-controller", &cfg[22].value)?,
+        secret: nonempty("secret", &cfg[23].value)?,
     })
 }
 
@@ -976,6 +988,8 @@ mod tests {
                 enable: true,
                 stack: "gvisor".into(),
                 auto_route: false,
+                auto_redirect: true,
+                auto_detect_interface: false,
                 mtu: 1500,
                 dns_hijack: vec!["any:53".into(), "any:5353".into()],
             },
@@ -1002,7 +1016,7 @@ mod tests {
         assert_eq!(expect, FIELD_COUNT);
     }
 
-    /// 22 字段往返：field_values → apply_values 全等。
+    /// 24 字段往返：field_values → apply_values 全等（总字段 30）。
     #[test]
     fn field_values_apply_values_roundtrip() {
         let s = fixed_settings();
@@ -1029,6 +1043,8 @@ mod tests {
         assert!(back.tun.enable);
         assert_eq!(back.tun.stack, "gvisor");
         assert!(!back.tun.auto_route);
+        assert!(back.tun.auto_redirect);
+        assert!(!back.tun.auto_detect_interface);
         assert_eq!(back.tun.mtu, 1500);
         assert_eq!(back.tun.dns_hijack, vec!["any:53", "any:5353"]);
         assert!(!back.dns.enable);
@@ -1073,15 +1089,15 @@ mod tests {
         assert_eq!(apply_values(&fields).unwrap_err().label, "port");
         // 空 CSV（先恢复合法端口，否则 port 先报错）
         fields[9].value = "1080".into();
-        fields[22].value = " , , ".into();
+        fields[24].value = " , , ".into();
         let e = apply_values(&fields).unwrap_err();
         assert_eq!(e.label, "dns.nameserver");
         // 空文本
-        fields[22].value = "1.1.1.1".into();
-        fields[19].value = "".into();
+        fields[24].value = "1.1.1.1".into();
+        fields[21].value = "".into();
         assert_eq!(apply_values(&fields).unwrap_err().label, "dns.listen");
         // 非法枚举（绕过 UI 直接改值）
-        fields[19].value = "0.0.0.0:1053".into();
+        fields[21].value = "0.0.0.0:1053".into();
         fields[6].value = "hack".into();
         assert_eq!(apply_values(&fields).unwrap_err().label, "mode");
     }
@@ -1091,9 +1107,44 @@ mod tests {
     fn secret_field_is_readonly() {
         let s = fixed_settings();
         let fields = field_values(&s);
-        assert_eq!(fields[27].label, "secret");
-        assert_eq!(fields[27].value, "a".repeat(32));
-        assert_eq!(fields[27].kind, FieldKind::ReadOnly);
+        assert_eq!(fields[29].label, "secret");
+        assert_eq!(fields[29].value, "a".repeat(32));
+        assert_eq!(fields[29].kind, FieldKind::ReadOnly);
+    }
+
+    /// TUN 新增开关：默认 auto_redirect true（「是」）、auto_detect_interface false（「否」），往返正确。
+    #[test]
+    fn tun_auto_redirect_and_detect_defaults_and_roundtrip() {
+        let s = NetworkSettings {
+            secret: "c".repeat(32),
+            ..NetworkSettings::default()
+        };
+        // 默认 auto_redirect true → 「是」，auto_detect_interface false → 「否」
+        let fields = field_values(&s);
+        // 索引：16=auto-redirect, 17=auto-detect-interface（全局字段）
+        assert_eq!(fields[16].label, "tun.auto-redirect");
+        assert_eq!(fields[16].value, "是");
+        assert_eq!(fields[17].label, "tun.auto-detect-interface");
+        assert_eq!(fields[17].value, "否");
+        assert_eq!(fields[16].kind, FieldKind::Dropdown(vec!["是".into(), "否".into()]));
+        assert_eq!(fields[17].kind, FieldKind::Dropdown(vec!["是".into(), "否".into()]));
+        // 显式设为 false / true 后往返
+        let mut fields2 = fields.clone();
+        fields2[16].value = "否".into();
+        fields2[17].value = "是".into();
+        let back = apply_values(&fields2).expect("应通过校验");
+        assert!(!back.tun.auto_redirect);
+        assert!(back.tun.auto_detect_interface);
+        // 往返：field_values 再次生成应同步
+        let fields3 = field_values(&back);
+        assert_eq!(fields3[16].value, "否");
+        assert_eq!(fields3[17].value, "是");
+        // 切回「是」亦往返为 true
+        let mut fields4 = fields3.clone();
+        fields4[16].value = "是".into();
+        let back2 = apply_values(&fields4).expect("应通过校验");
+        assert!(back2.tun.auto_redirect);
+        assert_eq!(field_values(&back2)[16].value, "是");
     }
 
     /// split_csv：分割、trim、去空项。
@@ -1382,8 +1433,8 @@ mod tests {
     fn text_field_edit_mode() {
         let mut st = test_state();
         let mut p = page_with_state(&st);
-        // dns.listen（index 19）进入编辑后追加端口
-        p.focused = 19;
+        // dns.listen（index 21）进入编辑后追加端口
+        p.focused = 21;
         press(
             &mut p,
             &mut st,
@@ -1415,7 +1466,7 @@ mod tests {
             &mut st,
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         );
-        assert_eq!(p.fields[19].value, "0.0.0.0:1053:15");
+        assert_eq!(p.fields[21].value, "0.0.0.0:1053:15");
         assert!(!p.editing, "Esc 退出编辑模式");
     }
 
@@ -1454,7 +1505,7 @@ mod tests {
             &mut st,
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         );
-        p.focused = 19;
+        p.focused = 21;
         press(
             &mut p,
             &mut st,
@@ -1466,7 +1517,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
         );
         assert_eq!(
-            p.fields[19].value, "0.0.0.0:1053a",
+            p.fields[21].value, "0.0.0.0:1053a",
             "Text 字段任意字符可插入"
         );
     }

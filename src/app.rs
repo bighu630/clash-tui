@@ -2661,15 +2661,15 @@ mod tests {
     }
 
     /// 进入设置页编辑模式后 Esc 退出编辑模式而非退出程序（P0-1 回归）。
-    /// 全链路走 app.handle_key：Down×19 聚焦 dns.listen（Text，index 19）、
+    /// 全链路走 app.handle_key：Down×21 聚焦 dns.listen（Text，index 21）、
     /// Enter 进编辑、输入 x、Esc；退出编辑后 x 不再插入，Ctrl+S 落盘验证。
     #[test]
     fn esc_in_edit_mode_does_not_quit() {
         with_settings_dir(|| {
             let (mut app, _rx) = test_app(24);
             app.switch_page(5);
-            // Down×19：focused 0 → 19（dns.listen，Text 字段）
-            for _ in 0..19 {
+            // Down×21：focused 0 → 21（dns.listen，Text 字段）
+            for _ in 0..21 {
                 assert!(app
                     .handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
                     .is_none());
@@ -2748,13 +2748,13 @@ mod tests {
     }
 
     /// 编辑 Text 字段时输入 'q' 不退出程序（P0-1 回归）：
-    /// nameserver（index 22，Text）编辑中输入 'q' 保持运行（dns-query 可完整输入）。
+    /// nameserver（index 24，Text）编辑中输入 'q' 保持运行（dns-query 可完整输入）。
     #[test]
     fn q_typed_in_edit_mode_does_not_quit() {
         let (mut app, _rx) = test_app(24);
         app.switch_page(5);
-        // Down×22：focused 0 → 22（dns.nameserver，Text 字段）
-        for _ in 0..22 {
+        // Down×24：focused 0 → 24（dns.nameserver，Text 字段）
+        for _ in 0..24 {
             app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));

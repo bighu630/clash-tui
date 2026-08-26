@@ -395,6 +395,67 @@ nameserver = [\"https://doh.pub/dns-query\"]\ndefault_nameserver = [\"223.5.5.5\
         });
     }
 
+    /// 旧 settings.toml 缺失 auto_redirect / auto_detect_interface → auto_redirect 回退为 true，auto_detect_interface 回退为 false
+    #[test]
+    fn tun_new_fields_legacy_defaults() {
+        // 构造缺失两字段的 NetworkSettings TOML（仅 tun 段缺字段）
+        let toml_str = "mode = \"rule\"\nipv6 = false\nallow_lan = false\nport = 7890\nsocks_port = 7891\n\
+mixed_port = 7892\nlog_level = \"info\"\nexternal_controller = \"127.0.0.1:9090\"\nsecret = \"1234567890abcdef1234567890abcdef\"\nrun_mode = \"systemd\"\nmihomo_bin = \"\"\n\
+[tun]\nenable = false\nstack = \"mixed\"\nauto_route = true\ndns_hijack = [\"any:53\"]\nmtu = 9000\n\
+[dns]\nenable = true\nlisten = \"0.0.0.0:1053\"\nenhanced_mode = \"fake-ip\"\nfake_ip_range = \"198.18.0.1/16\"\n\
+nameserver = [\"https://doh.pub/dns-query\"]\ndefault_nameserver = [\"223.5.5.5\"]\nfallback = [\"tls://dns.alidns.com\"]\nfake_ip_filter = [\"*.lan\"]\n";
+        let s: NetworkSettings = toml::from_str(toml_str).unwrap();
+        assert!(s.tun.auto_redirect, "旧配置 auto_redirect 应默认为 true");
+        assert!(
+            !s.tun.auto_detect_interface,
+            "旧配置 auto_detect_interface 应默认为 false"
+        );
+        // 直接对 TunSettings 也验证
+        let tun_toml = "enable = false\nstack = \"mixed\"\nauto_route = true\ndns_hijack = [\"any:53\"]\nmtu = 9000\n";
+        let t: TunSettings = toml::from_str(tun_toml).unwrap();
+        assert!(t.auto_redirect);
+        assert!(!t.auto_detect_interface);
+    }
+
+    /// roundtrip：设为 true → to_string → from_str → 仍为 true；显式 false 亦往返
+    #[test]
+    fn tun_new_fields_roundtrip_true() {
+        with_dir(|| {
+            let s = NetworkSettings {
+                tun: TunSettings {
+                    auto_redirect: true,
+                    auto_detect_interface: true,
+                    ..TunSettings::default()
+                },
+                ..NetworkSettings::default()
+            };
+            save_settings(&s).unwrap();
+            let back = load_settings().unwrap();
+            assert!(back.tun.auto_redirect);
+            assert!(back.tun.auto_detect_interface);
+            // 纯 toml 字符串往返
+            let body = toml::to_string(&s).unwrap();
+            assert!(body.contains("auto_redirect"));
+            assert!(body.contains("auto_detect_interface"));
+            let back2: NetworkSettings = toml::from_str(&body).unwrap();
+            assert!(back2.tun.auto_redirect);
+            assert!(back2.tun.auto_detect_interface);
+            // 显式 false 往返
+            let s_false = NetworkSettings {
+                tun: TunSettings {
+                    auto_redirect: false,
+                    auto_detect_interface: false,
+                    ..TunSettings::default()
+                },
+                ..NetworkSettings::default()
+            };
+            let body_f = toml::to_string(&s_false).unwrap();
+            let back_f: NetworkSettings = toml::from_str(&body_f).unwrap();
+            assert!(!back_f.tun.auto_redirect);
+            assert!(!back_f.tun.auto_detect_interface);
+        });
+    }
+
     /// Windows 配置目录构造（纯函数，Linux 上也能断言字符串行为）。
     #[test]
     fn windows_config_dir_joins_appdata() {

@@ -91,6 +91,10 @@ impl Default for NetworkSettings {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// TUN 段配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunSettings {
@@ -98,6 +102,12 @@ pub struct TunSettings {
     /// "system" | "gvisor" | "mixed"
     pub stack: String,
     pub auto_route: bool,
+    /// 是否自动重定向（依赖 auto-route 与 CAP_NET_ADMIN）
+    #[serde(default = "default_true")]
+    pub auto_redirect: bool,
+    /// 是否自动检测出口接口
+    #[serde(default)]
+    pub auto_detect_interface: bool,
     pub dns_hijack: Vec<String>,
     pub mtu: u16,
 }
@@ -108,6 +118,8 @@ impl Default for TunSettings {
             enable: false,
             stack: "mixed".into(),
             auto_route: true,
+            auto_redirect: true,
+            auto_detect_interface: false,
             dns_hijack: vec!["any:53".into()],
             mtu: 9000,
         }
@@ -253,8 +265,43 @@ mod tests {
         assert!(!t.enable);
         assert_eq!(t.stack, "mixed");
         assert!(t.auto_route);
+        assert!(t.auto_redirect);
+        assert!(!t.auto_detect_interface);
         assert_eq!(t.dns_hijack, vec!["any:53"]);
         assert_eq!(t.mtu, 9000);
+    }
+
+    #[test]
+    fn tun_settings_serde_defaults_for_new_fields() {
+        // 旧 TOML 缺失 auto_redirect / auto_detect_interface 时：auto_redirect 回退为 true，auto_detect_interface 回退为 false
+        let toml_str = "enable = false\nstack = \"mixed\"\nauto_route = true\ndns_hijack = [\"any:53\"]\nmtu = 9000\n";
+        let t: TunSettings = toml::from_str(toml_str).unwrap();
+        assert!(t.auto_redirect);
+        assert!(!t.auto_detect_interface);
+        // true roundtrip
+        let t2 = TunSettings {
+            auto_redirect: true,
+            auto_detect_interface: true,
+            ..TunSettings::default()
+        };
+        let body = toml::to_string(&t2).unwrap();
+        assert!(body.contains("auto_redirect"));
+        assert!(body.contains("auto_detect_interface"));
+        let back: TunSettings = toml::from_str(&body).unwrap();
+        assert!(back.auto_redirect);
+        assert!(back.auto_detect_interface);
+        // false roundtrip（显式 false 亦需保留）
+        let t3 = TunSettings {
+            auto_redirect: false,
+            auto_detect_interface: false,
+            ..TunSettings::default()
+        };
+        let body3 = toml::to_string(&t3).unwrap();
+        assert!(body3.contains("auto_redirect"));
+        assert!(body3.contains("auto_detect_interface"));
+        let back3: TunSettings = toml::from_str(&body3).unwrap();
+        assert!(!back3.auto_redirect);
+        assert!(!back3.auto_detect_interface);
     }
 
     #[test]

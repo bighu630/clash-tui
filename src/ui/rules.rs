@@ -48,7 +48,7 @@ fn is_valid_cidr(rule_type: &str, payload: &str) -> bool {
     if parts.next().is_some() { return false; }
     let ip: std::net::IpAddr = match ip_str.parse() { Ok(v) => v, Err(_) => return false };
     let prefix: u8 = match prefix_str.parse() { Ok(v) => v, Err(_) => return false };
-    match rule_type {
+    match rule_type.trim() {
         "IP-CIDR" => ip.is_ipv4() && prefix <= 32,
         "IP-CIDR6" => ip.is_ipv6() && prefix <= 128,
         "SRC-IP-CIDR" => if ip.is_ipv4() { prefix <= 32 } else { prefix <= 128 },

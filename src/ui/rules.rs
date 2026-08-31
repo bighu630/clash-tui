@@ -21,21 +21,50 @@ use crate::ui::widgets::{
 use crate::ui::Page;
 
 /// 规则类型下拉选项（MATCH 无 payload）
-const RULE_TYPES: [&str; 6] = [
+const RULE_TYPES: [&str; 10] = [
     "DOMAIN",
     "DOMAIN-SUFFIX",
     "DOMAIN-KEYWORD",
+    "GEOSITE",
     "GEOIP",
+    "IP-CIDR",
+    "IP-CIDR6",
+    "SRC-IP-CIDR",
     "PROCESS-NAME",
     "MATCH",
 ];
 
+fn needs_no_resolve(rule_type: &str) -> bool {
+    matches!(rule_type.trim(), "IP-CIDR" | "IP-CIDR6" | "SRC-IP-CIDR")
+}
+fn is_cidr_type(rule_type: &str) -> bool {
+    matches!(rule_type.trim(), "IP-CIDR" | "IP-CIDR6" | "SRC-IP-CIDR")
+}
+fn is_valid_cidr(rule_type: &str, payload: &str) -> bool {
+    let payload = payload.trim();
+    let mut parts = payload.split('/');
+    let ip_str = match parts.next() { Some(s) => s.trim(), None => return false };
+    let prefix_str = match parts.next() { Some(s) => s.trim(), None => return false };
+    if parts.next().is_some() { return false; }
+    let ip: std::net::IpAddr = match ip_str.parse() { Ok(v) => v, Err(_) => return false };
+    let prefix: u8 = match prefix_str.parse() { Ok(v) => v, Err(_) => return false };
+    match rule_type.trim() {
+        "IP-CIDR" => ip.is_ipv4() && prefix <= 32,
+        "IP-CIDR6" => ip.is_ipv6() && prefix <= 128,
+        "SRC-IP-CIDR" => if ip.is_ipv4() { prefix <= 32 } else { prefix <= 128 },
+        _ => false,
+    }
+}
+
 /// 规则串序列化：MATCH → "MATCH,target"；其余 → "TYPE,payload,target"
 pub fn rule_to_string(r: &UserRule) -> String {
-    if r.rule_type == "MATCH" {
-        format!("MATCH,{}", r.target)
+    let rt = r.rule_type.trim();
+    if rt == "MATCH" {
+        format!("MATCH,{}", r.target.trim())
+    } else if needs_no_resolve(rt) {
+        format!("{},{},{},no-resolve", rt, r.payload.trim(), r.target.trim())
     } else {
-        format!("{},{},{}", r.rule_type, r.payload, r.target)
+        format!("{},{},{}", rt, r.payload.trim(), r.target.trim())
     }
 }
 
@@ -43,35 +72,30 @@ pub fn rule_to_string(r: &UserRule) -> String {
 /// 解析失败（空段/字段缺失）返回 None。
 pub fn parse_rule(s: &str) -> Option<UserRule> {
     let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let mut parts = s.splitn(3, ',');
+    if s.is_empty() { return None; }
+    // 兼容 ",no-resolve" 前后空格、大小写：按逗号切分判断最后一段是否为 no-resolve
+    let parts_tmp: Vec<&str> = s.split(',').collect();
+    let raw = if parts_tmp.last().map(|last| last.trim().eq_ignore_ascii_case("no-resolve")).unwrap_or(false) {
+        if let Some(idx) = s.rfind(',') {
+            s[..idx].trim_end()
+        } else {
+            s
+        }
+    } else {
+        s
+    };
+    let mut parts = raw.splitn(3, ',');
     let rule_type = parts.next()?.trim();
-    if rule_type.is_empty() {
-        return None;
-    }
+    if rule_type.is_empty() { return None; }
     if rule_type == "MATCH" {
         let target = parts.next()?.trim();
-        if target.is_empty() {
-            return None;
-        }
-        Some(UserRule {
-            rule_type: rule_type.to_string(),
-            payload: String::new(),
-            target: target.to_string(),
-        })
+        if target.is_empty() { return None; }
+        Some(UserRule { rule_type: rule_type.to_string(), payload: String::new(), target: target.to_string() })
     } else {
         let payload = parts.next()?.trim();
         let target = parts.next()?.trim();
-        if payload.is_empty() || target.is_empty() {
-            return None;
-        }
-        Some(UserRule {
-            rule_type: rule_type.to_string(),
-            payload: payload.to_string(),
-            target: target.to_string(),
-        })
+        if payload.is_empty() || target.is_empty() { return None; }
+        Some(UserRule { rule_type: rule_type.to_string(), payload: payload.to_string(), target: target.to_string() })
     }
 }
 
@@ -249,6 +273,13 @@ impl RulesPage {
             self.popup = Some(RulePopup::Message(MessagePopup::new(
                 "输入有误".to_string(),
                 vec![format!("{rule_type} 规则需要 payload")],
+            )));
+            return None;
+        }
+        if is_cidr_type(&rule_type) && !is_valid_cidr(&rule_type, &payload) {
+            self.popup = Some(RulePopup::Message(MessagePopup::new(
+                "输入有误".to_string(),
+                vec![format!("{rule_type} 的 CIDR 格式错误: {payload} (示例 192.168.0.0/16 或 2001:db8::/32)")],
             )));
             return None;
         }
@@ -535,5 +566,100 @@ impl Page for RulesPage {
                 RulePopup::Message(p) => p.render(f, area),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod rules_tests {
+    use super::*;
+    use crate::core::models::UserRule;
+    #[test]
+    fn rule_to_string_ip_cidr_appends_no_resolve() {
+        let r = UserRule { rule_type: "IP-CIDR".into(), payload: "192.168.0.0/16".into(), target: "DIRECT".into() };
+        assert_eq!(rule_to_string(&r), "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve");
+    }
+    #[test]
+    fn rule_to_string_ip_cidr6_appends_no_resolve() {
+        let r = UserRule { rule_type: "IP-CIDR6".into(), payload: "2001:db8::/32".into(), target: "DIRECT".into() };
+        assert_eq!(rule_to_string(&r), "IP-CIDR6,2001:db8::/32,DIRECT,no-resolve");
+    }
+    #[test]
+    fn rule_to_string_src_ip_cidr_appends_no_resolve() {
+        let r = UserRule { rule_type: "SRC-IP-CIDR".into(), payload: "10.0.0.0/8".into(), target: "DIRECT".into() };
+        assert_eq!(rule_to_string(&r), "SRC-IP-CIDR,10.0.0.0/8,DIRECT,no-resolve");
+    }
+    #[test]
+    fn rule_to_string_geosite_no_no_resolve() {
+        let r = UserRule { rule_type: "GEOSITE".into(), payload: "google".into(), target: "DIRECT".into() };
+        assert_eq!(rule_to_string(&r), "GEOSITE,google,DIRECT");
+    }
+    #[test]
+    fn parse_rule_strips_no_resolve() {
+        let r = parse_rule("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve").unwrap();
+        assert_eq!(r.rule_type, "IP-CIDR");
+        assert_eq!(r.payload, "192.168.0.0/16");
+        assert_eq!(r.target, "DIRECT");
+    }
+    #[test]
+    fn parse_rule_no_resolve_case_insensitive() {
+        let r = parse_rule("IP-CIDR6,2001:db8::/32,DIRECT,NO-RESOLVE").unwrap();
+        assert_eq!(r.rule_type, "IP-CIDR6");
+        assert_eq!(r.payload, "2001:db8::/32");
+    }
+    #[test]
+    fn cidr_validation() {
+        assert!(is_valid_cidr("IP-CIDR", "192.168.0.0/16"));
+        assert!(is_valid_cidr("IP-CIDR", "1.1.1.1/32"));
+        assert!(!is_valid_cidr("IP-CIDR", "2001:db8::/32"));
+        assert!(is_valid_cidr("IP-CIDR6", "2001:db8::/32"));
+        assert!(is_valid_cidr("IP-CIDR6", "::1/128"));
+        assert!(!is_valid_cidr("IP-CIDR6", "192.168.0.0/16"));
+        assert!(is_valid_cidr("SRC-IP-CIDR", "10.0.0.0/8"));
+        assert!(is_valid_cidr("SRC-IP-CIDR", "2001:db8::/32"));
+        assert!(!is_valid_cidr("IP-CIDR", "192.168.0.0/33"));
+        assert!(!is_valid_cidr("IP-CIDR", "999.0.0.0/16"));
+        assert!(!is_valid_cidr("IP-CIDR", "192.168.0.0"));
+        assert!(!is_valid_cidr("IP-CIDR", "192.168.0.0/"));
+        assert!(!is_valid_cidr("IP-CIDR", "/16"));
+        assert!(is_valid_cidr("IP-CIDR", " 192.168.0.0/16 "));
+        assert!(!is_valid_cidr("IP-CIDR6", "2001:db8::/129"));
+        assert!(!is_valid_cidr("SRC-IP-CIDR", "10.0.0.0/33"));
+        assert!(!is_valid_cidr("SRC-IP-CIDR", "2001:db8::/129"));
+        assert!(is_valid_cidr("IP-CIDR", "0.0.0.0/0"));
+        assert!(is_valid_cidr("IP-CIDR6", "::/0"));
+    }
+    #[test]
+    fn parse_rule_strips_no_resolve_with_space() {
+        let r = parse_rule("IP-CIDR,192.168.0.0/16,DIRECT, no-resolve").unwrap();
+        assert_eq!(r.target, "DIRECT");
+    }
+    #[test]
+    fn parse_rule_strips_no_resolve_case_insensitive_with_space() {
+        let r = parse_rule("IP-CIDR,192.168.0.0/16,DIRECT, No-Resolve ").unwrap();
+        assert_eq!(r.rule_type, "IP-CIDR");
+        assert_eq!(r.payload, "192.168.0.0/16");
+        assert_eq!(r.target, "DIRECT");
+    }
+    #[test]
+    fn needs_no_resolve_trim_consistency() {
+        assert!(needs_no_resolve(" IP-CIDR "));
+        assert!(needs_no_resolve(" IP-CIDR6 "));
+        assert!(needs_no_resolve(" SRC-IP-CIDR "));
+        assert!(!needs_no_resolve(" GEOSITE "));
+    }
+    #[test]
+    fn is_cidr_type_trim_consistency() {
+        assert!(is_cidr_type(" IP-CIDR "));
+        assert!(is_cidr_type(" IP-CIDR6 "));
+        assert!(!is_cidr_type(" DOMAIN "));
+    }
+    #[test]
+    fn rule_to_string_trims_whitespace() {
+        let r = UserRule { rule_type: " IP-CIDR ".into(), payload: " 192.168.0.0/16 ".into(), target: " DIRECT ".into() };
+        assert_eq!(rule_to_string(&r), "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve");
+        let r2 = UserRule { rule_type: " MATCH ".into(), payload: "".into(), target: " DIRECT ".into() };
+        assert_eq!(rule_to_string(&r2), "MATCH,DIRECT");
+        let r3 = UserRule { rule_type: " GEOSITE ".into(), payload: " google ".into(), target: " DIRECT ".into() };
+        assert_eq!(rule_to_string(&r3), "GEOSITE,google,DIRECT");
     }
 }

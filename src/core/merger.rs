@@ -271,7 +271,11 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
     kv(&mut tun, "stack", s.tun.stack.clone());
     kv(&mut tun, "auto-route", s.tun.auto_route);
     kv(&mut tun, "auto-redirect", s.tun.auto_redirect);
-    kv(&mut tun, "auto-detect-interface", s.tun.auto_detect_interface);
+    kv(
+        &mut tun,
+        "auto-detect-interface",
+        s.tun.auto_detect_interface,
+    );
     kv(
         &mut tun,
         "dns-hijack",
@@ -1216,7 +1220,8 @@ mod tests {
     #[test]
     fn merge_custom_ip_cidr_with_whitespace_trims_and_appends_no_resolve() {
         let mut o = Overrides::default();
-        o.rules.push(rule(" IP-CIDR ", " 192.168.0.0/16 ", " DIRECT "));
+        o.rules
+            .push(rule(" IP-CIDR ", " 192.168.0.0/16 ", " DIRECT "));
         let out = do_merge(o, None);
         let v = parse_out(&out);
         let rs = v["rules"].as_sequence().unwrap();

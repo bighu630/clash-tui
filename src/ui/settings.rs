@@ -1126,8 +1126,14 @@ mod tests {
         assert_eq!(fields[16].value, "是");
         assert_eq!(fields[17].label, "tun.auto-detect-interface");
         assert_eq!(fields[17].value, "是");
-        assert_eq!(fields[16].kind, FieldKind::Dropdown(vec!["是".into(), "否".into()]));
-        assert_eq!(fields[17].kind, FieldKind::Dropdown(vec!["是".into(), "否".into()]));
+        assert_eq!(
+            fields[16].kind,
+            FieldKind::Dropdown(vec!["是".into(), "否".into()])
+        );
+        assert_eq!(
+            fields[17].kind,
+            FieldKind::Dropdown(vec!["是".into(), "否".into()])
+        );
         // 显式设为 false / true 后往返
         let mut fields2 = fields.clone();
         fields2[16].value = "否".into();

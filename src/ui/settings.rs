@@ -989,7 +989,7 @@ mod tests {
                 stack: "gvisor".into(),
                 auto_route: false,
                 auto_redirect: true,
-                auto_detect_interface: false,
+                auto_detect_interface: true,
                 mtu: 1500,
                 dns_hijack: vec!["any:53".into(), "any:5353".into()],
             },
@@ -1044,7 +1044,7 @@ mod tests {
         assert_eq!(back.tun.stack, "gvisor");
         assert!(!back.tun.auto_route);
         assert!(back.tun.auto_redirect);
-        assert!(!back.tun.auto_detect_interface);
+        assert!(back.tun.auto_detect_interface);
         assert_eq!(back.tun.mtu, 1500);
         assert_eq!(back.tun.dns_hijack, vec!["any:53", "any:5353"]);
         assert!(!back.dns.enable);
@@ -1112,20 +1112,20 @@ mod tests {
         assert_eq!(fields[29].kind, FieldKind::ReadOnly);
     }
 
-    /// TUN 新增开关：默认 auto_redirect true（「是」）、auto_detect_interface false（「否」），往返正确。
+    /// TUN 新增开关：默认 auto_redirect / auto_detect_interface 均为 true（「是」），往返正确。
     #[test]
     fn tun_auto_redirect_and_detect_defaults_and_roundtrip() {
         let s = NetworkSettings {
             secret: "c".repeat(32),
             ..NetworkSettings::default()
         };
-        // 默认 auto_redirect true → 「是」，auto_detect_interface false → 「否」
+        // 默认 auto_redirect / auto_detect_interface 均为 true → 「是」
         let fields = field_values(&s);
         // 索引：16=auto-redirect, 17=auto-detect-interface（全局字段）
         assert_eq!(fields[16].label, "tun.auto-redirect");
         assert_eq!(fields[16].value, "是");
         assert_eq!(fields[17].label, "tun.auto-detect-interface");
-        assert_eq!(fields[17].value, "否");
+        assert_eq!(fields[17].value, "是");
         assert_eq!(fields[16].kind, FieldKind::Dropdown(vec!["是".into(), "否".into()]));
         assert_eq!(fields[17].kind, FieldKind::Dropdown(vec!["是".into(), "否".into()]));
         // 显式设为 false / true 后往返

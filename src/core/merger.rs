@@ -491,10 +491,10 @@ mod tests {
         assert_eq!(v["port"], Value::Number(7890.into()));
         assert_eq!(v["mode"], Value::String("rule".into()));
         assert_eq!(v["tun"]["stack"], Value::String("mixed".into()));
-        // tun 新增字段：auto_redirect 默认 true、auto_detect_interface 默认 false，且恒写入
+        // tun 新增字段：auto_redirect / auto_detect_interface 默认均为 true，且恒写入
         assert_eq!(v["tun"]["auto-route"], Value::Bool(true));
         assert_eq!(v["tun"]["auto-redirect"], Value::Bool(true));
-        assert_eq!(v["tun"]["auto-detect-interface"], Value::Bool(false));
+        assert_eq!(v["tun"]["auto-detect-interface"], Value::Bool(true));
         // tun 键序：enable → stack → auto-route → auto-redirect → auto-detect-interface → dns-hijack → mtu
         let tun_keys: Vec<String> = v["tun"]
             .as_mapping()
@@ -1047,11 +1047,11 @@ mod tests {
 
     #[test]
     fn tun_auto_redirect_and_detect_interface_written() {
-        // 默认 Settings → auto_redirect true、auto_detect_interface false 恒写入且覆盖上游缺省
+        // 默认 Settings → auto_redirect / auto_detect_interface 均为 true 恒写入且覆盖上游缺省
         let out = do_merge(Overrides::default(), None);
         let v = parse_out(&out);
         assert_eq!(v["tun"]["auto-redirect"], Value::Bool(true));
-        assert_eq!(v["tun"]["auto-detect-interface"], Value::Bool(false));
+        assert_eq!(v["tun"]["auto-detect-interface"], Value::Bool(true));
         // 显式 false 时亦恒写入 false（覆盖默认 true）
         let s_false = NetworkSettings {
             tun: TunSettings {

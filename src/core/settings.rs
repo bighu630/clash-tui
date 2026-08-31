@@ -395,7 +395,7 @@ nameserver = [\"https://doh.pub/dns-query\"]\ndefault_nameserver = [\"223.5.5.5\
         });
     }
 
-    /// 旧 settings.toml 缺失 auto_redirect / auto_detect_interface → auto_redirect 回退为 true，auto_detect_interface 回退为 false
+    /// 旧 settings.toml 缺失 auto_redirect / auto_detect_interface → 两者均回退为 true
     #[test]
     fn tun_new_fields_legacy_defaults() {
         // 构造缺失两字段的 NetworkSettings TOML（仅 tun 段缺字段）
@@ -407,14 +407,14 @@ nameserver = [\"https://doh.pub/dns-query\"]\ndefault_nameserver = [\"223.5.5.5\
         let s: NetworkSettings = toml::from_str(toml_str).unwrap();
         assert!(s.tun.auto_redirect, "旧配置 auto_redirect 应默认为 true");
         assert!(
-            !s.tun.auto_detect_interface,
-            "旧配置 auto_detect_interface 应默认为 false"
+            s.tun.auto_detect_interface,
+            "旧配置 auto_detect_interface 应默认为 true"
         );
         // 直接对 TunSettings 也验证
         let tun_toml = "enable = false\nstack = \"mixed\"\nauto_route = true\ndns_hijack = [\"any:53\"]\nmtu = 9000\n";
         let t: TunSettings = toml::from_str(tun_toml).unwrap();
         assert!(t.auto_redirect);
-        assert!(!t.auto_detect_interface);
+        assert!(t.auto_detect_interface);
     }
 
     /// roundtrip：设为 true → to_string → from_str → 仍为 true；显式 false 亦往返

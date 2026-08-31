@@ -106,7 +106,7 @@ pub struct TunSettings {
     #[serde(default = "default_true")]
     pub auto_redirect: bool,
     /// 是否自动检测出口接口
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub auto_detect_interface: bool,
     pub dns_hijack: Vec<String>,
     pub mtu: u16,
@@ -119,7 +119,7 @@ impl Default for TunSettings {
             stack: "mixed".into(),
             auto_route: true,
             auto_redirect: true,
-            auto_detect_interface: false,
+            auto_detect_interface: true,
             dns_hijack: vec!["any:53".into()],
             mtu: 9000,
         }
@@ -266,18 +266,18 @@ mod tests {
         assert_eq!(t.stack, "mixed");
         assert!(t.auto_route);
         assert!(t.auto_redirect);
-        assert!(!t.auto_detect_interface);
+        assert!(t.auto_detect_interface);
         assert_eq!(t.dns_hijack, vec!["any:53"]);
         assert_eq!(t.mtu, 9000);
     }
 
     #[test]
     fn tun_settings_serde_defaults_for_new_fields() {
-        // 旧 TOML 缺失 auto_redirect / auto_detect_interface 时：auto_redirect 回退为 true，auto_detect_interface 回退为 false
+        // 旧 TOML 缺失 auto_redirect / auto_detect_interface 时：两者均回退为 true
         let toml_str = "enable = false\nstack = \"mixed\"\nauto_route = true\ndns_hijack = [\"any:53\"]\nmtu = 9000\n";
         let t: TunSettings = toml::from_str(toml_str).unwrap();
         assert!(t.auto_redirect);
-        assert!(!t.auto_detect_interface);
+        assert!(t.auto_detect_interface);
         // true roundtrip
         let t2 = TunSettings {
             auto_redirect: true,

@@ -446,7 +446,7 @@ enable = false
 stack = "mixed"      # system | gvisor | mixed
 auto_route = true
 auto_redirect = true
-auto_detect_interface = false
+auto_detect_interface = true
 dns_hijack = ["any:53"]
 mtu = 9000
 

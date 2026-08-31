@@ -235,7 +235,7 @@ pub fn default_group_interval() -> u64 {
 /// 自定义规则。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserRule {
-    /// DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|GEOIP|PROCESS-NAME|MATCH
+    /// DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|GEOSITE|GEOIP|IP-CIDR|IP-CIDR6|SRC-IP-CIDR|PROCESS-NAME|MATCH
     pub rule_type: String,
     /// MATCH 时为空串
     pub payload: String,

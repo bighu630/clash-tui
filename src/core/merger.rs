@@ -37,6 +37,10 @@ fn str_seq<I: IntoIterator<Item = S>, S: Into<String>>(items: I) -> Value {
     Value::Sequence(items.into_iter().map(|s| Value::String(s.into())).collect())
 }
 
+fn needs_no_resolve(rule_type: &str) -> bool {
+    matches!(rule_type.trim(), "IP-CIDR" | "IP-CIDR6" | "SRC-IP-CIDR")
+}
+
 /// 注入自动组「🚀 节点选择」（组员=全部节点名）。组名已存在时跳过（保留自定义同名组）。
 fn inject_auto_group(
     groups: &mut Vec<Value>,
@@ -114,6 +118,8 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
         let rule_type_trim = r.rule_type.trim();
         let s = if rule_type_trim == "MATCH" {
             format!("MATCH,{target_trim}")
+        } else if needs_no_resolve(rule_type_trim) {
+            format!("{rule_type_trim},{payload_trim},{target_trim},no-resolve")
         } else {
             format!("{rule_type_trim},{payload_trim},{target_trim}")
         };
@@ -1137,5 +1143,87 @@ mod tests {
         assert_eq!(gs[0]["url"], Value::String("http://x/generate_204".into()));
         assert_eq!(gs[0]["interval"], Value::Number(120.into()));
         assert_eq!(gs[0]["tolerance"], Value::Number(50.into()));
+    }
+
+    #[test]
+    fn needs_no_resolve_types() {
+        assert!(needs_no_resolve("IP-CIDR"));
+        assert!(needs_no_resolve("IP-CIDR6"));
+        assert!(needs_no_resolve("SRC-IP-CIDR"));
+        assert!(needs_no_resolve(" IP-CIDR "));
+        assert!(needs_no_resolve(" IP-CIDR6 "));
+        assert!(!needs_no_resolve("GEOSITE"));
+        assert!(!needs_no_resolve("GEOIP"));
+        assert!(!needs_no_resolve("DOMAIN"));
+        assert!(!needs_no_resolve("DOMAIN-SUFFIX"));
+        assert!(!needs_no_resolve("MATCH"));
+        assert!(!needs_no_resolve(""));
+    }
+
+    #[test]
+    fn merge_custom_ip_cidr_has_no_resolve() {
+        let mut o = Overrides::default();
+        o.rules.push(rule("IP-CIDR", "192.168.0.0/16", "DIRECT"));
+        let out = do_merge(o, None);
+        let v = parse_out(&out);
+        let rs = v["rules"].as_sequence().unwrap();
+        assert_eq!(rs.len(), 1);
+        assert_eq!(
+            rs[0],
+            Value::String("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve".into())
+        );
+    }
+
+    #[test]
+    fn merge_custom_ip_cidr6_has_no_resolve() {
+        let mut o = Overrides::default();
+        o.rules.push(rule("IP-CIDR6", "2001:db8::/32", "DIRECT"));
+        let out = do_merge(o, None);
+        let v = parse_out(&out);
+        let rs = v["rules"].as_sequence().unwrap();
+        assert_eq!(rs.len(), 1);
+        assert_eq!(
+            rs[0],
+            Value::String("IP-CIDR6,2001:db8::/32,DIRECT,no-resolve".into())
+        );
+    }
+
+    #[test]
+    fn merge_custom_src_ip_cidr_has_no_resolve() {
+        let mut o = Overrides::default();
+        o.rules.push(rule("SRC-IP-CIDR", "10.0.0.0/8", "DIRECT"));
+        let out = do_merge(o, None);
+        let v = parse_out(&out);
+        let rs = v["rules"].as_sequence().unwrap();
+        assert_eq!(rs.len(), 1);
+        assert_eq!(
+            rs[0],
+            Value::String("SRC-IP-CIDR,10.0.0.0/8,DIRECT,no-resolve".into())
+        );
+    }
+
+    #[test]
+    fn merge_custom_geosite_no_no_resolve() {
+        let mut o = Overrides::default();
+        o.rules.push(rule("GEOSITE", "google", "DIRECT"));
+        let out = do_merge(o, None);
+        let v = parse_out(&out);
+        let rs = v["rules"].as_sequence().unwrap();
+        assert_eq!(rs.len(), 1);
+        assert_eq!(rs[0], Value::String("GEOSITE,google,DIRECT".into()));
+    }
+
+    #[test]
+    fn merge_custom_ip_cidr_with_whitespace_trims_and_appends_no_resolve() {
+        let mut o = Overrides::default();
+        o.rules.push(rule(" IP-CIDR ", " 192.168.0.0/16 ", " DIRECT "));
+        let out = do_merge(o, None);
+        let v = parse_out(&out);
+        let rs = v["rules"].as_sequence().unwrap();
+        assert_eq!(rs.len(), 1);
+        assert_eq!(
+            rs[0],
+            Value::String("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve".into())
+        );
     }
 }

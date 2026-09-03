@@ -445,8 +445,9 @@ secret = "0123456789abcdef0123456789abcdef"   # 首次运行随机生成 32 hex
 enable = false
 stack = "mixed"      # system | gvisor | mixed
 auto_route = true
-auto_redirect = true
-auto_detect_interface = true
+# auto_redirect / auto_detect_interface 可选，三态，默认不配置（选"默认"时不写键，由 mihomo 自行决定）
+# auto_redirect = true  # 默认不配置，省略则由 mihomo 自行决定
+# auto_detect_interface = true  # 默认不配置，省略则由 mihomo 自行决定
 dns_hijack = ["any:53"]
 mtu = 9000
 

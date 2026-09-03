@@ -270,8 +270,12 @@ pub fn merge(ctx: MergeContext) -> Result<MergeOutput, MergeError> {
     kv(&mut tun, "enable", s.tun.enable);
     kv(&mut tun, "stack", s.tun.stack.clone());
     kv(&mut tun, "auto-route", s.tun.auto_route);
-    kv(&mut tun, "auto-redirect", s.tun.auto_redirect);
-    kv(&mut tun, "auto-detect-interface", s.tun.auto_detect_interface);
+    if let Some(v) = s.tun.auto_redirect {
+        kv(&mut tun, "auto-redirect", v);
+    }
+    if let Some(v) = s.tun.auto_detect_interface {
+        kv(&mut tun, "auto-detect-interface", v);
+    }
     kv(
         &mut tun,
         "dns-hijack",
@@ -491,28 +495,25 @@ mod tests {
         assert_eq!(v["port"], Value::Number(7890.into()));
         assert_eq!(v["mode"], Value::String("rule".into()));
         assert_eq!(v["tun"]["stack"], Value::String("mixed".into()));
-        // tun 新增字段：auto_redirect / auto_detect_interface 默认均为 true，且恒写入
+        // tun 新增字段：三态，默认不配置（None→不写键，由 mihomo 自行决定）
         assert_eq!(v["tun"]["auto-route"], Value::Bool(true));
-        assert_eq!(v["tun"]["auto-redirect"], Value::Bool(true));
-        assert_eq!(v["tun"]["auto-detect-interface"], Value::Bool(true));
-        // tun 键序：enable → stack → auto-route → auto-redirect → auto-detect-interface → dns-hijack → mtu
-        let tun_keys: Vec<String> = v["tun"]
-            .as_mapping()
-            .unwrap()
+        let tun_map = v["tun"].as_mapping().unwrap();
+        assert!(
+            !tun_map.contains_key(Value::String("auto-redirect".into())),
+            "默认不含 auto-redirect"
+        );
+        assert!(
+            !tun_map.contains_key(Value::String("auto-detect-interface".into())),
+            "默认不含 auto-detect-interface"
+        );
+        // tun 键序（默认不含两键）：enable → stack → auto-route → dns-hijack → mtu
+        let tun_keys: Vec<String> = tun_map
             .keys()
             .map(|k| k.as_str().unwrap().to_string())
             .collect();
         assert_eq!(
             tun_keys,
-            vec![
-                "enable",
-                "stack",
-                "auto-route",
-                "auto-redirect",
-                "auto-detect-interface",
-                "dns-hijack",
-                "mtu"
-            ],
+            vec!["enable", "stack", "auto-route", "dns-hijack", "mtu"],
             "tun 键序"
         );
         assert_eq!(v["dns"]["enhanced-mode"], Value::String("fake-ip".into()));
@@ -1047,16 +1048,26 @@ mod tests {
 
     #[test]
     fn tun_auto_redirect_and_detect_interface_written() {
-        // 默认 Settings → auto_redirect / auto_detect_interface 均为 true 恒写入且覆盖上游缺省
+        // 三态：默认 None→不写键（由 mihomo 自行决定，避免 LAN UDP 被劫持）
         let out = do_merge(Overrides::default(), None);
         let v = parse_out(&out);
-        assert_eq!(v["tun"]["auto-redirect"], Value::Bool(true));
-        assert_eq!(v["tun"]["auto-detect-interface"], Value::Bool(true));
-        // 显式 false 时亦恒写入 false（覆盖默认 true）
+        let tun_map = v["tun"].as_mapping().unwrap();
+        assert!(!tun_map.contains_key(Value::String("auto-redirect".into())));
+        assert!(!tun_map.contains_key(Value::String("auto-detect-interface".into())));
+        let tun_keys: Vec<String> = tun_map
+            .keys()
+            .map(|k| k.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            tun_keys,
+            vec!["enable", "stack", "auto-route", "dns-hijack", "mtu"],
+            "默认键序不含两键"
+        );
+        // 显式 Some(false) 时写入 false
         let s_false = NetworkSettings {
             tun: TunSettings {
-                auto_redirect: false,
-                auto_detect_interface: false,
+                auto_redirect: Some(false),
+                auto_detect_interface: Some(false),
                 ..Default::default()
             },
             ..Default::default()
@@ -1070,11 +1081,19 @@ mod tests {
         let v_false: Value = serde_yaml::from_str(&out_false.config).unwrap();
         assert_eq!(v_false["tun"]["auto-redirect"], Value::Bool(false));
         assert_eq!(v_false["tun"]["auto-detect-interface"], Value::Bool(false));
-        // true 时亦写入
+        assert!(v_false["tun"]
+            .as_mapping()
+            .unwrap()
+            .contains_key(Value::String("auto-redirect".into())));
+        assert!(v_false["tun"]
+            .as_mapping()
+            .unwrap()
+            .contains_key(Value::String("auto-detect-interface".into())));
+        // 显式 Some(true) 时写入 true
         let s = NetworkSettings {
             tun: TunSettings {
-                auto_redirect: true,
-                auto_detect_interface: true,
+                auto_redirect: Some(true),
+                auto_detect_interface: Some(true),
                 ..Default::default()
             },
             ..Default::default()
@@ -1088,15 +1107,15 @@ mod tests {
         let v2: Value = serde_yaml::from_str(&out2.config).unwrap();
         assert_eq!(v2["tun"]["auto-redirect"], Value::Bool(true));
         assert_eq!(v2["tun"]["auto-detect-interface"], Value::Bool(true));
-        // 键序断言
-        let tun_keys: Vec<String> = v2["tun"]
+        // 键序断言（显式写入时完整顺序）
+        let tun_keys2: Vec<String> = v2["tun"]
             .as_mapping()
             .unwrap()
             .keys()
             .map(|k| k.as_str().unwrap().to_string())
             .collect();
         assert_eq!(
-            tun_keys,
+            tun_keys2,
             vec![
                 "enable",
                 "stack",
@@ -1107,6 +1126,26 @@ mod tests {
                 "mtu"
             ]
         );
+        // 单个字段显式：仅该键出现，顺序仍保序
+        let s_partial = NetworkSettings {
+            tun: TunSettings {
+                auto_redirect: Some(true),
+                auto_detect_interface: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let out_p = merge(MergeContext {
+            settings: &s_partial,
+            overrides: &Overrides::default(),
+            subscription: None,
+        })
+        .expect("merge 应成功");
+        let v_p: Value = serde_yaml::from_str(&out_p.config).unwrap();
+        let m_p = v_p["tun"].as_mapping().unwrap();
+        assert!(m_p.contains_key(Value::String("auto-redirect".into())));
+        assert!(!m_p.contains_key(Value::String("auto-detect-interface".into())));
+        assert_eq!(v_p["tun"]["auto-redirect"], Value::Bool(true));
     }
 
     #[test]

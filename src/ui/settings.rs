@@ -162,13 +162,13 @@ pub(crate) fn field_values(s: &NetworkSettings) -> Vec<FormField> {
         },
         FormField {
             label: "tun.auto-redirect".into(),
-            value: yn(s.tun.auto_redirect),
-            kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]),
+            value: opt_yn(s.tun.auto_redirect),
+            kind: FieldKind::Dropdown(vec!["默认".into(), "是".into(), "否".into()]),
         },
         FormField {
             label: "tun.auto-detect-interface".into(),
-            value: yn(s.tun.auto_detect_interface),
-            kind: FieldKind::Dropdown(vec!["是".into(), "否".into()]),
+            value: opt_yn(s.tun.auto_detect_interface),
+            kind: FieldKind::Dropdown(vec!["默认".into(), "是".into(), "否".into()]),
         },
         FormField {
             label: "tun.mtu".into(),
@@ -276,6 +276,23 @@ fn parse_yn(label: &str, v: &str) -> Result<bool, ValidationError> {
     }
 }
 
+fn opt_yn(v: Option<bool>) -> String {
+    match v {
+        None => "默认".into(),
+        Some(true) => "是".into(),
+        Some(false) => "否".into(),
+    }
+}
+
+fn parse_opt_yn(label: &str, v: &str) -> Result<Option<bool>, ValidationError> {
+    match v {
+        "默认" => Ok(None),
+        "是" => Ok(Some(true)),
+        "否" => Ok(Some(false)),
+        _ => err(label, "选项无效"),
+    }
+}
+
 fn parse_dropdown(label: &str, v: &str, options: &[&str]) -> Result<String, ValidationError> {
     if options.contains(&v) {
         Ok(v.to_string())
@@ -320,8 +337,8 @@ pub(crate) fn apply_values(f: &[FormField]) -> Result<NetworkSettings, Validatio
             enable: parse_yn("tun.enable", &cfg[7].value)?,
             stack: parse_dropdown("tun.stack", &cfg[8].value, &["system", "gvisor", "mixed"])?,
             auto_route: parse_yn("tun.auto-route", &cfg[9].value)?,
-            auto_redirect: parse_yn("tun.auto-redirect", &cfg[10].value)?,
-            auto_detect_interface: parse_yn("tun.auto-detect-interface", &cfg[11].value)?,
+            auto_redirect: parse_opt_yn("tun.auto-redirect", &cfg[10].value)?,
+            auto_detect_interface: parse_opt_yn("tun.auto-detect-interface", &cfg[11].value)?,
             mtu: parse_u16("tun.mtu", &cfg[12].value)?,
             dns_hijack: parse_csv("tun.dns-hijack", &cfg[13].value)?,
         },
@@ -988,8 +1005,8 @@ mod tests {
                 enable: true,
                 stack: "gvisor".into(),
                 auto_route: false,
-                auto_redirect: true,
-                auto_detect_interface: true,
+                auto_redirect: None,
+                auto_detect_interface: None,
                 mtu: 1500,
                 dns_hijack: vec!["any:53".into(), "any:5353".into()],
             },
@@ -1043,8 +1060,8 @@ mod tests {
         assert!(back.tun.enable);
         assert_eq!(back.tun.stack, "gvisor");
         assert!(!back.tun.auto_route);
-        assert!(back.tun.auto_redirect);
-        assert!(back.tun.auto_detect_interface);
+        assert!(back.tun.auto_redirect.is_none());
+        assert!(back.tun.auto_detect_interface.is_none());
         assert_eq!(back.tun.mtu, 1500);
         assert_eq!(back.tun.dns_hijack, vec!["any:53", "any:5353"]);
         assert!(!back.dns.enable);
@@ -1070,6 +1087,8 @@ mod tests {
         assert_eq!(back.mode, "rule");
         assert_eq!(back.tun.stack, "mixed");
         assert_eq!(back.dns.enhanced_mode, "fake-ip");
+        assert!(back.tun.auto_redirect.is_none());
+        assert!(back.tun.auto_detect_interface.is_none());
     }
 
     /// 校验错误：非法端口/空 CSV/空文本，错误信息含字段 label。
@@ -1112,39 +1131,69 @@ mod tests {
         assert_eq!(fields[29].kind, FieldKind::ReadOnly);
     }
 
-    /// TUN 新增开关：默认 auto_redirect / auto_detect_interface 均为 true（「是」），往返正确。
+    /// TUN 新增开关：三态，默认不配置（「默认」），往返正确。
     #[test]
     fn tun_auto_redirect_and_detect_defaults_and_roundtrip() {
         let s = NetworkSettings {
             secret: "c".repeat(32),
             ..NetworkSettings::default()
         };
-        // 默认 auto_redirect / auto_detect_interface 均为 true → 「是」
+        // 默认 None → 「默认」
         let fields = field_values(&s);
         // 索引：16=auto-redirect, 17=auto-detect-interface（全局字段）
         assert_eq!(fields[16].label, "tun.auto-redirect");
-        assert_eq!(fields[16].value, "是");
+        assert_eq!(fields[16].value, "默认");
         assert_eq!(fields[17].label, "tun.auto-detect-interface");
-        assert_eq!(fields[17].value, "是");
-        assert_eq!(fields[16].kind, FieldKind::Dropdown(vec!["是".into(), "否".into()]));
-        assert_eq!(fields[17].kind, FieldKind::Dropdown(vec!["是".into(), "否".into()]));
-        // 显式设为 false / true 后往返
+        assert_eq!(fields[17].value, "默认");
+        assert_eq!(
+            fields[16].kind,
+            FieldKind::Dropdown(vec!["默认".into(), "是".into(), "否".into()])
+        );
+        assert_eq!(
+            fields[17].kind,
+            FieldKind::Dropdown(vec!["默认".into(), "是".into(), "否".into()])
+        );
+        // 默认往返 → None
+        let back_default = apply_values(&fields).expect("应通过校验");
+        assert!(back_default.tun.auto_redirect.is_none());
+        assert!(back_default.tun.auto_detect_interface.is_none());
+        // 显式切「是」/「否」后往返为 Some(true/false)
         let mut fields2 = fields.clone();
         fields2[16].value = "否".into();
         fields2[17].value = "是".into();
         let back = apply_values(&fields2).expect("应通过校验");
-        assert!(!back.tun.auto_redirect);
-        assert!(back.tun.auto_detect_interface);
-        // 往返：field_values 再次生成应同步
+        assert_eq!(back.tun.auto_redirect, Some(false));
+        assert_eq!(back.tun.auto_detect_interface, Some(true));
+        // 往返：field_values 再次生成应同步为「否」/「是」
         let fields3 = field_values(&back);
         assert_eq!(fields3[16].value, "否");
         assert_eq!(fields3[17].value, "是");
-        // 切回「是」亦往返为 true
+        // 切回「默认」往返为 None
         let mut fields4 = fields3.clone();
-        fields4[16].value = "是".into();
+        fields4[16].value = "默认".into();
+        fields4[17].value = "默认".into();
         let back2 = apply_values(&fields4).expect("应通过校验");
-        assert!(back2.tun.auto_redirect);
-        assert_eq!(field_values(&back2)[16].value, "是");
+        assert!(back2.tun.auto_redirect.is_none());
+        assert!(back2.tun.auto_detect_interface.is_none());
+        assert_eq!(field_values(&back2)[16].value, "默认");
+        assert_eq!(field_values(&back2)[17].value, "默认");
+        // 单独切「是」→ Some(true)
+        let mut fields5 = fields.clone();
+        fields5[16].value = "是".into();
+        let back3 = apply_values(&fields5).expect("应通过校验");
+        assert_eq!(back3.tun.auto_redirect, Some(true));
+        assert_eq!(field_values(&back3)[16].value, "是");
+    }
+
+    #[test]
+    fn tun_opt_yn_helpers() {
+        assert_eq!(opt_yn(None), "默认");
+        assert_eq!(opt_yn(Some(true)), "是");
+        assert_eq!(opt_yn(Some(false)), "否");
+        assert_eq!(parse_opt_yn("x", "默认").unwrap(), None);
+        assert_eq!(parse_opt_yn("x", "是").unwrap(), Some(true));
+        assert_eq!(parse_opt_yn("x", "否").unwrap(), Some(false));
+        assert!(parse_opt_yn("x", "其他").is_err());
     }
 
     /// split_csv：分割、trim、去空项。

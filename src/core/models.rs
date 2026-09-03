@@ -91,10 +91,6 @@ impl Default for NetworkSettings {
     }
 }
 
-fn default_true() -> bool {
-    true
-}
-
 /// TUN 段配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunSettings {
@@ -102,12 +98,12 @@ pub struct TunSettings {
     /// "system" | "gvisor" | "mixed"
     pub stack: String,
     pub auto_route: bool,
-    /// 是否自动重定向（依赖 auto-route 与 CAP_NET_ADMIN）
-    #[serde(default = "default_true")]
-    pub auto_redirect: bool,
-    /// 是否自动检测出口接口
-    #[serde(default = "default_true")]
-    pub auto_detect_interface: bool,
+    /// 是否自动重定向（依赖 auto-route 与 CAP_NET_ADMIN）；三态，默认不配置（None→不写键，由 mihomo 自行决定）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_redirect: Option<bool>,
+    /// 是否自动检测出口接口；三态，默认不配置（None→不写键，由 mihomo 自行决定）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_detect_interface: Option<bool>,
     pub dns_hijack: Vec<String>,
     pub mtu: u16,
 }
@@ -118,8 +114,8 @@ impl Default for TunSettings {
             enable: false,
             stack: "mixed".into(),
             auto_route: true,
-            auto_redirect: true,
-            auto_detect_interface: true,
+            auto_redirect: None,
+            auto_detect_interface: None,
             dns_hijack: vec!["any:53".into()],
             mtu: 9000,
         }
@@ -265,43 +261,60 @@ mod tests {
         assert!(!t.enable);
         assert_eq!(t.stack, "mixed");
         assert!(t.auto_route);
-        assert!(t.auto_redirect);
-        assert!(t.auto_detect_interface);
+        assert!(t.auto_redirect.is_none());
+        assert!(t.auto_detect_interface.is_none());
         assert_eq!(t.dns_hijack, vec!["any:53"]);
         assert_eq!(t.mtu, 9000);
     }
 
     #[test]
     fn tun_settings_serde_defaults_for_new_fields() {
-        // 旧 TOML 缺失 auto_redirect / auto_detect_interface 时：两者均回退为 true
+        // 缺字段→None（默认/不配置，三态）
         let toml_str = "enable = false\nstack = \"mixed\"\nauto_route = true\ndns_hijack = [\"any:53\"]\nmtu = 9000\n";
         let t: TunSettings = toml::from_str(toml_str).unwrap();
-        assert!(t.auto_redirect);
-        assert!(t.auto_detect_interface);
-        // true roundtrip
+        assert!(t.auto_redirect.is_none());
+        assert!(t.auto_detect_interface.is_none());
+        // 显式 true→Some(true)，roundtrip 通过
         let t2 = TunSettings {
-            auto_redirect: true,
-            auto_detect_interface: true,
+            auto_redirect: Some(true),
+            auto_detect_interface: Some(true),
             ..TunSettings::default()
         };
         let body = toml::to_string(&t2).unwrap();
         assert!(body.contains("auto_redirect"));
         assert!(body.contains("auto_detect_interface"));
         let back: TunSettings = toml::from_str(&body).unwrap();
-        assert!(back.auto_redirect);
-        assert!(back.auto_detect_interface);
-        // false roundtrip（显式 false 亦需保留）
+        assert_eq!(back.auto_redirect, Some(true));
+        assert_eq!(back.auto_detect_interface, Some(true));
+        // 显式 false→Some(false)，roundtrip 通过
         let t3 = TunSettings {
-            auto_redirect: false,
-            auto_detect_interface: false,
+            auto_redirect: Some(false),
+            auto_detect_interface: Some(false),
             ..TunSettings::default()
         };
         let body3 = toml::to_string(&t3).unwrap();
         assert!(body3.contains("auto_redirect"));
         assert!(body3.contains("auto_detect_interface"));
         let back3: TunSettings = toml::from_str(&body3).unwrap();
-        assert!(!back3.auto_redirect);
-        assert!(!back3.auto_detect_interface);
+        assert_eq!(back3.auto_redirect, Some(false));
+        assert_eq!(back3.auto_detect_interface, Some(false));
+        // 缺字段往返：None 不写键
+        let t_none = TunSettings::default();
+        let body_none = toml::to_string(&t_none).unwrap();
+        assert!(!body_none.contains("auto_redirect"));
+        assert!(!body_none.contains("auto_detect_interface"));
+        let back_none: TunSettings = toml::from_str(&body_none).unwrap();
+        assert!(back_none.auto_redirect.is_none());
+        assert!(back_none.auto_detect_interface.is_none());
+        // 旧 bool 兼容：手写 TOML auto_redirect = true 能解析为 Some(true)（存量用户迁移）
+        let legacy_true: TunSettings =
+            toml::from_str("enable = false\nstack = \"mixed\"\nauto_route = true\nauto_redirect = true\nauto_detect_interface = true\ndns_hijack = [\"any:53\"]\nmtu = 9000\n").unwrap();
+        assert_eq!(legacy_true.auto_redirect, Some(true));
+        assert_eq!(legacy_true.auto_detect_interface, Some(true));
+        let legacy_false: TunSettings =
+            toml::from_str("enable = false\nstack = \"mixed\"\nauto_route = true\nauto_redirect = false\nauto_detect_interface = false\ndns_hijack = [\"any:53\"]\nmtu = 9000\n").unwrap();
+        assert_eq!(legacy_false.auto_redirect, Some(false));
+        assert_eq!(legacy_false.auto_detect_interface, Some(false));
     }
 
     #[test]

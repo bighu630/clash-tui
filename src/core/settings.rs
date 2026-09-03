@@ -395,7 +395,7 @@ nameserver = [\"https://doh.pub/dns-query\"]\ndefault_nameserver = [\"223.5.5.5\
         });
     }
 
-    /// 旧 settings.toml 缺失 auto_redirect / auto_detect_interface → 两者均回退为 true
+    /// 三态：旧 settings.toml 缺失 auto_redirect / auto_detect_interface → None（默认/不配置）
     #[test]
     fn tun_new_fields_legacy_defaults() {
         // 构造缺失两字段的 NetworkSettings TOML（仅 tun 段缺字段）
@@ -405,54 +405,97 @@ mixed_port = 7892\nlog_level = \"info\"\nexternal_controller = \"127.0.0.1:9090\
 [dns]\nenable = true\nlisten = \"0.0.0.0:1053\"\nenhanced_mode = \"fake-ip\"\nfake_ip_range = \"198.18.0.1/16\"\n\
 nameserver = [\"https://doh.pub/dns-query\"]\ndefault_nameserver = [\"223.5.5.5\"]\nfallback = [\"tls://dns.alidns.com\"]\nfake_ip_filter = [\"*.lan\"]\n";
         let s: NetworkSettings = toml::from_str(toml_str).unwrap();
-        assert!(s.tun.auto_redirect, "旧配置 auto_redirect 应默认为 true");
+        assert!(s.tun.auto_redirect.is_none(), "旧配置缺字段应为 None");
         assert!(
-            s.tun.auto_detect_interface,
-            "旧配置 auto_detect_interface 应默认为 true"
+            s.tun.auto_detect_interface.is_none(),
+            "旧配置缺字段应为 None"
         );
         // 直接对 TunSettings 也验证
         let tun_toml = "enable = false\nstack = \"mixed\"\nauto_route = true\ndns_hijack = [\"any:53\"]\nmtu = 9000\n";
         let t: TunSettings = toml::from_str(tun_toml).unwrap();
-        assert!(t.auto_redirect);
-        assert!(t.auto_detect_interface);
+        assert!(t.auto_redirect.is_none());
+        assert!(t.auto_detect_interface.is_none());
+        // 旧 TOML 显式 true/false → Some（存量用户迁移兼容）
+        let tun_true: TunSettings = toml::from_str(
+            "enable = false\nstack = \"mixed\"\nauto_route = true\nauto_redirect = true\nauto_detect_interface = true\ndns_hijack = [\"any:53\"]\nmtu = 9000\n",
+        )
+        .unwrap();
+        assert_eq!(tun_true.auto_redirect, Some(true));
+        assert_eq!(tun_true.auto_detect_interface, Some(true));
+        let tun_false: TunSettings = toml::from_str(
+            "enable = false\nstack = \"mixed\"\nauto_route = true\nauto_redirect = false\nauto_detect_interface = false\ndns_hijack = [\"any:53\"]\nmtu = 9000\n",
+        )
+        .unwrap();
+        assert_eq!(tun_false.auto_redirect, Some(false));
+        assert_eq!(tun_false.auto_detect_interface, Some(false));
+        let s_true: NetworkSettings = toml::from_str(&toml_str.replace(
+            "[tun]\nenable = false",
+            "[tun]\nenable = false\nauto_redirect = true\nauto_detect_interface = true",
+        ))
+        .unwrap();
+        assert_eq!(s_true.tun.auto_redirect, Some(true));
+        assert_eq!(s_true.tun.auto_detect_interface, Some(true));
     }
 
-    /// roundtrip：设为 true → to_string → from_str → 仍为 true；显式 false 亦往返
+    /// roundtrip：None→不含键，Some(true/false)→含键且往返一致
     #[test]
     fn tun_new_fields_roundtrip_true() {
         with_dir(|| {
+            // None 落盘不含键
+            let s_none = NetworkSettings {
+                tun: TunSettings {
+                    auto_redirect: None,
+                    auto_detect_interface: None,
+                    ..TunSettings::default()
+                },
+                ..NetworkSettings::default()
+            };
+            let body_none = toml::to_string(&s_none).unwrap();
+            assert!(!body_none.contains("auto_redirect"));
+            assert!(!body_none.contains("auto_detect_interface"));
+            save_settings(&s_none).unwrap();
+            let back_none = load_settings().unwrap();
+            assert!(back_none.tun.auto_redirect.is_none());
+            assert!(back_none.tun.auto_detect_interface.is_none());
+            // Some(true) 落盘含键且往返一致
             let s = NetworkSettings {
                 tun: TunSettings {
-                    auto_redirect: true,
-                    auto_detect_interface: true,
+                    auto_redirect: Some(true),
+                    auto_detect_interface: Some(true),
                     ..TunSettings::default()
                 },
                 ..NetworkSettings::default()
             };
             save_settings(&s).unwrap();
             let back = load_settings().unwrap();
-            assert!(back.tun.auto_redirect);
-            assert!(back.tun.auto_detect_interface);
+            assert_eq!(back.tun.auto_redirect, Some(true));
+            assert_eq!(back.tun.auto_detect_interface, Some(true));
             // 纯 toml 字符串往返
             let body = toml::to_string(&s).unwrap();
             assert!(body.contains("auto_redirect"));
             assert!(body.contains("auto_detect_interface"));
             let back2: NetworkSettings = toml::from_str(&body).unwrap();
-            assert!(back2.tun.auto_redirect);
-            assert!(back2.tun.auto_detect_interface);
+            assert_eq!(back2.tun.auto_redirect, Some(true));
+            assert_eq!(back2.tun.auto_detect_interface, Some(true));
             // 显式 false 往返
             let s_false = NetworkSettings {
                 tun: TunSettings {
-                    auto_redirect: false,
-                    auto_detect_interface: false,
+                    auto_redirect: Some(false),
+                    auto_detect_interface: Some(false),
                     ..TunSettings::default()
                 },
                 ..NetworkSettings::default()
             };
             let body_f = toml::to_string(&s_false).unwrap();
+            assert!(body_f.contains("auto_redirect"));
+            assert!(body_f.contains("auto_detect_interface"));
             let back_f: NetworkSettings = toml::from_str(&body_f).unwrap();
-            assert!(!back_f.tun.auto_redirect);
-            assert!(!back_f.tun.auto_detect_interface);
+            assert_eq!(back_f.tun.auto_redirect, Some(false));
+            assert_eq!(back_f.tun.auto_detect_interface, Some(false));
+            save_settings(&s_false).unwrap();
+            let back_f2 = load_settings().unwrap();
+            assert_eq!(back_f2.tun.auto_redirect, Some(false));
+            assert_eq!(back_f2.tun.auto_detect_interface, Some(false));
         });
     }
 

@@ -328,6 +328,16 @@ fn parse_conn(c: &serde_json::Value) -> Option<ConnInfo> {
                     .unwrap_or_default()
                     .to_string()
             };
+            // 兼容 fallback：新版 mihomo 同时返回 process 与 processPath，旧版或精简返回仅 process；
+            // 优先 processPath，空时回退到 process，保证进程名不为 "-"。
+            let proc_path = {
+                let p = mget("processPath");
+                if !p.is_empty() {
+                    p
+                } else {
+                    mget("process")
+                }
+            };
             ConnMeta {
                 network: mget("network"),
                 host: mget("host"),
@@ -338,7 +348,7 @@ fn parse_conn(c: &serde_json::Value) -> Option<ConnInfo> {
                 source_ip: mget("sourceIP"),
                 source_port: mget("sourcePort"),
                 r#type: mget("type"),
-                process_path: mget("processPath"),
+                process_path: proc_path,
             }
         })
         .unwrap_or_default();

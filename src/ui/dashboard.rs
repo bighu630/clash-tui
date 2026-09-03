@@ -12,7 +12,7 @@ use crate::app::{AppState, UiCommand};
 use crate::core::client::ConnInfo;
 use crate::core::models::NetworkSettings;
 use crate::core::settings::save_settings;
-use crate::ui::widgets::{truncate_ellipsis, MessagePopup};
+use crate::ui::widgets::MessagePopup;
 use crate::ui::Page;
 
 #[derive(Default)]
@@ -403,14 +403,38 @@ pub(crate) fn lower_widths(total: u16) -> (usize, usize, usize, bool) {
     (proc_w, rule_w, group_w, show_group)
 }
 
+/// 按显示宽度截断字符串，超出时直接截断不加 "…"。
+/// - 若 `max_width==0` 返回 `""`
+/// - 若 `s` 宽度 <= `max_width` 原样返回
+/// - 否则按字符累加宽度，超限则 break，不追加省略号
+pub(crate) fn truncate_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if crate::ui::widgets::display_width(s) <= max_width {
+        return s.to_string();
+    }
+    let mut cur_width = 0usize;
+    let mut out = String::new();
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cur_width + cw > max_width {
+            break;
+        }
+        cur_width += cw;
+        out.push(ch);
+    }
+    out
+}
+
 /// 双行生成：每条连接返回 2 行
 /// - 上行：host_trunc + " " + kind + " ↑upload ↓download"（保持原颜色）
-/// - 下行：缩进1 + 进程 + "  " + 规则(+payload) [+ " → " + 分组]，整行 DarkGray，超长按可用宽度省略
+/// - 下行：缩进1 + 进程 + "  " + 规则(+payload) [+ " → " + 分组]，整行默认色，超长截断不加省略号
 pub(crate) fn conn_lines(c: &ConnInfo, total_width: u16) -> Vec<Line<'static>> {
     // 上行：host + 网络
     let host_w = upper_host_width(total_width);
     let host_raw = conn_host(c);
-    let host_trunc = truncate_ellipsis(&host_raw, host_w);
+    let host_trunc = truncate_width(&host_raw, host_w);
     let kind = if c.meta.network == "tcp" {
         Span::styled("TCP", Style::default().fg(Color::Green))
     } else if c.meta.network == "udp" {
@@ -437,26 +461,20 @@ pub(crate) fn conn_lines(c: &ConnInfo, total_width: u16) -> Vec<Line<'static>> {
     // 下行：缩进 + 进程 + 规则 + 分组
     let (proc_w, rule_w, group_w, show_group) = lower_widths(total_width);
     let proc_raw = process_short(c);
-    let proc_trunc = truncate_ellipsis(&proc_raw, proc_w);
+    let proc_trunc = truncate_width(&proc_raw, proc_w);
     let rule_raw = rule_label(c);
-    let rule_trunc = truncate_ellipsis(&rule_raw, rule_w);
+    let rule_trunc = truncate_width(&rule_raw, rule_w);
     let mut lower_spans: Vec<Span<'static>> = vec![
-        Span::styled(" ".to_string(), Style::default().fg(Color::DarkGray)),
-        Span::styled(proc_trunc, Style::default().fg(Color::DarkGray)),
-        Span::styled("  ".to_string(), Style::default().fg(Color::DarkGray)),
-        Span::styled(rule_trunc, Style::default().fg(Color::DarkGray)),
+        Span::styled(" ".to_string(), Style::default()),
+        Span::styled(proc_trunc, Style::default()),
+        Span::styled("  ".to_string(), Style::default()),
+        Span::styled(rule_trunc, Style::default()),
     ];
     if show_group {
         let group_raw = group_label(c);
-        let group_trunc = truncate_ellipsis(&group_raw, group_w);
-        lower_spans.push(Span::styled(
-            " → ".to_string(),
-            Style::default().fg(Color::DarkGray),
-        ));
-        lower_spans.push(Span::styled(
-            group_trunc,
-            Style::default().fg(Color::DarkGray),
-        ));
+        let group_trunc = truncate_width(&group_raw, group_w);
+        lower_spans.push(Span::styled(" → ".to_string(), Style::default()));
+        lower_spans.push(Span::styled(group_trunc, Style::default()));
     }
     let lower = Line::from(lower_spans);
     vec![upper, lower]
@@ -1296,7 +1314,7 @@ mod tests {
 
     #[test]
     fn conn_lines_ellipsis_on_overflow() {
-        // 长 host、长 process、长 rule+payload、chains 多级
+        // 长 host、长 process、长 rule+payload、chains 多级 — 验证超出时截断不加 "…" 且宽度受限
         let long_host = "a-very-long-host-name-that-exceeds-width.example.com".to_string();
         let long_proc = "/very/long/path/to/super-long-process-name-executable";
         let long_rule = "DOMAIN-SUFFIX";
@@ -1315,24 +1333,65 @@ mod tests {
             download: 2048 * 1024,
             ..ConnInfo::default()
         };
-        // w=70 时上行 host 应截断
+        // w=70 时上行 host 应截断且不含 "…"，宽度受限
         let lines70 = conn_lines(&c, 70);
-        assert!(lines70[0].to_string().contains('…'), "w=70 上行应含 …: {}", lines70[0]);
-        // 下行规则列也应截断
-        assert!(lines70[1].to_string().contains('…'), "w=70 下行应含 …: {}", lines70[1]);
-        // w=85 与 120
+        let upper70 = lines70[0].to_string();
+        let lower70 = lines70[1].to_string();
+        assert!(!upper70.contains('…'), "w=70 上行不应含 …: {}", upper70);
+        assert!(!lower70.contains('…'), "w=70 下行不应含 …: {}", lower70);
+        let host_w = upper_host_width(70);
+        let host_raw = conn_host(&c);
+        let host_trunc = truncate_width(&host_raw, host_w);
+        assert!(!host_trunc.contains('…'));
+        assert!(crate::ui::widgets::display_width(&host_trunc) <= host_w);
+        assert!(crate::ui::widgets::display_width(&host_raw) > host_w);
+        assert!(host_trunc.len() < host_raw.len());
+        let (proc_w, rule_w, group_w, _) = lower_widths(70);
+        let rule_raw = rule_label(&c);
+        let rule_trunc = truncate_width(&rule_raw, rule_w);
+        assert!(!rule_trunc.contains('…'));
+        assert!(crate::ui::widgets::display_width(&rule_trunc) <= rule_w);
+        if crate::ui::widgets::display_width(&rule_raw) > rule_w {
+            assert!(rule_trunc.len() < rule_raw.len());
+        }
+        // 验证下行各列宽度受限
+        let proc_raw = process_short(&c);
+        let proc_trunc = truncate_width(&proc_raw, proc_w);
+        assert!(crate::ui::widgets::display_width(&proc_trunc) <= proc_w);
+        let group_raw = group_label(&c);
+        let group_trunc = truncate_width(&group_raw, group_w);
+        assert!(crate::ui::widgets::display_width(&group_trunc) <= group_w);
+        // w=85 与 120 均不应含 "…"，但有截断且宽度受限
         for w in [85u16, 120] {
             let lines = conn_lines(&c, w);
-            // 上下行至少有一行因超长含 …
-            let has_ellipsis = lines[0].to_string().contains('…') || lines[1].to_string().contains('…');
-            assert!(has_ellipsis, "w={w} 应有省略: upper={} lower={}", lines[0], lines[1]);
+            let combined = format!("{} {}", lines[0], lines[1]);
+            assert!(!combined.contains('…'), "w={w} 不应含 …: upper={} lower={}", lines[0], lines[1]);
+            let host_w = upper_host_width(w);
+            let host_raw = conn_host(&c);
+            if crate::ui::widgets::display_width(&host_raw) > host_w {
+                let t = truncate_width(&host_raw, host_w);
+                assert!(crate::ui::widgets::display_width(&t) <= host_w);
+                assert!(t.len() < host_raw.len());
+            }
+            let (proc_w, rule_w, group_w, _) = lower_widths(w);
+            for (raw, budget) in [
+                (process_short(&c), proc_w),
+                (rule_label(&c), rule_w),
+                (group_label(&c), group_w),
+            ] {
+                let t = truncate_width(&raw, budget);
+                assert!(crate::ui::widgets::display_width(&t) <= budget, "w={w} raw={raw} budget={budget} trunc={t}");
+                assert!(!t.contains('…'));
+            }
         }
-        // 窄宽不 panic
+        // 窄宽不 panic 且均不含 "…"
         for w in [0u16, 1, 5, 20, 60] {
             let lines = conn_lines(&c, w);
             assert_eq!(lines.len(), 2, "w={w} 应返回2行");
             assert!(!lines[0].to_string().is_empty(), "w={w} 上行不应空");
             assert!(!lines[1].to_string().is_empty(), "w={w} 下行不应空");
+            assert!(!lines[0].to_string().contains('…'));
+            assert!(!lines[1].to_string().contains('…'));
         }
     }
 
@@ -1414,13 +1473,15 @@ mod tests {
                 "w={w} 上行不应含进程: {s}"
             );
             assert!(!s.contains("节点A"), "w={w} 上行不应含分组: {s}");
+            assert!(!s.contains('…'), "w={w} 上行不应含 …: {s}");
         }
-        // 但双行的下行应含进程/分组（按宽度）：下行始终含进程与规则，total>=60 时额外含分组（带 →）
+        // 但双行的下行应含进程/分组（按宽度）：下行始终含进程与规则，total>=60 时额外含分组（带 →），且不含 "…"
         let lower120 = conn_lines(&c, 120)[1].to_string();
         assert!(
-            lower120.contains("super-long") || lower120.contains('…'),
+            lower120.contains("super-long"),
             "w=120 下行应含进程: {lower120}"
         );
+        assert!(!lower120.contains('…'), "w=120 下行不应含 …: {lower120}");
         assert!(lower120.contains("DIRECT"), "w=120 下行应含规则 DIRECT: {lower120}");
         assert!(
             lower120.contains("节点A") && lower120.contains('→'),
@@ -1428,21 +1489,25 @@ mod tests {
         );
         let lower70 = conn_lines(&c, 70)[1].to_string();
         assert!(lower70.contains("DIRECT"), "w=70 下行应含规则: {lower70}");
+        assert!(!lower70.contains('…'), "w=70 下行不应含 …: {lower70}");
         assert!(
             lower70.contains('→') && lower70.contains("节点A"),
             "w=70 下行应含分组（带 →）: {lower70}"
         );
         let lower85 = conn_lines(&c, 85)[1].to_string();
+        assert!(!lower85.contains('…'), "w=85 下行不应含 …: {lower85}");
         assert!(
             lower85.contains('→') && lower85.contains("节点A"),
             "w=85 下行应含分组: {lower85}"
         );
         let lower60 = conn_lines(&c, 60)[1].to_string();
+        assert!(!lower60.contains('…'), "w=60 下行不应含 …: {lower60}");
         assert!(
             lower60.contains('→') && lower60.contains("节点A"),
             "w=60 下行应含分组: {lower60}"
         );
         let lower59 = conn_lines(&c, 59)[1].to_string();
+        assert!(!lower59.contains('…'), "w=59 下行不应含 …: {lower59}");
         assert!(
             !lower59.contains('→'),
             "w=59 下行不应含分组（无 →）: {lower59}"
@@ -1451,7 +1516,7 @@ mod tests {
 
     #[test]
     fn conn_line_host_truncation_contains_ellipsis() {
-        // 超长 host 在窄宽下应被省略含 "…"
+        // 超长 host 在窄宽下应被截断且不含 "…"，宽度受限
         let long_host = "a-very-long-host-name-that-exceeds-width.example.com".to_string();
         let c = ConnInfo {
             meta: ConnMeta {
@@ -1463,19 +1528,25 @@ mod tests {
             download: 2048,
             ..ConnInfo::default()
         };
-        // w=70 时 host 宽度约47，long_host 长度53 >47 触发截断
+        let host_w = upper_host_width(70);
+        let host_trunc = truncate_width(&long_host, host_w);
+        assert!(!host_trunc.contains('…'));
+        assert!(crate::ui::widgets::display_width(&host_trunc) <= host_w);
+        assert!(crate::ui::widgets::display_width(&long_host) > host_w);
+        assert!(host_trunc.len() < long_host.len());
         let line = conn_line_with_width(&c, 70);
         let s = line.to_string();
         assert!(
-            s.contains('…'),
-            "超长 host 应被截断含 …: host_len {} s={s}",
+            !s.contains('…'),
+            "超长 host 截断不应含 …: host_len {} s={s}",
             long_host.len()
         );
         assert!(s.contains("TCP"));
-        // 中文 host 截断
+        // 保留中文宽度正确性验证，但不再要求以 "…" 结尾
+        let long_cn = "这是一个非常长的中文主机名测试用例用于验证截断逻辑是否正确处理宽字符.example.com";
         let c2 = ConnInfo {
             meta: ConnMeta {
-                host: "这是一个非常长的中文主机名测试用例用于验证截断逻辑是否正确处理宽字符.example.com".into(),
+                host: long_cn.into(),
                 network: "udp".into(),
                 ..ConnMeta::default()
             },
@@ -1483,10 +1554,14 @@ mod tests {
             download: 0,
             ..ConnInfo::default()
         };
+        let host_trunc2 = truncate_width(long_cn, host_w);
+        assert!(!host_trunc2.contains('…'));
+        assert!(crate::ui::widgets::display_width(&host_trunc2) <= host_w);
         let line2 = conn_line_with_width(&c2, 70);
         let s2 = line2.to_string();
-        assert!(s2.contains('…'), "中文超长 host 应含 …: {s2}");
+        assert!(!s2.contains('…'), "中文超长 host 不应含 …: {s2}");
         assert!(s2.contains("UDP"));
+        assert!(crate::ui::widgets::display_width(&s2) <= 70 || !s2.contains('…'));
     }
 
     #[test]
@@ -1514,7 +1589,7 @@ mod tests {
 
     #[test]
     fn truncate_ellipsis_used_in_conn_line() {
-        // 验证 process_short 的 basename 截断：proc 宽度 16，basename 超长时应以 … 结尾
+        // 验证 process_short 的 basename 截断：proc 宽度 16，basename 超长时应被截断且不含 "…"，宽度受限
         let c = ConnInfo {
             meta: ConnMeta {
                 process_path: "/a/very-long-process-name-that-will-be-truncated".into(),
@@ -1528,21 +1603,65 @@ mod tests {
         // 双行下：proc_w 来自 lower_widths(120) =16
         let (proc_w, _, _, _) = lower_widths(120);
         let proc_raw = process_short(&c);
-        let proc_trunc = truncate_ellipsis(&proc_raw, proc_w);
-        assert!(proc_trunc.len() <= proc_raw.len() || proc_trunc.contains('…'));
+        let proc_trunc = truncate_width(&proc_raw, proc_w);
+        assert!(!proc_trunc.contains('…'));
+        assert!(crate::ui::widgets::display_width(&proc_trunc) <= proc_w);
         if crate::ui::widgets::display_width(&proc_raw) > proc_w {
-            assert!(proc_trunc.ends_with('…'), "超长进程应以 … 结尾: {proc_trunc}");
+            assert!(proc_trunc.len() < proc_raw.len());
+            assert!(!proc_trunc.ends_with('…'), "超长进程不应以 … 结尾: {proc_trunc}");
         }
-        // 双行验证：下行含进程截断
+        // 双行验证：下行含进程截断但不含 "…"
         let lower = conn_lines(&c, 120)[1].to_string();
+        assert!(!lower.contains('…'), "下行不应含 …: {lower}");
         if crate::ui::widgets::display_width(&proc_raw) > proc_w {
-            assert!(lower.contains('…'), "下行应含 …: {lower}");
+            assert!(lower.contains(&proc_trunc), "下行应含截断后进程: {lower} vs {proc_trunc}");
         }
         // 旧 col_widths 场景也验证（保留兼容）
         let cw = col_widths(120);
-        let proc_trunc2 = truncate_ellipsis(&proc_raw, cw.proc);
-        if crate::ui::widgets::display_width(&proc_raw) > cw.proc {
-            assert!(proc_trunc2.ends_with('…'));
+        let proc_trunc2 = truncate_width(&proc_raw, cw.proc);
+        assert!(!proc_trunc2.contains('…'));
+        assert!(crate::ui::widgets::display_width(&proc_trunc2) <= cw.proc);
+    }
+
+    #[test]
+    fn truncate_width_basic_and_unicode() {
+        // 边界 0/1
+        assert_eq!(truncate_width("", 0), "");
+        assert_eq!(truncate_width("hello", 0), "");
+        assert_eq!(truncate_width("a", 1), "a");
+        assert_eq!(truncate_width("ab", 1), "a");
+        assert_eq!(truncate_width("hello", 5), "hello");
+        assert_eq!(truncate_width("hello world", 5), "hello");
+        assert_eq!(truncate_width("hello", 10), "hello");
+        // 中文
+        assert_eq!(crate::ui::widgets::display_width("中文"), 4);
+        assert_eq!(truncate_width("中文", 4), "中文");
+        assert_eq!(truncate_width("中文", 3), "中");
+        assert_eq!(truncate_width("中文", 2), "中");
+        assert_eq!(truncate_width("中文", 1), "");
+        assert_eq!(truncate_width("中文测试", 5), "中文");
+        assert_eq!(truncate_width("a中b", 4), "a中b");
+        assert_eq!(truncate_width("a中b", 3), "a中");
+        // emoji
+        assert_eq!(crate::ui::widgets::display_width("😀"), 2);
+        assert_eq!(truncate_width("😀", 2), "😀");
+        assert_eq!(truncate_width("😀", 1), "");
+        assert_eq!(truncate_width("😀😀", 3), "😀");
+        assert_eq!(truncate_width("a😀b", 3), "a😀");
+        // 宽度永远不超过 max 且不含省略号
+        for s in ["hello world", "中文测试", "a中😀b", "😀😀😀"] {
+            for max in 0..10 {
+                let out = truncate_width(s, max);
+                assert!(
+                    crate::ui::widgets::display_width(&out) <= max,
+                    "truncate_width({:?}, {}) => {:?} width {}",
+                    s,
+                    max,
+                    out,
+                    crate::ui::widgets::display_width(&out)
+                );
+                assert!(!out.contains('…'), "unexpected … in {:?}", out);
+            }
         }
     }
 

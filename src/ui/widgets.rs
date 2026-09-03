@@ -879,6 +879,31 @@ pub fn truncate_ellipsis(s: &str, max_width: usize) -> String {
     out
 }
 
+/// 按显示宽度截断字符串，超出时直接截断不加 "…"。
+/// - 若 `max_width==0` 返回 `""`
+/// - 若 `s` 宽度 <= `max_width` 原样返回
+/// - 否则按字符累加宽度，超限则 break，不追加省略号
+pub fn truncate_width(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let width = UnicodeWidthStr::width(s);
+    if width <= max_width {
+        return s.to_string();
+    }
+    let mut cur_width = 0usize;
+    let mut out = String::new();
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cur_width + cw > max_width {
+            break;
+        }
+        cur_width += cw;
+        out.push(ch);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1255,6 +1280,39 @@ mod tests {
                     // 截断时应以 … 结尾
                     assert!(out.ends_with('…'), "expected ellipsis for {:?} max {}", s, max);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn truncate_width_basic() {
+        assert_eq!(truncate_width("", 0), "");
+        assert_eq!(truncate_width("hello", 0), "");
+        assert_eq!(truncate_width("a", 1), "a");
+        assert_eq!(truncate_width("ab", 1), "a");
+        assert_eq!(truncate_width("hello", 5), "hello");
+        assert_eq!(truncate_width("hello world", 5), "hello");
+        assert_eq!(truncate_width("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_width_unicode() {
+        assert_eq!(display_width("中文"), 4);
+        assert_eq!(truncate_width("中文", 4), "中文");
+        assert_eq!(truncate_width("中文", 3), "中");
+        assert_eq!(truncate_width("中文", 2), "中");
+        assert_eq!(truncate_width("中文", 1), "");
+        assert_eq!(truncate_width("😀", 2), "😀");
+        assert_eq!(truncate_width("😀", 1), "");
+        assert_eq!(truncate_width("😀😀", 3), "😀");
+        assert_eq!(truncate_width("a中😀b", 3), "a中");
+        assert_eq!(truncate_width("a中😀b", 2), "a");
+        // 宽度永不超过 max 且不含省略号
+        for s in ["hello world", "中文测试", "a中😀b", "😀😀😀"] {
+            for max in 0..10 {
+                let out = truncate_width(s, max);
+                assert!(display_width(&out) <= max);
+                assert!(!out.contains('…'));
             }
         }
     }

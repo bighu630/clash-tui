@@ -368,6 +368,7 @@ pub(crate) fn col_widths(total: u16) -> ColWidths {
 }
 
 /// 上行 host 可用宽度：total - NETWORK_WIDTH - 1（host 与网络间空格），至少 1 列。
+#[allow(dead_code)]
 pub(crate) fn upper_host_width(total: u16) -> usize {
     (total as usize)
         .saturating_sub(NETWORK_WIDTH)
@@ -431,8 +432,19 @@ pub(crate) fn truncate_width(s: &str, max_width: usize) -> String {
 /// - 上行：host_trunc + " " + kind + " ↑upload ↓download"（保持原颜色）
 /// - 下行：缩进1 + 进程 + "  " + 规则(+payload) [+ " → " + 分组]，整行默认色，超长截断不加省略号
 pub(crate) fn conn_lines(c: &ConnInfo, total_width: u16) -> Vec<Line<'static>> {
-    // 上行：host + 网络
-    let host_w = upper_host_width(total_width);
+    // 上行：host + 网络 - 动态按实际网络列宽度计算，避免固定 22 导致 host 被过度截断
+    let kind_str = if c.meta.network == "tcp" {
+        "TCP"
+    } else if c.meta.network == "udp" {
+        "UDP"
+    } else {
+        "?"
+    };
+    let upload_str = crate::ui::widgets::format_bytes(c.upload);
+    let download_str = crate::ui::widgets::format_bytes(c.download);
+    let network_display = format!(" {} ↑{} ↓{}", kind_str, upload_str, download_str);
+    let network_w = crate::ui::widgets::display_width(&network_display);
+    let host_w = (total_width as usize).saturating_sub(network_w).max(1);
     let host_raw = conn_host(c);
     let host_trunc = truncate_width(&host_raw, host_w);
     let kind = if c.meta.network == "tcp" {
@@ -458,10 +470,34 @@ pub(crate) fn conn_lines(c: &ConnInfo, total_width: u16) -> Vec<Line<'static>> {
         ),
     ]);
 
-    // 下行：缩进 + 进程 + 规则 + 分组
-    let (proc_w, rule_w, group_w, show_group) = lower_widths(total_width);
+    // 下行：缩进 + 进程 + 规则 + 分组 - 动态按需分配，避免固定预算浪费导致 rule/group 被过度截断
+    let (proc_budget, _, group_budget, show_group) = lower_widths(total_width);
     let proc_raw = process_short(c);
-    let proc_trunc = truncate_width(&proc_raw, proc_w);
+    let group_raw = if show_group {
+        group_label(c)
+    } else {
+        String::new()
+    };
+    let proc_need = crate::ui::widgets::display_width(&proc_raw);
+    let group_need = if show_group {
+        crate::ui::widgets::display_width(&group_raw)
+    } else {
+        0
+    };
+    // 按需分配：不超过预算，且至少 1 列（proc）/ 0 列（group 当不显示）
+    let proc_alloc = proc_need.min(proc_budget).max(1);
+    let group_alloc = if show_group {
+        group_need.min(group_budget)
+    } else {
+        0
+    };
+    let lower_effective = (total_width as usize).saturating_sub(1);
+    let sep_proc_rule = 2;
+    let sep_rule_group = if show_group { 3 } else { 0 };
+    let rule_w = lower_effective
+        .saturating_sub(proc_alloc + sep_proc_rule + sep_rule_group + group_alloc)
+        .max(4);
+    let proc_trunc = truncate_width(&proc_raw, proc_alloc);
     let rule_raw = rule_label(c);
     let rule_trunc = truncate_width(&rule_raw, rule_w);
     let mut lower_spans: Vec<Span<'static>> = vec![
@@ -471,8 +507,7 @@ pub(crate) fn conn_lines(c: &ConnInfo, total_width: u16) -> Vec<Line<'static>> {
         Span::styled(rule_trunc, Style::default()),
     ];
     if show_group {
-        let group_raw = group_label(c);
-        let group_trunc = truncate_width(&group_raw, group_w);
+        let group_trunc = truncate_width(&group_raw, group_alloc);
         lower_spans.push(Span::styled(" → ".to_string(), Style::default()));
         lower_spans.push(Span::styled(group_trunc, Style::default()));
     }

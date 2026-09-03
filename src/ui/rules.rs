@@ -43,15 +43,35 @@ fn is_cidr_type(rule_type: &str) -> bool {
 fn is_valid_cidr(rule_type: &str, payload: &str) -> bool {
     let payload = payload.trim();
     let mut parts = payload.split('/');
-    let ip_str = match parts.next() { Some(s) => s.trim(), None => return false };
-    let prefix_str = match parts.next() { Some(s) => s.trim(), None => return false };
-    if parts.next().is_some() { return false; }
-    let ip: std::net::IpAddr = match ip_str.parse() { Ok(v) => v, Err(_) => return false };
-    let prefix: u8 = match prefix_str.parse() { Ok(v) => v, Err(_) => return false };
+    let ip_str = match parts.next() {
+        Some(s) => s.trim(),
+        None => return false,
+    };
+    let prefix_str = match parts.next() {
+        Some(s) => s.trim(),
+        None => return false,
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    let ip: std::net::IpAddr = match ip_str.parse() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let prefix: u8 = match prefix_str.parse() {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
     match rule_type.trim() {
         "IP-CIDR" => ip.is_ipv4() && prefix <= 32,
         "IP-CIDR6" => ip.is_ipv6() && prefix <= 128,
-        "SRC-IP-CIDR" => if ip.is_ipv4() { prefix <= 32 } else { prefix <= 128 },
+        "SRC-IP-CIDR" => {
+            if ip.is_ipv4() {
+                prefix <= 32
+            } else {
+                prefix <= 128
+            }
+        }
         _ => false,
     }
 }
@@ -72,10 +92,16 @@ pub fn rule_to_string(r: &UserRule) -> String {
 /// 解析失败（空段/字段缺失）返回 None。
 pub fn parse_rule(s: &str) -> Option<UserRule> {
     let s = s.trim();
-    if s.is_empty() { return None; }
+    if s.is_empty() {
+        return None;
+    }
     // 兼容 ",no-resolve" 前后空格、大小写：按逗号切分判断最后一段是否为 no-resolve
     let parts_tmp: Vec<&str> = s.split(',').collect();
-    let raw = if parts_tmp.last().map(|last| last.trim().eq_ignore_ascii_case("no-resolve")).unwrap_or(false) {
+    let raw = if parts_tmp
+        .last()
+        .map(|last| last.trim().eq_ignore_ascii_case("no-resolve"))
+        .unwrap_or(false)
+    {
         if let Some(idx) = s.rfind(',') {
             s[..idx].trim_end()
         } else {
@@ -86,16 +112,30 @@ pub fn parse_rule(s: &str) -> Option<UserRule> {
     };
     let mut parts = raw.splitn(3, ',');
     let rule_type = parts.next()?.trim();
-    if rule_type.is_empty() { return None; }
+    if rule_type.is_empty() {
+        return None;
+    }
     if rule_type == "MATCH" {
         let target = parts.next()?.trim();
-        if target.is_empty() { return None; }
-        Some(UserRule { rule_type: rule_type.to_string(), payload: String::new(), target: target.to_string() })
+        if target.is_empty() {
+            return None;
+        }
+        Some(UserRule {
+            rule_type: rule_type.to_string(),
+            payload: String::new(),
+            target: target.to_string(),
+        })
     } else {
         let payload = parts.next()?.trim();
         let target = parts.next()?.trim();
-        if payload.is_empty() || target.is_empty() { return None; }
-        Some(UserRule { rule_type: rule_type.to_string(), payload: payload.to_string(), target: target.to_string() })
+        if payload.is_empty() || target.is_empty() {
+            return None;
+        }
+        Some(UserRule {
+            rule_type: rule_type.to_string(),
+            payload: payload.to_string(),
+            target: target.to_string(),
+        })
     }
 }
 
@@ -575,22 +615,47 @@ mod rules_tests {
     use crate::core::models::UserRule;
     #[test]
     fn rule_to_string_ip_cidr_appends_no_resolve() {
-        let r = UserRule { rule_type: "IP-CIDR".into(), payload: "192.168.0.0/16".into(), target: "DIRECT".into() };
-        assert_eq!(rule_to_string(&r), "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve");
+        let r = UserRule {
+            rule_type: "IP-CIDR".into(),
+            payload: "192.168.0.0/16".into(),
+            target: "DIRECT".into(),
+        };
+        assert_eq!(
+            rule_to_string(&r),
+            "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"
+        );
     }
     #[test]
     fn rule_to_string_ip_cidr6_appends_no_resolve() {
-        let r = UserRule { rule_type: "IP-CIDR6".into(), payload: "2001:db8::/32".into(), target: "DIRECT".into() };
-        assert_eq!(rule_to_string(&r), "IP-CIDR6,2001:db8::/32,DIRECT,no-resolve");
+        let r = UserRule {
+            rule_type: "IP-CIDR6".into(),
+            payload: "2001:db8::/32".into(),
+            target: "DIRECT".into(),
+        };
+        assert_eq!(
+            rule_to_string(&r),
+            "IP-CIDR6,2001:db8::/32,DIRECT,no-resolve"
+        );
     }
     #[test]
     fn rule_to_string_src_ip_cidr_appends_no_resolve() {
-        let r = UserRule { rule_type: "SRC-IP-CIDR".into(), payload: "10.0.0.0/8".into(), target: "DIRECT".into() };
-        assert_eq!(rule_to_string(&r), "SRC-IP-CIDR,10.0.0.0/8,DIRECT,no-resolve");
+        let r = UserRule {
+            rule_type: "SRC-IP-CIDR".into(),
+            payload: "10.0.0.0/8".into(),
+            target: "DIRECT".into(),
+        };
+        assert_eq!(
+            rule_to_string(&r),
+            "SRC-IP-CIDR,10.0.0.0/8,DIRECT,no-resolve"
+        );
     }
     #[test]
     fn rule_to_string_geosite_no_no_resolve() {
-        let r = UserRule { rule_type: "GEOSITE".into(), payload: "google".into(), target: "DIRECT".into() };
+        let r = UserRule {
+            rule_type: "GEOSITE".into(),
+            payload: "google".into(),
+            target: "DIRECT".into(),
+        };
         assert_eq!(rule_to_string(&r), "GEOSITE,google,DIRECT");
     }
     #[test]
@@ -655,11 +720,26 @@ mod rules_tests {
     }
     #[test]
     fn rule_to_string_trims_whitespace() {
-        let r = UserRule { rule_type: " IP-CIDR ".into(), payload: " 192.168.0.0/16 ".into(), target: " DIRECT ".into() };
-        assert_eq!(rule_to_string(&r), "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve");
-        let r2 = UserRule { rule_type: " MATCH ".into(), payload: "".into(), target: " DIRECT ".into() };
+        let r = UserRule {
+            rule_type: " IP-CIDR ".into(),
+            payload: " 192.168.0.0/16 ".into(),
+            target: " DIRECT ".into(),
+        };
+        assert_eq!(
+            rule_to_string(&r),
+            "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"
+        );
+        let r2 = UserRule {
+            rule_type: " MATCH ".into(),
+            payload: "".into(),
+            target: " DIRECT ".into(),
+        };
         assert_eq!(rule_to_string(&r2), "MATCH,DIRECT");
-        let r3 = UserRule { rule_type: " GEOSITE ".into(), payload: " google ".into(), target: " DIRECT ".into() };
+        let r3 = UserRule {
+            rule_type: " GEOSITE ".into(),
+            payload: " google ".into(),
+            target: " DIRECT ".into(),
+        };
         assert_eq!(rule_to_string(&r3), "GEOSITE,google,DIRECT");
     }
 }

@@ -470,7 +470,7 @@ pub(crate) fn conn_lines(c: &ConnInfo, total_width: u16) -> Vec<Line<'static>> {
         ),
     ]);
 
-    // 下行：缩进 + 进程 + 规则 + 分组 - 动态按需分配，避免固定预算浪费导致 rule/group 被过度截断
+    // 下行：缩进 + 进程 + 规则 + 分组 - 按需分配，优先保证全部 fits，再按预算截断并把 rule 空余还给 group
     let (proc_budget, _, group_budget, show_group) = lower_widths(total_width);
     let proc_raw = process_short(c);
     let group_raw = if show_group {
@@ -478,27 +478,39 @@ pub(crate) fn conn_lines(c: &ConnInfo, total_width: u16) -> Vec<Line<'static>> {
     } else {
         String::new()
     };
+    let rule_raw = rule_label(c);
     let proc_need = crate::ui::widgets::display_width(&proc_raw);
     let group_need = if show_group {
         crate::ui::widgets::display_width(&group_raw)
     } else {
         0
     };
-    // 按需分配：不超过预算，且至少 1 列（proc）/ 0 列（group 当不显示）
+    let rule_need = crate::ui::widgets::display_width(&rule_raw);
     let proc_alloc = proc_need.min(proc_budget).max(1);
-    let group_alloc = if show_group {
-        group_need.min(group_budget)
-    } else {
-        0
-    };
     let lower_effective = (total_width as usize).saturating_sub(1);
-    let sep_proc_rule = 2;
-    let sep_rule_group = if show_group { 3 } else { 0 };
-    let rule_w = lower_effective
-        .saturating_sub(proc_alloc + sep_proc_rule + sep_rule_group + group_alloc)
-        .max(4);
+    let remaining_after_proc = lower_effective.saturating_sub(proc_alloc + 2);
+    let (group_alloc, rule_w) = if show_group {
+        let total_need = rule_need + 3 + group_need;
+        if total_need <= remaining_after_proc {
+            (group_need, rule_need)
+        } else {
+            let mut g_alloc = group_need.min(group_budget);
+            let mut r_w = remaining_after_proc.saturating_sub(g_alloc + 3).max(4);
+            if r_w + 3 + g_alloc > remaining_after_proc {
+                g_alloc = remaining_after_proc.saturating_sub(r_w + 3);
+            }
+            if rule_need < r_w && group_need > g_alloc {
+                let spare = r_w - rule_need;
+                let can_give = (group_need - g_alloc).min(spare);
+                g_alloc += can_give;
+                r_w = rule_need;
+            }
+            (g_alloc, r_w)
+        }
+    } else {
+        (0, remaining_after_proc.max(4))
+    };
     let proc_trunc = truncate_width(&proc_raw, proc_alloc);
-    let rule_raw = rule_label(c);
     let rule_trunc = truncate_width(&rule_raw, rule_w);
     let mut lower_spans: Vec<Span<'static>> = vec![
         Span::styled(" ".to_string(), Style::default()),

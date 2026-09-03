@@ -7,6 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// 表单弹窗的关闭方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -839,6 +840,45 @@ pub fn format_rate(n: u64) -> String {
     format!("{}/s", format_bytes(n))
 }
 
+/// 计算字符串的显示宽度（按 unicode-width 规则，中文/emoji 占 2 列等）。
+pub fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// 按显示宽度截断字符串，超出时以 "…"（占 1 列）结尾。
+/// - "…" 占 1 列；若 `s` 宽度 <= `max_width` 原样返回
+/// - 若 `max_width == 0` 返回 `""`
+/// - 若 `max_width == 1` 且 `s` 非空且宽度 > 1 返回 `"…"`
+/// - 否则截断到 `max_width - 1` 宽度后追加 `"…"`
+///
+/// 正确处理多字节、宽字符（中文 2 列、emoji 等）。
+pub fn truncate_ellipsis(s: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let width = UnicodeWidthStr::width(s);
+    if width <= max_width {
+        return s.to_string();
+    }
+    if max_width == 1 {
+        // width > 1 且 s 非空（若 s 为空则 width==0 已在前面返回）
+        return "…".to_string();
+    }
+    let target = max_width - 1;
+    let mut cur_width = 0usize;
+    let mut out = String::new();
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if cur_width + cw > target {
+            break;
+        }
+        cur_width += cw;
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1084,6 +1124,138 @@ mod tests {
             let mut terminal = ratatui::Terminal::new(backend).unwrap();
             let mut list = SelectList::new(vec!["a".into(), "b".into(), "c".into()]);
             terminal.draw(|f| list.render(f, f.area())).unwrap();
+        }
+    }
+
+    #[test]
+    fn truncate_ellipsis_ascii() {
+        // 无需截断
+        assert_eq!(truncate_ellipsis("hello", 10), "hello");
+        // 恰好等于宽度
+        assert_eq!(truncate_ellipsis("hello", 5), "hello");
+        // 超长截断
+        assert_eq!(truncate_ellipsis("hello world", 5), "hell…");
+        assert_eq!(truncate_ellipsis("hello world", 8), "hello w…");
+        assert_eq!(truncate_ellipsis("abcdef", 5), "abcd…");
+        // 刚好超 1
+        assert_eq!(truncate_ellipsis("abcdef", 6), "abcdef");
+        assert_eq!(truncate_ellipsis("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn truncate_ellipsis_boundary_zero_one() {
+        // max_width == 0 恒返回空
+        assert_eq!(truncate_ellipsis("hello", 0), "");
+        assert_eq!(truncate_ellipsis("", 0), "");
+        assert_eq!(truncate_ellipsis("中文", 0), "");
+        assert_eq!(truncate_ellipsis("😀", 0), "");
+        // max_width == 1 且原串宽度<=1 原样返回
+        assert_eq!(truncate_ellipsis("a", 1), "a");
+        assert_eq!(truncate_ellipsis("", 1), "");
+        assert_eq!(truncate_ellipsis("é", 1), "é");
+        // max_width == 1 且宽度>1 返回 "…"
+        assert_eq!(truncate_ellipsis("ab", 1), "…");
+        assert_eq!(truncate_ellipsis("hello", 1), "…");
+        assert_eq!(truncate_ellipsis("中", 1), "…");
+        assert_eq!(truncate_ellipsis("😀", 1), "…");
+        assert_eq!(truncate_ellipsis("中文", 1), "…");
+    }
+
+    #[test]
+    fn truncate_ellipsis_chinese() {
+        // 中文每个 2 列
+        assert_eq!(display_width("中文"), 4);
+        assert_eq!(truncate_ellipsis("中文", 4), "中文");
+        assert_eq!(truncate_ellipsis("中文", 5), "中文");
+        assert_eq!(truncate_ellipsis("中文", 3), "中…");
+        assert_eq!(truncate_ellipsis("中文", 2), "…");
+        assert_eq!(truncate_ellipsis("中文测试", 8), "中文测试");
+        assert_eq!(truncate_ellipsis("中文测试", 5), "中文…");
+        assert_eq!(truncate_ellipsis("中文测试", 6), "中文…");
+        assert_eq!(truncate_ellipsis("中文测试", 7), "中文测…");
+        // 混合 ascii + 中文
+        assert_eq!(truncate_ellipsis("a中b", 4), "a中b");
+        assert_eq!(truncate_ellipsis("a中b", 3), "a…");
+        assert_eq!(truncate_ellipsis("ab中", 4), "ab中");
+        assert_eq!(truncate_ellipsis("ab中", 3), "ab…");
+        // max_width 2 且首字符为宽字符时无法容纳
+        assert_eq!(truncate_ellipsis("中a", 2), "…");
+    }
+
+    #[test]
+    fn truncate_ellipsis_emoji_mixed() {
+        // emoji 占 2 列
+        assert_eq!(display_width("😀"), 2);
+        assert_eq!(truncate_ellipsis("😀", 2), "😀");
+        assert_eq!(truncate_ellipsis("😀😀", 3), "😀…");
+        assert_eq!(truncate_ellipsis("😀😀", 4), "😀😀");
+        // 混合 ascii + emoji
+        assert_eq!(truncate_ellipsis("a😀b", 4), "a😀b");
+        assert_eq!(truncate_ellipsis("a😀b", 3), "a…");
+        // 中文 + emoji + ascii 混合
+        assert_eq!(display_width("a中😀b"), 6);
+        assert_eq!(truncate_ellipsis("a中😀b", 6), "a中😀b");
+        assert_eq!(truncate_ellipsis("a中😀b", 5), "a中…");
+        assert_eq!(truncate_ellipsis("a中😀b", 4), "a中…");
+        assert_eq!(truncate_ellipsis("a中😀b", 3), "a…");
+        // 含 emoji 的长串
+        assert_eq!(truncate_ellipsis("hello😀world", 8), "hello😀…");
+        // 👍 也是 2 列
+        assert_eq!(display_width("👍"), 2);
+        assert_eq!(truncate_ellipsis("a👍b", 3), "a…");
+    }
+
+    #[test]
+    fn truncate_ellipsis_empty() {
+        assert_eq!(truncate_ellipsis("", 0), "");
+        assert_eq!(truncate_ellipsis("", 1), "");
+        assert_eq!(truncate_ellipsis("", 5), "");
+        assert_eq!(truncate_ellipsis("", 10), "");
+        assert_eq!(display_width(""), 0);
+    }
+
+    #[test]
+    fn display_width_basic() {
+        assert_eq!(display_width("hello"), 5);
+        assert_eq!(display_width("中文"), 4);
+        assert_eq!(display_width("a中b"), 4);
+        assert_eq!(display_width("😀"), 2);
+        assert_eq!(display_width("a😀b"), 4);
+        assert_eq!(display_width("…"), 1);
+        assert_eq!(display_width(""), 0);
+    }
+
+    #[test]
+    fn truncate_ellipsis_width_never_exceeds_max() {
+        let cases = vec![
+            "hello world",
+            "中文测试",
+            "a中😀b",
+            "😀😀😀",
+            "ab中",
+            "a👍b中😀",
+        ];
+        for s in cases {
+            for max in 0..10 {
+                let out = truncate_ellipsis(s, max);
+                let w = display_width(&out);
+                assert!(
+                    w <= max,
+                    "truncate_ellipsis({:?}, {}) => {:?} width {} > max {}",
+                    s,
+                    max,
+                    out,
+                    w,
+                    max
+                );
+                // 若原串宽度 <= max，应原样返回
+                if display_width(s) <= max {
+                    assert_eq!(out, s);
+                } else if max > 0 {
+                    // 截断时应以 … 结尾
+                    assert!(out.ends_with('…'), "expected ellipsis for {:?} max {}", s, max);
+                }
+            }
         }
     }
 }

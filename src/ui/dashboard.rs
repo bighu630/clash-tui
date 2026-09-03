@@ -380,7 +380,7 @@ pub(crate) fn upper_host_width(total: u16) -> usize {
 /// 预算规则：
 /// - lower_effective = total.saturating_sub(1) // 去掉首字符缩进
 /// - proc_w = (total*15/100).clamp(8,16)  // 复用原比例 8..16，始终显示进程
-/// - show_group = total >= CONNECTIONS_MIN_WIDTH (60)  // 与外层可见阈一致，左 pane 68 列时仍显示分组
+/// - show_group = total >= 30  // 分组可见阈 30，与外层 body 可见阈 CONNECTIONS_MIN_WIDTH(60) 解耦：body 60 时左 pane 36 仍可见分组；<30 时隐藏以保 rule 可读
 /// - group_w = if show_group { (total*15/100).clamp(8,16) } else {0}
 /// - sep_proc_rule = 2 ("  "), sep_rule_group = if show_group {3} else {0} (" → ")
 /// - rule_w = lower_effective.saturating_sub(proc_w + sep_proc_rule + sep_rule_group + group_w).max(4)
@@ -390,7 +390,7 @@ pub(crate) fn lower_widths(total: u16) -> (usize, usize, usize, bool) {
     let total_usize = total as usize;
     let lower_effective = (total as usize).saturating_sub(1);
     let proc_w = (total_usize * 15 / 100).clamp(8, 16);
-    let show_group = total >= CONNECTIONS_MIN_WIDTH;
+    let show_group = total >= 30;
     let group_w = if show_group {
         (total_usize * 15 / 100).clamp(8, 16)
     } else {
@@ -1253,13 +1253,13 @@ mod tests {
 
     #[test]
     fn lower_widths_tests() {
-        // total=70 >=60: show_group true（阈值已从 80 降至 60，保证左 pane 68 列时仍显示分组）
+        // total=70 >=30: show_group true（阈值已从 60 降至 30，保证窄左 pane 36 列仍显示分组；<30 隐藏以保 rule 可读）
         let (proc_w, rule_w, group_w, show_group) = lower_widths(70);
         assert_eq!(proc_w, (70usize * 15 / 100).clamp(8, 16));
         assert!(show_group);
         assert_eq!(group_w, (70usize * 15 / 100).clamp(8, 16));
         assert!(rule_w >= 4);
-        // total=85 >=60: show_group true
+        // total=85 >=30: show_group true
         let (proc_w, rule_w, group_w, show_group) = lower_widths(85);
         assert_eq!(proc_w, (85usize * 15 / 100).clamp(8, 16));
         assert!(show_group);
@@ -1277,21 +1277,27 @@ mod tests {
             .max(4);
         assert_eq!(rule_w, expected_rule);
         // 窄宽不 panic，且 proc 仍 8..16，rule 至少4
-        for w in [0u16, 1, 5, 20, 59] {
+        for w in [0u16, 1, 5, 20, 29] {
             let (pw, rw, gw, sg) = lower_widths(w);
             assert!((8..=16).contains(&pw), "w={w} proc 8..16");
             assert!(rw >= 4, "w={w} rule >=4");
-            if w < CONNECTIONS_MIN_WIDTH {
+            if w < 30 {
                 assert!(!sg, "w={w} show_group false");
                 assert_eq!(gw, 0, "w={w} group 0");
             }
         }
-        // 60 及以上应显示分组
-        assert!(lower_widths(60).3);
+        // 30 及以上应显示分组（30/40/50/60/70 均 true）
+        for w in [30u16, 40, 50, 60, 70] {
+            assert!(lower_widths(w).3, "w={w} show_group true");
+        }
         assert!(lower_widths(61).3);
-        // 阈值边界 59/60
-        assert!(!lower_widths(59).3);
-        assert!(lower_widths(60).3);
+        // 阈值边界 29/30
+        assert!(!lower_widths(29).3);
+        assert!(lower_widths(30).3);
+        // 0/20/29 false 显式验证
+        for w in [0u16, 20, 29] {
+            assert!(!lower_widths(w).3, "w={w} show_group false");
+        }
     }
 
     #[test]
@@ -1322,7 +1328,7 @@ mod tests {
                 "total={total} 下行应含规则: {lower}"
             );
         }
-        // total>=60 时含分组（阈值已降至 60，保证 120 终端下左 pane 68 列仍显示）
+        // total>=30 时含分组（阈值已从 60 降至 30，保证窄左 pane 36 列仍显示；<30 隐藏以保 rule 可读）
         let c2 = conn_with_rule(
             "example.com",
             "/usr/bin/curl",
@@ -1330,6 +1336,16 @@ mod tests {
             "tcp",
             "DOMAIN",
             "payload",
+        );
+        let lower30 = conn_lines(&c2, 30)[1].to_string();
+        assert!(
+            lower30.contains("节点A") && lower30.contains('→'),
+            "w=30 下行应含分组: {lower30}"
+        );
+        let lower35 = conn_lines(&c2, 35)[1].to_string();
+        assert!(
+            lower35.contains("节点A") && lower35.contains('→'),
+            "w=35 下行应含分组: {lower35}"
         );
         let lower60 = conn_lines(&c2, 60)[1].to_string();
         assert!(
@@ -1351,11 +1367,11 @@ mod tests {
             lower120.contains("节点A"),
             "w=120 下行应含分组: {lower120}"
         );
-        // 59 以下不含分组（极窄防御）
-        let lower59 = conn_lines(&c2, 59)[1].to_string();
+        // 29 以下不含分组（极窄防御，阈值 30）
+        let lower29 = conn_lines(&c2, 29)[1].to_string();
         assert!(
-            !lower59.contains("节点A") && !lower59.contains('→'),
-            "w=59 下行不应含分组: {lower59}"
+            !lower29.contains("节点A") && !lower29.contains('→'),
+            "w=29 下行不应含分组: {lower29}"
         );
     }
 
@@ -1522,7 +1538,7 @@ mod tests {
             assert!(!s.contains("节点A"), "w={w} 上行不应含分组: {s}");
             assert!(!s.contains('…'), "w={w} 上行不应含 …: {s}");
         }
-        // 但双行的下行应含进程/分组（按宽度）：下行始终含进程与规则，total>=60 时额外含分组（带 →），且不含 "…"
+        // 但双行的下行应含进程/分组（按宽度）：下行始终含进程与规则，total>=30 时额外含分组（带 →），且不含 "…"
         let lower120 = conn_lines(&c, 120)[1].to_string();
         assert!(
             lower120.contains("super-long"),
@@ -1553,11 +1569,23 @@ mod tests {
             lower60.contains('→') && lower60.contains("节点A"),
             "w=60 下行应含分组: {lower60}"
         );
-        let lower59 = conn_lines(&c, 59)[1].to_string();
-        assert!(!lower59.contains('…'), "w=59 下行不应含 …: {lower59}");
+        let lower35 = conn_lines(&c, 35)[1].to_string();
+        assert!(!lower35.contains('…'), "w=35 下行不应含 …: {lower35}");
         assert!(
-            !lower59.contains('→'),
-            "w=59 下行不应含分组（无 →）: {lower59}"
+            lower35.contains('→') && lower35.contains("节点A"),
+            "w=35 下行应含分组: {lower35}"
+        );
+        let lower30 = conn_lines(&c, 30)[1].to_string();
+        assert!(!lower30.contains('…'), "w=30 下行不应含 …: {lower30}");
+        assert!(
+            lower30.contains('→') && lower30.contains("节点A"),
+            "w=30 下行应含分组: {lower30}"
+        );
+        let lower29 = conn_lines(&c, 29)[1].to_string();
+        assert!(!lower29.contains('…'), "w=29 下行不应含 …: {lower29}");
+        assert!(
+            !lower29.contains('→'),
+            "w=29 下行不应含分组（无 →）: {lower29}"
         );
     }
 

@@ -18,11 +18,88 @@ use crate::ui::Page;
 #[derive(Default)]
 pub struct DashboardPage {
     popup: Option<MessagePopup>,
+    /// 首条可见连接索引（滚动位置），按连接数 clamp；Page::render 为 &mut self 故可内部更新。
+    conn_scroll: usize,
+    /// 上次渲染时连接框 inner.height（用于 PageUp/PageDown 计算 visible 行数）
+    last_height: u16,
 }
 
 impl DashboardPage {
     pub fn new() -> Self {
-        Self { popup: None }
+        Self {
+            popup: None,
+            conn_scroll: 0,
+            last_height: 0,
+        }
+    }
+
+    /// 连接框渲染（带滚动）：每连接 2 行，按 inner.height/2 计算 visible，title 显示 "连接 x/y"。
+    fn render_connections(&mut self, f: &mut Frame, area: Rect, st: &AppState) {
+        // 预计算标题与可见数（供 border 与 scroll 标题使用）
+        // 先用临时 Block 取 inner 以计算 visible；在真正渲染时复用同一 inner
+        let tmp_block = Block::new()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+        let tmp_inner = tmp_block.inner(area);
+        // 记录 last_height 供 PageUp/PageDown 在 handle_key 中使用（handle_key 无法拿到 area）
+        self.last_height = tmp_inner.height;
+        let total = st.connections.len();
+        let visible = if tmp_inner.height == 0 {
+            0
+        } else {
+            ((tmp_inner.height as usize) / 2).max(1)
+        };
+        let max_scroll = total.saturating_sub(visible);
+        let scroll = self.conn_scroll.min(max_scroll);
+        // clamp 回写，避免 End（MAX）后持续溢出
+        self.conn_scroll = scroll;
+        let title = if total == 0 {
+            " 连接 ".to_string()
+        } else {
+            format!(" 连接 {}/{} ", scroll + 1, total)
+        };
+        let block = Block::new()
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        if st.connections.is_empty() {
+            f.render_widget(
+                Paragraph::new(Line::from(vec![Span::styled(
+                    "暂无活动连接",
+                    Style::default().fg(Color::DarkGray),
+                )])),
+                inner,
+            );
+            return;
+        }
+        if inner.height == 0 || inner.width == 0 {
+            return;
+        }
+        let total_width = inner.width;
+        let mut lines: Vec<Line> = Vec::new();
+        // 跳过 scroll 条，从可见窗口首条开始取 visible 条
+        for c in st.connections.iter().skip(scroll).take(visible) {
+            let pair = conn_lines(c, total_width);
+            if lines.len() + pair.len() > inner.height as usize {
+                // inner.height 为奇数时仅推上行（已有奇数逻辑复用）
+                if lines.len() < inner.height as usize {
+                    if let Some(first) = pair.into_iter().next() {
+                        lines.push(first);
+                    }
+                }
+                break;
+            }
+            lines.extend(pair);
+        }
+        f.render_widget(Paragraph::new(lines), inner);
     }
 
     /// 开关双写：先持久化 settings.toml，再返回 PATCH 热切命令。
@@ -71,7 +148,7 @@ impl Page for DashboardPage {
         self.popup.is_some()
     }
 
-    fn handle_key(&mut self, key: KeyEvent, st: &mut AppState) -> Option<UiCommand> {
+    fn handle_key(&mut self, key: KeyEvent, _st: &mut AppState) -> Option<UiCommand> {
         // 弹窗优先
         match self.popup.take() {
             Some(mut msg) => {
@@ -80,12 +157,41 @@ impl Page for DashboardPage {
                 }
             }
             None => match key.code {
+                // ——— 滚动：优先级高于后续开关（Up/Down 不与全局切页冲突，全局仅 Tab/←→/数字） ———
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.conn_scroll = self.conn_scroll.saturating_sub(1);
+                    return None;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.conn_scroll = self.conn_scroll.saturating_add(1);
+                    return None;
+                }
+                KeyCode::PageUp => {
+                    let visible = (self.last_height as usize / 2).max(1);
+                    self.conn_scroll = self.conn_scroll.saturating_sub(visible);
+                    return None;
+                }
+                KeyCode::PageDown => {
+                    let visible = (self.last_height as usize / 2).max(1);
+                    self.conn_scroll = self.conn_scroll.saturating_add(visible);
+                    return None;
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    self.conn_scroll = 0;
+                    return None;
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    self.conn_scroll = usize::MAX;
+                    return None;
+                }
                 // 模式循环 rule → global → direct
                 KeyCode::Char('m') => {
-                    let next = next_mode(&st.runtime.mode);
-                    st.runtime.mode = next.to_string();
+                    // 需可变借用 AppState：重新获取 _st
+                    // _st 实际为 &mut AppState，未被 move，故可直接使用
+                    let next = next_mode(&_st.runtime.mode);
+                    _st.runtime.mode = next.to_string();
                     return Some(self.toggle_double_write(
-                        st,
+                        _st,
                         "模式",
                         |s| s.mode = next.to_string(),
                         serde_json::json!({"mode": next}),
@@ -93,18 +199,18 @@ impl Page for DashboardPage {
                 }
                 // TUN 热切
                 KeyCode::Char('t') => {
-                    let enable = !st.runtime.tun_enable;
+                    let enable = !_st.runtime.tun_enable;
                     // Windows：非管理员开 TUN → 警告（UAC 无法中途提升；不阻塞）
                     #[cfg(windows)]
                     if enable && !crate::service::process::is_elevated() {
-                        st.notice(
+                        _st.notice(
                             "[!] TUN 需要管理员权限：当前 TUI 未以管理员身份运行，mihomo 将无法创建 TUN 设备"
                                 .to_string(),
                         );
                     }
-                    st.runtime.tun_enable = enable;
+                    _st.runtime.tun_enable = enable;
                     return Some(self.toggle_double_write(
-                        st,
+                        _st,
                         "TUN",
                         |s| s.tun.enable = enable,
                         serde_json::json!({"tun": {"enable": enable}}),
@@ -112,10 +218,10 @@ impl Page for DashboardPage {
                 }
                 // IPv6 热切
                 KeyCode::Char('6') => {
-                    let enable = !st.runtime.ipv6;
-                    st.runtime.ipv6 = enable;
+                    let enable = !_st.runtime.ipv6;
+                    _st.runtime.ipv6 = enable;
                     return Some(self.toggle_double_write(
-                        st,
+                        _st,
                         "IPv6",
                         |s| s.ipv6 = enable,
                         serde_json::json!({"ipv6": enable}),
@@ -140,7 +246,7 @@ impl Page for DashboardPage {
             let [left, right] =
                 Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)])
                     .areas(body);
-            render_connections(f, left, st);
+            self.render_connections(f, left, st);
             render_right(f, right, st);
         } else {
             // 窄窗口：隐藏连接框，网络+内存占满全宽
@@ -273,7 +379,7 @@ pub(crate) fn upper_host_width(total: u16) -> usize {
 /// 预算规则：
 /// - lower_effective = total.saturating_sub(1) // 去掉首字符缩进
 /// - proc_w = (total*15/100).clamp(8,16)  // 复用原比例 8..16，始终显示进程
-/// - show_group = total >= 80
+/// - show_group = total >= CONNECTIONS_MIN_WIDTH (60)  // 与外层可见阈一致，左 pane 68 列时仍显示分组
 /// - group_w = if show_group { (total*15/100).clamp(8,16) } else {0}
 /// - sep_proc_rule = 2 ("  "), sep_rule_group = if show_group {3} else {0} (" → ")
 /// - rule_w = lower_effective.saturating_sub(proc_w + sep_proc_rule + sep_rule_group + group_w).max(4)
@@ -283,7 +389,7 @@ pub(crate) fn lower_widths(total: u16) -> (usize, usize, usize, bool) {
     let total_usize = total as usize;
     let lower_effective = (total as usize).saturating_sub(1);
     let proc_w = (total_usize * 15 / 100).clamp(8, 16);
-    let show_group = total >= 80;
+    let show_group = total >= CONNECTIONS_MIN_WIDTH;
     let group_w = if show_group {
         (total_usize * 15 / 100).clamp(8, 16)
     } else {
@@ -521,6 +627,8 @@ fn rate_row(label: &str, rate: u64, total: u64, color: Color, inner_width: u16) 
 }
 
 /// 左列：最近连接列表（start 降序，已在 app 层排序），每条连接占 2 行。
+/// 已重构为 `DashboardPage::render_connections`（带滚动与 "连接 x/y" 标题），此 free fn 仅作兼容保留，不再被调用。
+#[allow(dead_code)]
 fn render_connections(f: &mut Frame, area: Rect, st: &AppState) {
     let block = Block::new()
         .title(Span::styled(
@@ -1080,13 +1188,13 @@ mod tests {
 
     #[test]
     fn lower_widths_tests() {
-        // total=70 <80: show_group false
+        // total=70 >=60: show_group true（阈值已从 80 降至 60，保证左 pane 68 列时仍显示分组）
         let (proc_w, rule_w, group_w, show_group) = lower_widths(70);
         assert_eq!(proc_w, (70usize * 15 / 100).clamp(8, 16));
-        assert!(!show_group);
-        assert_eq!(group_w, 0);
+        assert!(show_group);
+        assert_eq!(group_w, (70usize * 15 / 100).clamp(8, 16));
         assert!(rule_w >= 4);
-        // total=85 >=80: show_group true
+        // total=85 >=60: show_group true
         let (proc_w, rule_w, group_w, show_group) = lower_widths(85);
         assert_eq!(proc_w, (85usize * 15 / 100).clamp(8, 16));
         assert!(show_group);
@@ -1104,18 +1212,21 @@ mod tests {
             .max(4);
         assert_eq!(rule_w, expected_rule);
         // 窄宽不 panic，且 proc 仍 8..16，rule 至少4
-        for w in [0u16, 1, 5, 20, 60] {
+        for w in [0u16, 1, 5, 20, 59] {
             let (pw, rw, gw, sg) = lower_widths(w);
             assert!((8..=16).contains(&pw), "w={w} proc 8..16");
             assert!(rw >= 4, "w={w} rule >=4");
-            if w < 80 {
+            if w < CONNECTIONS_MIN_WIDTH {
                 assert!(!sg, "w={w} show_group false");
                 assert_eq!(gw, 0, "w={w} group 0");
             }
         }
-        // 阈值边界 79/80
-        assert!(!lower_widths(79).3);
-        assert!(lower_widths(80).3);
+        // 60 及以上应显示分组
+        assert!(lower_widths(60).3);
+        assert!(lower_widths(61).3);
+        // 阈值边界 59/60
+        assert!(!lower_widths(59).3);
+        assert!(lower_widths(60).3);
     }
 
     #[test]
@@ -1146,7 +1257,7 @@ mod tests {
                 "total={total} 下行应含规则: {lower}"
             );
         }
-        // total>=80 时含分组，<80 不含分组
+        // total>=60 时含分组（阈值已降至 60，保证 120 终端下左 pane 68 列仍显示）
         let c2 = conn_with_rule(
             "example.com",
             "/usr/bin/curl",
@@ -1155,10 +1266,15 @@ mod tests {
             "DOMAIN",
             "payload",
         );
+        let lower60 = conn_lines(&c2, 60)[1].to_string();
+        assert!(
+            lower60.contains("节点A") && lower60.contains('→'),
+            "w=60 下行应含分组: {lower60}"
+        );
         let lower70 = conn_lines(&c2, 70)[1].to_string();
         assert!(
-            !lower70.contains("节点A") && !lower70.contains('→'),
-            "w=70 下行不应含分组: {lower70}"
+            lower70.contains("节点A") && lower70.contains('→'),
+            "w=70 下行应含分组: {lower70}"
         );
         let lower85 = conn_lines(&c2, 85)[1].to_string();
         assert!(
@@ -1169,6 +1285,12 @@ mod tests {
         assert!(
             lower120.contains("节点A"),
             "w=120 下行应含分组: {lower120}"
+        );
+        // 59 以下不含分组（极窄防御）
+        let lower59 = conn_lines(&c2, 59)[1].to_string();
+        assert!(
+            !lower59.contains("节点A") && !lower59.contains('→'),
+            "w=59 下行不应含分组: {lower59}"
         );
     }
 
@@ -1293,7 +1415,7 @@ mod tests {
             );
             assert!(!s.contains("节点A"), "w={w} 上行不应含分组: {s}");
         }
-        // 但双行的下行应含进程/分组（按宽度）：下行始终含进程与规则，total>=80 时额外含分组（带 →）
+        // 但双行的下行应含进程/分组（按宽度）：下行始终含进程与规则，total>=60 时额外含分组（带 →）
         let lower120 = conn_lines(&c, 120)[1].to_string();
         assert!(
             lower120.contains("super-long") || lower120.contains('…'),
@@ -1307,13 +1429,23 @@ mod tests {
         let lower70 = conn_lines(&c, 70)[1].to_string();
         assert!(lower70.contains("DIRECT"), "w=70 下行应含规则: {lower70}");
         assert!(
-            !lower70.contains('→'),
-            "w=70 下行不应含分组（无 →）: {lower70}"
+            lower70.contains('→') && lower70.contains("节点A"),
+            "w=70 下行应含分组（带 →）: {lower70}"
         );
         let lower85 = conn_lines(&c, 85)[1].to_string();
         assert!(
             lower85.contains('→') && lower85.contains("节点A"),
             "w=85 下行应含分组: {lower85}"
+        );
+        let lower60 = conn_lines(&c, 60)[1].to_string();
+        assert!(
+            lower60.contains('→') && lower60.contains("节点A"),
+            "w=60 下行应含分组: {lower60}"
+        );
+        let lower59 = conn_lines(&c, 59)[1].to_string();
+        assert!(
+            !lower59.contains('→'),
+            "w=59 下行不应含分组（无 →）: {lower59}"
         );
     }
 
@@ -1412,5 +1544,143 @@ mod tests {
         if crate::ui::widgets::display_width(&proc_raw) > cw.proc {
             assert!(proc_trunc2.ends_with('…'));
         }
+    }
+
+    // ---- 滚动相关 ----
+
+    #[test]
+    fn dashboard_scroll_up_down() {
+        let mut page = DashboardPage::new();
+        let mut st = test_state();
+        // 初始 0，Down 累增
+        assert_eq!(page.conn_scroll, 0);
+        page.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, 1);
+        page.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, 2);
+        // Up 递减
+        page.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, 1);
+        page.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, 0);
+        // 顶部 saturating_sub 不下溢
+        page.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, 0);
+    }
+
+    #[test]
+    fn dashboard_scroll_home_end_page() {
+        let mut page = DashboardPage::new();
+        let mut st = test_state();
+        page.last_height = 4; // visible =2
+        page.conn_scroll = 2;
+        // Home/g 回 0
+        page.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, 0);
+        page.conn_scroll = 2;
+        page.handle_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, 0);
+        // End/G 置 MAX（render 中 clamp）
+        page.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, usize::MAX);
+        page.conn_scroll = 0;
+        page.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, usize::MAX);
+        // PageDown/PageUp 按 visible 步进
+        page.conn_scroll = 0;
+        page.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, 2);
+        page.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, 4);
+        page.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, 2);
+        page.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, 0);
+        // PageUp 在顶部不下溢
+        page.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, 0);
+    }
+
+    #[test]
+    fn dashboard_scroll_clamp_with_connections() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        // 构造 5 条连接，inner.height=4 => visible=2，max_scroll=3
+        // 终端高度 7 => status 1 + body 6 => left height 6 => inner 4 => visible 2
+        let conns: Vec<ConnInfo> = (0..5)
+            .map(|i| conn_with(&format!("host{i}.com"), "/usr/bin/curl", vec!["PROXY"], "tcp"))
+            .collect();
+        let mut st = test_state();
+        st.connections = conns.clone();
+        // 用 TestBackend 驱动 render，验证 scroll clamp 与标题 "连接 x/y"
+        let backend = TestBackend::new(80, 7);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut page = DashboardPage::new();
+        // scroll=0 时应显示前 2 条（visible 2）
+        page.conn_scroll = 0;
+        // 人为设定 last_height=4 对应 visible 2，render 会以 tmp_inner 计算覆盖，但先测 clamp 逻辑：
+        // 5 条 - visible 2 = max 3，scroll=10 应被 clamp 到 3
+        page.conn_scroll = 10;
+        page.last_height = 4;
+        let max_scroll = st.connections.len().saturating_sub(2);
+        let clamped = page.conn_scroll.min(max_scroll);
+        assert_eq!(clamped, 3, "max_scroll=3, scroll 10 应 clamp 到 3");
+        // 实际渲染：设置 scroll=1，应跳过首条显示第2-3条
+        page.conn_scroll = 1;
+        terminal
+            .draw(|f| {
+                // body 区域足够大，保证 inner.height 能容纳 visible*2 行
+                // 直接调用 render_connections 的切片逻辑验证：skip(1).take(2) 得到 host1,host2
+                let visible = 2;
+                let scroll = page.conn_scroll.min(st.connections.len().saturating_sub(visible));
+                let slice: Vec<String> = st
+                    .connections
+                    .iter()
+                    .skip(scroll)
+                    .take(visible)
+                    .map(|c| c.meta.host.clone())
+                    .collect();
+                assert_eq!(slice, vec!["host1.com", "host2.com"]);
+                // 同时调用真实渲染不 panic
+                let area = f.area();
+                page.render(f, area, &st);
+            })
+            .unwrap();
+        // End 后渲染应 clamp 到 max_scroll
+        page.conn_scroll = usize::MAX;
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                page.render(f, area, &st);
+            })
+            .unwrap();
+        assert_eq!(page.conn_scroll, 3, "End(usize::MAX) 渲染后应 clamp 到 max_scroll 3");
+        // Up 后应回到 2
+        page.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &mut st);
+        assert_eq!(page.conn_scroll, 2);
+    }
+
+    #[test]
+    fn dashboard_scroll_keys_do_not_produce_command() {
+        let mut page = DashboardPage::new();
+        let mut st = test_state();
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('g'),
+            KeyCode::Char('G'),
+        ] {
+            let cmd = page.handle_key(KeyEvent::new(code, KeyModifiers::NONE), &mut st);
+            assert!(cmd.is_none(), "滚动键 {code:?} 不应产生 UiCommand");
+        }
+        // 非滚动键 m 仍应产生命令
+        let cmd = page.handle_key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE), &mut st);
+        assert!(cmd.is_some(), "m 应产生 PatchConfigs");
     }
 }
